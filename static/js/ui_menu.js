@@ -1,0 +1,343 @@
+// /static/js/ui_menu.js
+// Hamburger menu + slideouts + floating MyDoach button
+// DOES NOT TOUCH VIDEO LOADING. Uses your existing #videoInput and handleVideoUpload in app.js.
+
+(function () {
+  // Prevent double init if the script is included twice (or with different query strings)
+  if (window.__DOACH_MENU_INIT__) return;
+  window.__DOACH_MENU_INIT__ = true;
+
+  // ---------- Styles ----------
+  if (!document.getElementById('ui-menu-css')) {
+    const css = document.createElement('style');
+    css.id = 'ui-menu-css';
+    css.textContent = `
+      .doach-hamburger {
+        position: fixed; top: 12px; left: 12px; z-index: 10050;
+        width: 38px; height: 38px; border-radius: 8px;
+        display:flex; align-items:center; justify-content:center;
+        background: rgba(0,0,0,.75); color:#fff; border:1px solid rgba(255,255,255,.15);
+        cursor:pointer; user-select:none;
+      }
+      .doach-hamburger:hover { background: rgba(0,0,0,.88); }
+      .doach-drawer {
+        position: fixed; top:0; bottom:0; left:0; width: 300px; z-index:10040;
+        background: rgba(12,12,14,.98); color:#fff; border-right:1px solid rgba(255,255,255,.12);
+        transform: translateX(-110%); transition: transform .22s ease-out; padding: 12px;
+        box-shadow: 0 10px 30px rgba(0,0,0,.35);
+      }
+      .doach-drawer.open { transform: translateX(0); }
+      .doach-drawer h3 { margin: 4px 10px 10px; font: 600 14px/1.2 system-ui; opacity:.9; letter-spacing:.04em; }
+      .doach-menu { list-style:none; margin:0; padding:0; }
+      .doach-menu > li { margin: 4px 0; }
+      .doach-item {
+        width:100%; text-align:left; background:transparent; border:0; color:#fff;
+        padding:10px 12px; border-radius:8px; cursor:pointer; font:600 14px system-ui;
+      }
+      .doach-item:hover { background:rgba(255,255,255,.08); }
+      .doach-sidepanel {
+        position: fixed; top:0; right:0; bottom:0; width:420px; z-index:10045;
+        background: rgba(14,14,18,.98); color:#fff; transform: translateX(110%);
+        transition: transform .22s ease-out; border-left:1px solid rgba(255,255,255,.12);
+        box-shadow: -8px 0 28px rgba(0,0,0,.35);
+      }
+      .doach-sidepanel.open { transform: translateX(0); }
+      .doach-panel-head { display:flex; align-items:center; justify-content:space-between; padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.12); font: 600 14px system-ui; }
+      .doach-panel-body { padding:12px; overflow:auto; height: calc(100% - 48px); }
+      .doach-field { margin:10px 0; }
+      .doach-field label { display:block; font:600 12px system-ui; opacity:.8; margin-bottom:4px; }
+      .doach-field input[type="text"], .doach-field input[type="number"], .doach-field select {
+        width:100%; padding:8px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.15);
+        background:#101015; color:#fff;
+      }
+      .doach-range { width:100%; }
+      .doach-row { display:flex; gap:10px; }
+      .doach-row .col { flex:1; }
+      .doach-btn { background:#2d6cff; color:#fff; border:0; padding:8px 10px; border-radius:8px; cursor:pointer; font-weight:600; }
+      .doach-btn.ghost { background:transparent; border:1px solid rgba(255,255,255,.22); }
+      .doach-actions { display:flex; gap:8px; flex-wrap:wrap; }
+      .doach-list { border:1px solid rgba(255,255,255,.12); border-radius:8px; overflow:hidden; }
+      .doach-list-item { padding:8px 10px; border-bottom:1px solid rgba(255,255,255,.08); display:flex; align-items:center; justify-content:space-between;}
+      .doach-list-item:last-child { border-bottom:none; }
+      .doach-floating-mydoach {
+        position: fixed; right: 16px; bottom: 88px; z-index: 10050;
+        background: rgba(0,0,0,.78); color:#fff; border:1px solid rgba(255,255,255,.15);
+        padding:10px 12px; border-radius: 999px; cursor:pointer; font:600 13px system-ui;
+      }
+      .doach-floating-mydoach:hover { background: rgba(0,0,0,.9); }
+    `;
+    document.head.appendChild(css);
+  }
+
+  // ---------- helpers ----------
+  const __panels = new Set();
+
+  // ——— Close drawer + any open sidepanels ———
+  let __drawer = null;
+  function closeAllMenus(reason='') {
+    __panels.forEach(p => p.openClose?.());
+    if (__drawer) __drawer.classList.remove('open');
+  }
+
+  // ——— Auto-close menu when the video becomes ready ———
+  let __doachAutoCloseWired = false;
+  function wireVideoAutoClose() {
+    const video = getVideoEl();
+    if (!video) return;
+
+    // don't double-wire
+    if (__doachAutoCloseWired) return;
+    __doachAutoCloseWired = true;
+
+    const READY = HTMLMediaElement.HAVE_CURRENT_DATA;
+
+    const cleanup = () => {
+      ['loadedmetadata','loadeddata','canplay','playing'].forEach(ev => {
+        try { video.removeEventListener(ev, onReady, opts); } catch {}
+      });
+      try { obs.disconnect(); } catch {}
+    };
+
+    const closeNow = (reason) => {
+      closeAllMenus(reason);
+      cleanup();
+      __doachAutoCloseWired = false; // allow future re-wire after src change
+    };
+
+    const onReady = () => closeNow('video-ready');
+
+    const opts = { once: true };
+    ['loadedmetadata','loadeddata','canplay','playing'].forEach(ev => {
+      video.addEventListener(ev, onReady, opts);
+    });
+
+    // If menu mounted after video was already ready, close immediately.
+    if (video.readyState >= READY) {
+      Promise.resolve().then(() => closeNow('video-already-ready'));
+    }
+
+    // Re-arm on src/srcObject change (file picker, programmatic loads)
+    const obs = new MutationObserver(() => {
+      cleanup();
+      __doachAutoCloseWired = false;
+      setTimeout(wireVideoAutoClose, 0); // attach to the next load cycle
+    });
+    obs.observe(video, { attributes: true, attributeFilter: ['src', 'srcObject'] });
+  }
+
+
+  // ——— Find the video element the app uses ———
+  function getVideoEl(){
+    return document.getElementById('videoPlayer') || document.querySelector('video');
+  }
+
+  function el(tag, attrs={}, ...kids){
+    const d = document.createElement(tag);
+    Object.entries(attrs||{}).forEach(([k,v])=>{
+      if (k==='style' && typeof v==='object') Object.assign(d.style, v);
+      else if (k.startsWith('on') && typeof v==='function') d.addEventListener(k.slice(2), v);
+      else if (v!=null) d.setAttribute(k, v);
+    });
+    kids.flat().forEach(k => d.append(k instanceof Node ? k : document.createTextNode(String(k))));
+    return d;
+  }
+  function closeOnEsc(node, closeFn){
+    const onKey = (e)=>{ if (e.key==='Escape') closeFn(); };
+    node.__esc = onKey; window.addEventListener('keydown', onKey);
+    node.__unesc = ()=> window.removeEventListener('keydown', onKey);
+  }
+  function makeSidePanel(title){
+    const panel = el('div', {class:'doach-sidepanel', role:'dialog', 'aria-label':title});
+    const head = el('div', {class:'doach-panel-head'},
+      el('div', {}, title),
+      el('button', {class:'doach-btn ghost', onclick:()=>{ panel.classList.remove('open'); panel.__unesc?.(); }}, 'Close')
+    );
+    const body = el('div', {class:'doach-panel-body'});
+    panel.append(head, body);
+    document.body.appendChild(panel);
+    panel.open = ()=>{ panel.classList.add('open'); closeOnEsc(panel, panel.openClose); };
+    panel.openClose = ()=>{ panel.classList.remove('open'); panel.__unesc?.(); };
+    panel.setBody = (n)=>{ body.innerHTML=''; body.append(n); };
+    __panels.add(panel);
+    return panel;
+  }
+
+  // ---------- Panels ----------
+  async function openContentPanel(){
+    const panel = (openContentPanel.panel ||= makeSidePanel('Content'));
+    const body = el('div');
+
+    // Try server list, else local list
+    let videos = [];
+    try { const r = await fetch('/videos'); if (r.ok) { const j = await r.json(); videos = Array.isArray(j.videos)? j.videos: []; } } catch {}
+    try { const loc = JSON.parse(localStorage.getItem('doachVideos')||'[]'); if (!videos.length && Array.isArray(loc)) videos = loc; } catch {}
+
+    function triggerFilePicker(){
+      const input = document.getElementById('videoInput');
+      if (!input) { alert('Upload control not found on this page.'); return; }
+      // close panels so the picker doesn’t sit under UI
+      __panels.forEach(p=>p.openClose?.());
+      input.click();
+    }
+
+    function loadViaURL(u){
+      if (!u) return alert('No URL for this item.');
+      // We DO NOT set video.src here — app.js owns that logic.
+      // Just put the URL into the file picker (optional) or dispatch a custom event if you prefer.
+      window.dispatchEvent(new CustomEvent('content:url-picked', { detail: { url: u } }));
+      __panels.forEach(p=>p.openClose?.());
+    }
+
+    const list = el('div', {class:'doach-list'},
+      ...(videos.length ? videos.map(v =>
+        el('div', {class:'doach-list-item'},
+          el('div', {}, v.name || v.filename || 'Untitled'),
+          el('div', {},
+            el('button', {class:'doach-btn ghost', onclick:()=>loadViaURL(v.url||v.path)}, 'Use URL')
+          )
+        )
+      ) : [el('div', {class:'doach-list-item'}, 'No saved videos yet')])
+    );
+
+    body.append(
+      el('div', {class:'doach-field'}, el('label', {}, 'Recent'), list),
+      el('div', {style:{height:'10px'}}),
+      el('div', {class:'doach-actions'},
+        el('button', {class:'doach-btn', onclick:triggerFilePicker}, 'Upload / Load New')
+      )
+    );
+    panel.setBody(body); panel.open();
+  }
+
+  function field(label, input){ return el('div', {class:'doach-field'}, el('label', {}, label), input); }
+  async function openMyDoachPanel(){
+    const panel = (openMyDoachPanel.panel ||= makeSidePanel('My Doach'));
+    const prefs = (window.doachGetPrefs?.() || {voice:'alloy', tts:'openai', speed:1, pitch:1, volume:1, bassDb:0, trebleDb:0, lang:'en-US'});
+    const body = el('div');
+
+    const ttsSel   = el('select', {}, ...['openai','web'].map(v=> el('option',{value:v, selected:(prefs.tts===v)}, v)));
+    const voiceInp = el('input', {type:'text', value:(prefs.voice||'alloy')});
+    const speed    = el('input', {type:'range', class:'doach-range', min:'0.5', max:'1.5', step:'0.05', value: prefs.speed??1});
+    const pitch    = el('input', {type:'range', class:'doach-range', min:'0.5', max:'2.0', step:'0.05', value: prefs.pitch??1});
+    const volume   = el('input', {type:'range', class:'doach-range', min:'0',   max:'1.0', step:'0.05', value: prefs.volume??1});
+    const bassDb   = el('input', {type:'number', value: prefs.bassDb??0, step:'1'});
+    const trebDb   = el('input', {type:'number', value: prefs.trebleDb??0, step:'1'});
+    const langSel  = el('input', {type:'text', value: prefs.lang || 'en-US'});
+
+    const presetSel = el('select');
+    const nameInp   = el('input', {type:'text', placeholder:'Preset name'});
+    async function refreshPresets(){
+      presetSel.innerHTML = '';
+      const presets = (await window.doachLoadPresets?.()) || [];
+      presetSel.append(...[el('option',{value:''}, '— Select preset —'), ...presets.map(p => el('option', {value:p.name}, p.name))]);
+    }
+    await refreshPresets();
+
+    presetSel.addEventListener('change', async ()=>{
+      if (!presetSel.value) return;
+      const presets = (await window.doachLoadPresets?.()) || [];
+      const p = presets.find(x=>x.name===presetSel.value);
+      if (!p) return;
+      ttsSel.value = p.tts || prefs.tts;
+      voiceInp.value = p.voice || prefs.voice;
+      speed.value = p.speed ?? 1;
+      pitch.value = p.pitch ?? 1;
+      volume.value = p.volume ?? 1;
+      bassDb.value = p.bassDb ?? 0;
+      trebDb.value = p.trebleDb ?? 0;
+      langSel.value = p.lang || 'en-US';
+    });
+
+    const rowEq = el('div', {class:'doach-row'},
+      el('div', {class:'col'}, field('Bass dB', bassDb)),
+      el('div', {class:'col'}, field('Treble dB', trebDb))
+    );
+
+    const actions = el('div', {class:'doach-actions'},
+      el('button', {class:'doach-btn', onclick:applyNow}, 'Apply to Session'),
+      el('button', {class:'doach-btn ghost', onclick:testVoice}, 'Test Voice'),
+      el('button', {class:'doach-btn', onclick:savePreset}, 'Save as Preset'),
+      el('button', {class:'doach-btn ghost', onclick:refreshPresets}, 'Reload Presets')
+    );
+
+    body.append(
+      field('TTS Engine', ttsSel),
+      field('Voice', voiceInp),
+      field('Language', langSel),
+      field('Speed', speed),
+      field('Pitch (Web TTS only)', pitch),
+      field('Volume', volume),
+      rowEq,
+      el('div', {class:'doach-field'}, el('label', {}, 'Presets'), el('div', {class:'doach-row'},
+        el('div', {class:'col'}, presetSel),
+        el('div', {class:'col'}, nameInp)
+      )),
+      actions
+    );
+
+    panel.setBody(body); panel.open();
+
+    function readUI(){
+      return {
+        tts: ttsSel.value,
+        voice: voiceInp.value.trim() || 'alloy',
+        speed: Number(speed.value),
+        pitch: Number(pitch.value),
+        volume: Number(volume.value),
+        bassDb: Number(bassDb.value),
+        trebleDb: Number(trebDb.value),
+        lang: (langSel.value||'en-US').trim()
+      };
+    }
+    function applyNow(){ const p = readUI(); window.doachSetPrefs?.(p); window.doachSpeak?.('Voice settings applied.'); }
+    function testVoice(){ const p = readUI(); window.doachSetPrefs?.(p); window.doachSpeak?.('This is your Doach voice.'); }
+    async function savePreset(){
+      const name = (nameInp.value||'').trim();
+      if (!name) { alert('Enter a preset name'); return; }
+      const ok = await window.doachSavePreset?.({ name, ...readUI() });
+      if (ok) { nameInp.value=''; await refreshPresets(); alert('Preset saved.'); }
+    }
+  }
+
+  // ---------- Mount ----------
+  function mountHamburgerMenu(){
+    if (document.getElementById('doach-menu-mounted')) return;
+    const marker = document.createElement('meta'); marker.id = 'doach-menu-mounted'; document.head.appendChild(marker);
+
+    const drawer = el('div', {class:'doach-drawer'},
+      el('h3', {}, 'Menu'),
+      el('ul', {class:'doach-menu'},
+        el('li', {}, el('button', {class:'doach-item', onclick:openContentPanel}, 'Content')),
+        el('li', {}, el('button', {class:'doach-item', onclick:openMyDoachPanel}, 'My Doach')),
+      )
+    );
+    document.body.appendChild(drawer);
+    __drawer = drawer;                    // << keep a handle so we can close it
+
+    const btn = el('div', {class:'doach-hamburger', title:'Menu (M)', onclick:toggle}, '☰');
+    document.body.appendChild(btn);
+
+    window.addEventListener('keydown', (e)=>{ if ((e.key||'').toLowerCase()==='m') toggle(); });
+    function toggle(){ drawer.classList.toggle('open'); }
+
+    const floater = el('button', {class:'doach-floating-mydoach', onclick:openMyDoachPanel}, 'MyDoach ⚙️');
+    document.body.appendChild(floater);
+
+    // 🔗 Auto-close the menu when the video becomes ready / changes source
+    wireVideoAutoClose();                 // << add this line
+  }
+
+
+  // Expose for non-module usage and export for module usage
+  window.mountHamburgerMenu = mountHamburgerMenu;
+  try { if (typeof module !== 'undefined') module.exports = { mountHamburgerMenu }; } catch {}
+  // Auto-mount after DOM ready
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => mountHamburgerMenu());
+  } else {
+    mountHamburgerMenu();
+  }
+})();
+
+// For ESM importers
+export function mountHamburgerMenu(){ window.mountHamburgerMenu?.(); }

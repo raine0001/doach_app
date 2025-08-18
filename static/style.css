@@ -1,0 +1,565 @@
+
+/* sidebar */
+/* Import Google font - Poppins */
+@import url("https://fonts.googleapis.com/css2?family=Poppins:wght@200;300;400;500;600;700&display=swap");
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: "Poppins", sans-serif;
+}
+.sidebar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  height: 100%;
+  max-height: 100%;
+  width: 240px;
+  background: transparent;
+  padding: 2px 2px;
+  box-shadow: -2px 0 4px rgba(0, 0, 0, 0.1);
+  transition: all 0.3s ease;
+  overflow: hidden;
+  z-index: 1000;
+}
+
+.sidebar.locked {
+  width: 55px;
+}
+
+.sidebar.locked .logo_name,
+.sidebar.locked .title,
+.sidebar.locked .data_text {
+  display: none;
+}
+
+.sidebar.locked .link span {
+  display: none;
+}
+
+.sidebar.locked .link i {
+  justify-content: center;
+}
+
+/* Limit sidebar height to video-box */
+.video-box {
+  position: relative;
+  width: 1920px;
+  height: 1080px;
+  overflow: hidden;
+  margin: 0 auto;
+}
+
+.video-box .sidebar {
+  height: 100%;
+  position: absolute;
+  top: 0;
+  right: 0;
+  border-radius: 0;
+}
+
+.video-box video,
+.video-box canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 1920px;
+  height: 1080px;
+  object-fit: cover;
+  display: block;
+}
+
+.end-btn {
+  z-index: 5;
+  position: relative;
+}
+
+body {
+  min-height: 100vh;
+  background: #eef5fe;
+}
+/* Pre css */
+.flex {
+  display: flex;
+  align-items: center;
+}
+.nav_image {
+  display: flex;
+  min-width: 55px;
+  justify-content: center;
+}
+.nav_image img {
+  height: 35px;
+  width: 35px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+.logo_items {
+  gap: 8px;
+}
+.logo_name {
+  font-size: 22px;
+  color: oklab(74.945% -0.03162 0.15059);
+  font-weight: 500px;
+  transition: all 0.3s ease;
+}
+.sidebar.close .logo_name,
+.sidebar.close #lock-icon,
+.sidebar.close #sidebar-close {
+  opacity: 0;
+  pointer-events: none;
+}
+#lock-icon,
+#sidebar-close {
+  padding: 1px;
+  color: oklab(74.945% -0.03162 0.15059);
+  font-size: 25px;
+  cursor: pointer;
+  margin-left: -4px;
+  transition: all 0.3s ease;
+}
+#sidebar-close {
+  display: none;
+  color: #333;
+}
+.menu_container {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  margin-top: 40px;
+  overflow-y: auto;
+  height: calc(100% - 250px);
+}
+.menu_container::-webkit-scrollbar {
+  display: none;
+}
+.menu_title {
+  position: relative;
+  height: 50px;
+  width: 55px;
+}
+.menu_title .title {
+  margin-left: 15px;
+  transition: all 0.3s ease;
+}
+.sidebar.close .title {
+  opacity: 0;
+}
+.menu_title .line {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  height: 3px;
+  width: 20px;
+  border-radius: 25px;
+  background: #2e2c2c;
+  transition: all 0.3s ease;
+}
+.menu_title .line {
+  opacity: 0;
+}
+.sidebar.close .line {
+  opacity: 1;
+}
+.item {
+  list-style: none;
+}
+.link {
+  text-decoration: none;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  color: #837d4b;
+}
+.link:hover {
+  color: #fff;
+  background-color: oklab(74.945% -0.03162 0.15059);
+}
+.link span {
+  white-space: nowrap;
+}
+.link i {
+  height: 50px;
+  min-width: 55px;
+  display: flex;
+  font-size: 22px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+.sidebar_profile {
+  padding-top: 15px;
+  margin-top: 15px;
+  gap: 15px;
+  border-top: 2px solid rgba(0, 0, 0, 0.1);
+}
+.sidebar_profile .name {
+  font-size: 18px;
+  color: #afaeae;
+}
+.sidebar_profile .email {
+  font-size: 15px;
+  color: #a5a2a2;
+}
+
+/* Responsive */
+@media screen and (max-width: 1100px) {
+  .navbar {
+    left: 65%;
+  }
+}
+@media screen and (max-width: 800px) {
+  .sidebar {
+    left: 0;
+    z-index: 100;
+  }
+  .sidebar.close {
+    left: -100%;
+  }
+  #sidebar-close {
+    display: block;
+  }
+  #lock-icon {
+    display: none;
+  }
+  .navbar {
+    left: 0;
+    max-width: 100%;
+    transform: translateX(0%);
+  }
+  #sidebar-open {
+    display: block;
+  }
+}
+
+/* end sidebar */
+
+
+/* ===========================
+   Overlay & Layout
+   =========================== */
+
+/* 🔔 Centered prompt message */
+#overlayPrompt {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: white;
+  background: rgba(0, 0, 0, 0.6);
+  padding: 12px 20px;
+  font-size: 1rem;
+  font-weight: 600;
+  border-radius: 6px;
+  z-index: 10;
+  text-align: center;
+  pointer-events: none;
+}
+
+/* 🎥 Video container setup */
+.video-frame {
+  position: relative;
+  width: 100%;
+  max-width: 100vw;
+  aspect-ratio: 16 / 9;
+  overflow: hidden;
+}
+
+#videoPlayer {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: auto;
+  object-fit: cover;  /* or contain, if needed */
+  z-index: 1;
+}
+
+canvas#overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 2;
+  display: block;
+}
+
+/* 📊 Stats bar underlay */
+.session-stats {
+  border-bottom-left-radius: 0 !important;
+  border-bottom-right-radius: 0 !important;
+}
+
+
+
+
+/* General Layout */
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #111;
+  color: #fff;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.prompt-message {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    color: yellow;
+    font-size: 1.1rem;
+    font-weight: bold;
+    background: rgba(0,0,0,0.3);
+    padding: 0.5rem 1rem;
+    border-radius: 8px;
+    z-index: 4;
+    pointer-events: none;
+}
+
+
+/* Load Video mgt content container */
+main {
+  flex: 1;
+  max-width: auto;
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+
+/* session menu header-footer */
+.session-status,
+.session-stats {
+  position: absolute;
+  z-index: 3;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  text-align: center;
+}
+
+.session-status {
+  position: absolute;
+  top: 10px;
+  width: 100%;
+  text-align: center;
+  color: #fff;
+  font-weight: 600;
+  font-size: 0.9rem; /* ⬅️ slightly smaller */
+  text-shadow: 0 0 4px rgba(0,0,0,0.6);
+  z-index: 20;
+  display: none; /* hidden by default */
+}
+
+.session-stats {
+  position: absolute;
+  bottom: 0;
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.5rem 0.75rem;
+  background: rgba(20, 20, 20, 0.85);
+  backdrop-filter: blur(6px);
+  color: white;
+  font-size: 0.75rem; /* ⬅️ Smaller font */
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  box-sizing: border-box;
+}
+
+
+/* Controls & Info */
+.controls {
+  margin-top: 1rem;
+  background: #222;
+  padding: 1rem;
+  border-radius: 8px;
+  z-index: 3;
+}
+
+.controls button {
+  font-size: 1rem;
+  padding: 0.5rem 1rem;
+  margin: 0.25rem;
+}
+
+.promptBar,
+.shotInfo {
+  width: 100%;
+  margin-top: 1rem;
+  background: #222;
+  padding: 1rem;
+  border-radius: 8px;
+}
+
+.shotInfo {
+  font-size: 0.9rem;
+  background: #1b1b1b;
+  color: #ccc;
+}
+
+/* Shot Table */
+#shotTable {
+  width: 100%;
+  margin-top: 1rem;
+  border-collapse: collapse;
+  z-index: 9;
+}
+
+#shotTable th,
+#shotTable td {
+  padding: 6px 8px;
+  border: 1px solid #333;
+  text-align: center;
+}
+
+#shotTable th {
+  background: #222;
+}
+
+#shotTable td {
+  background: #181818;
+}
+
+/* Responsive Behavior */
+@media screen and (max-width: 768px) {
+  body {
+    font-size: 15px;
+  }
+
+  nav {
+    gap: 1rem;
+  }
+
+  .controls button {
+    font-size: 0.9rem;
+    padding: 0.4rem 0.8rem;
+  }
+
+  main {
+    padding: 0.75rem;
+  }
+
+  #videoWrapper {
+    max-width: 100%;
+  }
+}
+
+.session-container {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  padding: 1rem;
+  background: #000;
+}
+
+.stat {
+  flex: 1 1 60px;
+  text-align: center;
+}
+
+.stat span {
+  font-weight: 600;
+  font-size: 1rem;
+  display: block;
+}
+
+.end-btn {
+  flex: 1 1 auto;
+  background: oklab(74.945% -0.03162 0.15059);
+  border: none;
+  padding: 0.4rem 0.9rem;
+  font-weight: bold;
+  font-size: 0.8rem;
+  border-radius: 10px;
+  color: #000;
+  cursor: pointer;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.end-btn:hover {
+  background: #e0a800;
+}
+
+/* === DOACH HUD (video overlay UI) ======================================= */
+:root{
+  --hud-bg: rgba(10,10,10,.70);
+  --hud-border: rgba(255,255,255,.14);
+  --hud-text: #fff;
+  --hud-accent: #ffcc33;
+  --hud-radius: 16px;
+}
+
+#hudRoot{
+  position:absolute; inset:0;
+  pointer-events:none;            /* default: overlay shouldn't eat clicks */
+  z-index:10000;
+}
+
+.hud-card{
+  background: var(--hud-bg);
+  color: var(--hud-text);
+  border: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
+  box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  -webkit-backdrop-filter: blur(6px) saturate(140%);
+  backdrop-filter: blur(6px) saturate(140%);
+}
+
+.hud-pill{
+  display:flex; align-items:center; gap:16px;
+  padding: 12px 16px;
+}
+
+.hud-metric{
+  display:flex; flex-direction:column; align-items:center;
+  min-width:84px;
+}
+.hud-metric .num{ font: 700 18px/1.1 system-ui, sans-serif; }
+.hud-metric .label{ font: 500 11px/1.1 system-ui, sans-serif; opacity:.85; }
+
+.hud-btn{
+  pointer-events:auto;
+  border:0; border-radius:999px;
+  padding:10px 16px; font:600 14px/1 system-ui;
+  color:#1a1a1a; background: var(--hud-accent);
+  cursor:pointer;
+}
+
+.video-controls{
+  pointer-events:auto;
+}
+
+.vc-btn{
+  width:36px; height:36px; border-radius:10px; border:0;
+  background:#1c1c1c; color:#eee; cursor:pointer;
+  display:grid; place-items:center; font-size:16px;
+}
+.vc-btn[data-active="1"]{ background:#253d20; color:#d0ffd0; }
+
+/* Floating shot table panel */
+#shotTableHUD{
+  position:absolute; left:50%; transform:translateX(-50%);
+  bottom:96px; /* sits above the HUD bar */
+  width:min(92%, 980px);
+  max-height:42%;
+  overflow:auto;
+  padding:10px;
+  pointer-events:auto;
+}
+#shotTableHUD table{
+  width:100%; border-collapse:collapse; font: 13px system-ui;
+  color:#eee;
+}
+#shotTableHUD th, #shotTableHUD td{
+  padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08);
+}
+#shotTableHUD th{ text-align:left; opacity:.8; font-weight:600; }
+
+

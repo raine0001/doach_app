@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Frame Extractor UI</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+    #videoInput, #folderInput {
+      margin-bottom: 10px;
+    }
+    #frameCanvas {
+      border: 2px solid #333;
+      cursor: crosshair;
+      width: 100%;
+      max-width: 1280px;
+      height: auto;
+    }
+    .controls {
+      margin-top: 20px;
+    }
+    button {
+      margin-right: 10px;
+    }
+    .category-btn {
+      margin: 5px;
+      padding: 5px 10px;
+      border: 1px solid #ccc;
+      cursor: pointer;
+    }
+    .category-btn.active {
+      background-color: #4caf50;
+      color: white;
+    }
+  </style>
+</head>
+<body>
+  <h2>🎥 DOACH Frame Extractor + YOLO Labeler</h2>
+
+  <input type="file" id="videoInput" accept="video/*" />
+  <button onclick="extractFrames()">Extract Frames</button>
+  <select id="folderInput"></select>
+  <button onclick="loadImages()">Load</button>
+
+  <div class="controls">
+    <label><input type="checkbox" id="gridToggle" checked> 🔳 Show Grid</label>
+    <label>Size: <span id="gridSizeValue"></label>
+    <input type="range" id="gridSizeSlider" min="5" max="100" step="5" value="10">
+  </div>
+
+  <div class="controls">
+    <button onclick="thenNext()">▶️ Next</button>
+    <button onclick="loadLabels(true)">🤖 Auto-Detect</button>
+    <button onclick="loadPrevious()">⏮ Prev</button>
+    <button onclick="saveLabels()">💾 Save</button>
+    <button onclick="clearBoxes()">🧹 Clear</button>
+    <button onclick="startTraining()">🚀 Train</button>
+  </div>
+  
+  <div class="controls">
+  <label for="confSlider">🔍 Confidence: <span id="confValue">0.05</span></label>
+  <input type="range" id="confSlider" min="0.01" max="0.7" step="0.01" value="0.05" style="vertical-align: middle;">
+  </div>
+  
+  <div><h4 id="currentFrameInfo"></h4>
+  <h4 id="currentFrameInfo"></h4>
+  <h5 id="currentFrameStatus" style="margin-top: -10px; color: #777;"></h5>
+  </div>
+  
+  <div class="controls">
+    <span>Choose label:</span>
+    <span id="categories"></span>
+  </div>
+
+  <div id="canvasWrapper" style="position: relative; width: 1280px; height: 720px;">
+    <canvas id="gridCanvas" width="1280" height="720"
+            style="position: absolute; top: 0; left: 0; z-index: 0; pointer-events: none;"></canvas>
+
+    <canvas id="frameCanvas" width="1280" height="720"
+            style="position: absolute; top: 0; left: 0; z-index: 1;"></canvas>
+  </div>
+
+  
+
+
+  <h3>📋 Label Data</h3>
+  <table id="labelTable" border="1" style="border-collapse: collapse; margin-top: 10px;">
+    <thead>
+      <tr>
+        <th>Label</th>
+        <th>X</th>
+        <th>Y</th>
+        <th>W</th>
+        <th>H</th>
+        <th>Source</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+ 
+  <script>
+  const categories = ['basketball', 'hoop', 'player', 'backboard', 'net'];
+  const colorMap = {
+    basketball: 'red', hoop: 'lime', net: 'orange', backboard: 'purple', player: 'cyan'
+  };
+
+  let currentLabel = categories[0];
+  let folderName = '', images = [], index = 0, boxes = [];
+  let startX = 0, startY = 0, isDrawing = false;
+
+  const canvas = document.getElementById('frameCanvas');
+  const ctx = canvas.getContext('2d');
+
+  const gridSlider = document.getElementById('gridSizeSlider');
+  const gridValue = document.getElementById('gridSizeValue');
+  const gridToggle = document.getElementById('gridToggle');
+
+  // update grid size value
+  function updateGrid() {
+    if (!gridToggle.checked) {
+      document.getElementById('gridCanvas').style.display = 'none';
+      return;
+    }
+    document.getElementById('gridCanvas').style.display = 'block';
+    const spacing = parseInt(gridSlider.value);
+    drawGrid(spacing);
+  }
+
+  gridSlider.addEventListener('input', () => {
+    gridValue.textContent = gridSlider.value;
+    updateGrid();
+  });
+
+  gridToggle.addEventListener('change', updateGrid);
+
+
+
+  // Add grid to background to object mapping
+  function drawGrid(gridSize = 15) {
+    const gridCanvas = document.getElementById('gridCanvas');
+    const ctx = gridCanvas.getContext('2d');
+    ctx.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
+
+    const strokeColor = 'rgba(200, 200, 200, 0.4)'; // light gray
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = 1;
+
+    for (let x = 0; x <= gridCanvas.width; x += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(x, 0);
+      ctx.lineTo(x, gridCanvas.height);
+      ctx.stroke();
+    }
+
+    for (let y = 0; y <= gridCanvas.height; y += gridSize) {
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(gridCanvas.width, y);
+      ctx.stroke();
+    }
+  }
+
+  
+  function setupCategories() {
+    const container = document.getElementById('categories');
+    categories.forEach(cat => {
+      const btn = document.createElement('button');
+      btn.className = 'category-btn';
+      btn.innerText = cat;
+      btn.onclick = () => {
+        currentLabel = cat;
+        document.querySelectorAll('.category-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+      };
+      container.appendChild(btn);
+    });
+    container.children[0].classList.add('active');
+  }
+  setupCategories();
+
+  canvas.addEventListener('mousedown', e => {
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = canvas.width / rect.width;
+    const scaleY = canvas.height / rect.height;
+    startX = (e.clientX - rect.left) * scaleX;
+    startY = (e.clientY - rect.top) * scaleY;
+    isDrawing = true;
+  });
+
+  canvas.addEventListener('mousemove', e => {
+    if (!isDrawing) return;
+    drawBoxes(true, e);
+  });
+
+  async function extractFrames() {
+    const file = document.getElementById('videoInput').files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('video', file);
+    const res = await fetch('/upload', { method: 'POST', body: formData });
+    const data = await res.json();
+    folderName = data.video.split('/').pop().split('.')[0];
+    await fetch(`/extract_frames`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filename: data.video.split('/').pop() })
+    });
+    await loadImages();
+  }
+
+  async function loadImages() {
+    folderName = document.getElementById('folderInput').value || folderName;
+    const res = await fetch(`/list_frames/${folderName}`);
+    const data = await res.json();
+    images = data.frames;
+    index = 0;
+    await loadLabels();
+    drawBoxes();
+  }
+
+  async function thenNext() {
+    if (index < images.length - 1) {
+      index++;
+      await loadLabels();
+      drawBoxes();
+    }
+  }
+
+  async function loadPrevious() {
+    if (index > 0) {
+      index--;
+      await loadLabels();
+      drawBoxes();
+    }
+  }
+
+  function clearBoxes() {
+    boxes = [];
+    drawBoxes();
+  }
+
+  // ✅ Add console confirmation in saveLabels
+  async function saveLabels() {
+  const imgName = images[index];
+  const txtName = imgName.replace(/\.(jpg|png)$/, '.txt');
+
+  const content = boxes
+    .filter(box => (
+      categories.includes(box.label) &&
+      Number.isFinite(box.x) && Number.isFinite(box.y) &&
+      Number.isFinite(box.w) && Number.isFinite(box.h) &&
+      box.w > 0 && box.h > 0
+    ))
+    .map(box => {
+      const x_center = (box.x + box.w / 2) / canvas.width;
+      const y_center = (box.y + box.h / 2) / canvas.height;
+      const width = box.w / canvas.width;
+      const height = box.h / canvas.height;
+      const classId = categories.indexOf(box.label);
+      return `${classId} ${x_center.toFixed(6)} ${y_center.toFixed(6)} ${width.toFixed(6)} ${height.toFixed(6)}`;
+    })
+    .join('\n');
+
+  // Save to /frames/
+  const saveRes = await fetch(`/save_yolo_label`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder: folderName, filename: txtName, content })
+  });
+
+  if (saveRes.ok) {
+    console.log(`✅ Saved labels for ${txtName}`);
+
+    // Also copy to YOLO dataset
+    const res2 = await fetch('/copy_label_to_dataset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folder: folderName,
+        filename: txtName,
+        image: imgName
+      })
+    });
+
+    const status = await res2.json();
+    console.log(status.status);
+
+    updateLabelTable();
+  } else {
+    console.warn(`❌ Failed to save ${txtName}`);
+  }
+}
+
+
+
+  let detectConfidence = 0.05;
+
+  const slider = document.getElementById('confSlider');
+  const confText = document.getElementById('confValue');
+  slider.addEventListener('input', () => {
+    detectConfidence = parseFloat(slider.value);
+    confText.textContent = detectConfidence.toFixed(2);
+  });
+
+  
+
+  // ✅ Add feedback if no file exists
+  // ✅ Replace placeholder with actual label loading fallback
+  async function loadLabels(useModel = false) {
+    const imgName = images[index];
+    const txtName = imgName.replace(/\.(jpg|png)$/, '.txt');
+
+    if (!useModel) {
+      let labelText = '';
+      try {
+        let res = await fetch(`/load_yolo_label/${folderName}/${txtName}`);
+        if (!res.ok) {
+          res = await fetch(`/datasets/doach_seg/labels/train/${txtName}`);
+          if (!res.ok) throw new Error("Label missing");
+        }
+        labelText = await res.text();
+      } catch {
+        boxes = [];
+        drawBoxes();
+        updateLabelTable?.();
+        return;
+      }
+
+      boxes = labelText.trim().split('\n').map(line => {
+        const [classId, xC, yC, w, h] = line.split(' ').map(Number);
+        const label = categories[classId];
+        return {
+          label,
+          x: (xC - w / 2) * canvas.width,
+          y: (yC - h / 2) * canvas.height,
+          w: w * canvas.width,
+          h: h * canvas.height,
+          saved: true
+        };
+      });
+
+      drawBoxes();
+      updateLabelTable?.();
+      return;
+    }
+
+    // auto-detect below (unchanged)
+    const detectConfidence = parseFloat(document.getElementById('confSlider').value);
+    const res = await fetch('/auto_detect_frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        folder: folderName,
+        filename: imgName,
+        confidence: detectConfidence
+      })
+    });
+
+    if (!res.ok) {
+      const errText = await res.text();
+      console.error("❌ YOLO auto-detect failed:", errText);
+      alert("Auto-detect failed. Check console for details.");
+      return;
+    }
+
+    const detections = await res.json();
+    boxes = detections.map(obj => {
+      return {
+        label: obj.label,
+        x: obj.box[0],
+        y: obj.box[1],
+        w: obj.box[2] - obj.box[0],
+        h: obj.box[3] - obj.box[1],
+        auto: true
+      };
+    });
+    drawBoxes();
+  }
+
+
+  async function compileDataset() {
+    await fetch(`/compile_dataset/${folderName}`);
+    alert('✅ Dataset compiled');
+  }
+
+  async function startTraining() {
+    const res = await fetch(`/start_training/${folderName}`);
+    const data = await res.json();
+    alert(data.status);
+  }
+
+// ✅ Add YOLO auto-labeling preview when loading a frame
+//   # ✅ Auto-detect now working (fallback path hit, model predicted)
+// # Final cleanup suggestion: suppress label.txt 404 in frontend log
+// ✅ Patch to always load existing .txt file if it exists (before attempting auto-detect)
+async function loadLabels(useModel = false) {
+  const imgName = images[index];
+  const txtName = imgName.replace(/\.(jpg|png)$/, '.txt');
+
+  if (!useModel) {
+    let labelText = '';
+    try {
+      let res = await fetch(`/load_yolo_label/${folderName}/${txtName}`);
+      if (!res.ok) {
+        console.warn("🔁 Trying fallback path:", `/datasets/doach_seg/labels/train/${txtName}`);
+        res = await fetch(`/datasets/doach_seg/labels/train/${txtName}`);
+        if (!res.ok) throw new Error("Label missing");
+      }
+
+      labelText = await res.text();
+    } catch (e) {
+      console.warn("📭 No labels loaded for", txtName);
+      boxes = [];
+      drawBoxes();
+      updateLabelTable?.();
+      return;
+    }
+
+    boxes = labelText.trim().split('\n').map(line => {
+      const [classId, xC, yC, w, h] = line.split(' ').map(Number);
+      const label = categories[classId];
+      return {
+        label,
+        x: (xC - w / 2) * canvas.width,
+        y: (yC - h / 2) * canvas.height,
+        w: w * canvas.width,
+        h: h * canvas.height,
+        saved: true
+      };
+    });
+
+    drawBoxes();
+    updateLabelTable?.();
+    return;
+  }
+
+  const res = await fetch('/auto_detect_frame', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ folder: folderName, filename: imgName, confidence: detectConfidence })
+});
+
+if (!res.ok) {
+  const errText = await res.text();
+  console.error("❌ YOLO auto-detect failed:", errText);
+  alert("Auto-detect failed. Check console for details.");
+  return;
+}
+
+const detections = await res.json();
+boxes = detections.map(obj => {
+  return {
+    label: obj.label,
+    x: obj.box[0],
+    y: obj.box[1],
+    w: obj.box[2] - obj.box[0],
+    h: obj.box[3] - obj.box[1],
+    auto: true
+  };
+});
+drawBoxes();
+updateLabelTable?.();
+
+}
+
+
+// add table for raw data once saved or if existing
+function updateLabelTable() {
+  const tbody = document.querySelector('#labelTable tbody');
+  tbody.innerHTML = '';
+  boxes.forEach(box => {
+    const row = document.createElement('tr');
+    row.innerHTML = `
+      <td>${box.label}</td>
+      <td>${Math.round(box.x)}</td>
+      <td>${Math.round(box.y)}</td>
+      <td>${Math.round(box.w)}</td>
+      <td>${Math.round(box.h)}</td>
+      <td>${box.saved ? '✅ saved' : box.auto ? '🤖 detected' : '✏️ manual'}</td>
+    `;
+    tbody.appendChild(row);
+  });
+}
+
+function updateFilenameDisplay() {
+  const infoBox = document.getElementById("currentFrameInfo");
+  if (images[index]) infoBox.textContent = `🖼️ ${images[index]}`;
+}
+
+
+// # ✅ Confirmed functional — fallback path used, model detected, UI responded
+// # Optional: Mark auto-detected boxes visually with dashed outlines
+function drawBoxes(tempPreview = false, e = null) {
+  updateFilenameDisplay();
+
+  const image = new Image();
+  image.src = `/frames/${folderName}/${images[index]}`;
+  image.onload = () => {
+    // 🌐 Draw image and grid on gridCanvas
+    const gridCanvas = document.getElementById('gridCanvas');
+    const gridCtx = gridCanvas.getContext('2d');
+    gridCtx.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
+    gridCtx.drawImage(image, 0, 0, gridCanvas.width, gridCanvas.height);
+
+    // Optional grid
+    if (gridToggle.checked) {
+      const spacing = parseInt(gridSlider.value);
+      gridCtx.strokeStyle = 'rgba(255, 0, 0, 0.2)';
+      gridCtx.lineWidth = 1;
+      for (let x = 0; x < gridCanvas.width; x += spacing) {
+        gridCtx.beginPath();
+        gridCtx.moveTo(x, 0);
+        gridCtx.lineTo(x, gridCanvas.height);
+        gridCtx.stroke();
+      }
+      for (let y = 0; y < gridCanvas.height; y += spacing) {
+        gridCtx.beginPath();
+        gridCtx.moveTo(0, y);
+        gridCtx.lineTo(gridCanvas.width, y);
+        gridCtx.stroke();
+      }
+    }
+
+    // 🎯 Draw boxes on frameCanvas
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    boxes.forEach(box => {
+      const color = colorMap[box.label] || 'lime';
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.setLineDash(box.auto ? [6] : []);
+      ctx.strokeRect(box.x, box.y, box.w, box.h);
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'black';
+      ctx.fillRect(box.x, box.y - 14, ctx.measureText(box.label).width + 6, 14);
+      ctx.fillStyle = color;
+      ctx.fillText(box.label, box.x + 2, box.y - 2);
+    });
+
+    // ✏️ Draw in-progress rectangle
+    if (tempPreview && e) {
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const currX = (e.clientX - rect.left) * scaleX;
+      const currY = (e.clientY - rect.top) * scaleY;
+      const x = Math.min(startX, currX);
+      const y = Math.min(startY, currY);
+      const w = Math.abs(currX - startX);
+      const h = Math.abs(currY - startY);
+      ctx.setLineDash([5]);
+      ctx.strokeStyle = colorMap[currentLabel];
+      ctx.strokeRect(x, y, w, h);
+      ctx.setLineDash([]);
+    }
+  };
+}
+
+
+// ✅ Replace previous box of same label before pushing a new one
+canvas.addEventListener('mouseup', e => {
+  if (!isDrawing) return;
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const endX = (e.clientX - rect.left) * scaleX;
+  const endY = (e.clientY - rect.top) * scaleY;
+  const x = Math.min(startX, endX);
+  const y = Math.min(startY, endY);
+  const w = Math.abs(endX - startX);
+  const h = Math.abs(endY - startY);
+
+  // remove prior box with same label
+  boxes = boxes.filter(b => b.label !== currentLabel);
+  boxes.push({ label: currentLabel, x, y, w, h });
+
+  isDrawing = false;
+  drawBoxes();
+});
+
+// extracted frames folder selection dropdown
+async function populateFolderList() {
+  const res = await fetch('/list_frame_folders');
+  const data = await res.json();
+  const dropdown = document.getElementById('folderInput');
+  dropdown.innerHTML = '';
+  data.folders.forEach(folder => {
+    const option = document.createElement('option');
+    option.value = folder;
+    option.textContent = folder;
+    dropdown.appendChild(option);
+  });
+}
+populateFolderList();
+
+// show a ✅ / ❌ indicator beside each frame as you label it
+function updateFrameStatusBar() {
+  const status = document.getElementById('currentFrameStatus');
+  const labelCount = boxes.length;
+  status.textContent = labelCount > 0 ? `✅ ${labelCount} labels` : '⚠️ No labels';
+}
+
+window.addEventListener("DOMContentLoaded", () => {
+  updateGrid();  // draw initial grid on page load
+});
+
+  </script>
+</body>
+</html>
+

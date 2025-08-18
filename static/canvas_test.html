@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DOACH Overlay Test</title>
+
+  <!-- Core TF.js + COCO-SSD -->
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.12.0"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd"></script>
+
+  <style>
+    body {
+      margin: 0;
+      background: #000;
+      color: white;
+      font-family: sans-serif;
+    }
+
+    .video-box {
+      position: relative;
+      max-width: 720px;
+      width: 100%;
+      margin: auto;
+    }
+
+    #videoPlayer, canvas#overlay {
+      display: block;
+      width: 100%;
+      height: auto;
+      aspect-ratio: 16 / 9;
+      border-radius: 12px;
+    }
+
+    canvas#overlay {
+      position: absolute;
+      top: 0;
+      left: 0;
+      pointer-events: none;
+      z-index: 10;
+      display: block;
+      border-radius: 12px;
+    }
+  </style>
+</head>
+<body>
+  <h2 style="text-align:center; margin: 1rem 0;">🏀 DOACH Overlay Object Tracker</h2>
+
+  <div class="video-box">
+    <video id="videoPlayer" autoplay muted loop playsinline>
+      <source src="/static/single_shot.mp4" type="video/mp4" />
+    </video>
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <script>
+    const video = document.getElementById('videoPlayer');
+    const canvas = document.getElementById('overlay');
+    const ctx = canvas.getContext('2d');
+
+    let model;
+
+    async function loadModel() {
+      model = await cocoSsd.load();
+      console.log("✅ COCO-SSD model loaded");
+      trackFrame();
+    }
+
+    function resizeCanvas() {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      console.log("✅ Canvas resized:", canvas.width, canvas.height);
+    }
+
+    function drawBoxes(predictions) {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (const pred of predictions) {
+        const [x, y, w, h] = pred.bbox;
+        ctx.strokeStyle = 'yellow';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x, y, w, h);
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(x, y - 20, ctx.measureText(pred.class).width + 12, 20);
+        ctx.fillStyle = 'lime';
+        ctx.font = '16px sans-serif';
+        ctx.fillText(`${pred.class} (${Math.round(pred.score * 100)}%)`, x + 6, y - 5);
+      }
+    }
+
+    async function trackFrame() {
+      if (video.paused || video.ended) {
+        requestAnimationFrame(trackFrame);
+        return;
+      }
+
+      const predictions = await model.detect(video);
+      drawBoxes(predictions);
+      requestAnimationFrame(trackFrame);
+    }
+
+    video.addEventListener('loadeddata', () => {
+      resizeCanvas();
+      loadModel();
+    });
+
+    window.addEventListener('resize', resizeCanvas);
+  </script>
+</body>
+</html>
+

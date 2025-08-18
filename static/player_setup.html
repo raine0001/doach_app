@@ -1,0 +1,49 @@
+<!-- player_setup.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Player Setup</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <h1>🧍 Player Profile Setup</h1>
+  <form id="playerForm">
+    <label>Name: <input type="text" name="name" required></label><br>
+    <label>Handedness:
+      <select name="hand">
+        <option value="right">Right</option>
+        <option value="left">Left</option>
+      </select>
+    </label><br>
+    <label>Estimated Release Height (px):
+      <input type="number" name="releaseHeight" value="200">
+    </label><br>
+    <label>Jump Calibration:
+      <input type="checkbox" name="calibrateJump">
+    </label><br><br>
+    <button type="submit">💾 Save Player</button>
+  </form>
+  <script>
+    document.getElementById('playerForm').onsubmit = (e) => {
+      e.preventDefault();
+      const formData = new FormData(e.target);
+      const profile = Object.fromEntries(formData.entries());
+      profile.releaseHeight = parseInt(profile.releaseHeight);
+      profile.calibrateJump = !!formData.get('calibrateJump');
+      localStorage.setItem('playerProfile', JSON.stringify(profile));
+      alert('✅ Player profile saved.');
+    };
+
+    // Preload if saved
+    const saved = JSON.parse(localStorage.getItem('playerProfile') || '{}');
+    if (saved.name) {
+      Object.entries(saved).forEach(([key, val]) => {
+        const el = document.querySelector(`[name="${key}"]`);
+        if (el?.type === 'checkbox') el.checked = !!val;
+        else if (el) el.value = val;
+      });
+    }
+  </script>
+</body>
+</html>

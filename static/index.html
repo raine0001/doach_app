@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>D🏀ACH</title>
+
+  <!-- Core app/scripts (load each ONCE) -->
+  <script src="/static/js/coachAssistant.js"></script>
+  <script type="module" src="/static/js/shot_logger.js"></script>
+
+  <script type="module" src="/static/js/app.js"></script>
+
+  <script type="module">
+    import { mountHamburgerMenu } from '/static/js/ui_menu.js?v=2';
+    mountHamburgerMenu();
+  </script>
+
+  <!-- Core libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+
+  <!-- MediaPipe Pose Model -->
+  <script type="module">
+    import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
+    window.FilesetResolver = FilesetResolver;
+    window.PoseLandmarker = PoseLandmarker;
+  </script>
+
+  <!-- Styles (keep your existing stylesheet) -->
+  <link rel="stylesheet" href="static/style.css" />
+  <!-- (Optional) Boxicons; safe to keep or remove if unused elsewhere -->
+  <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
+
+  <!-- REMOVE the old sidebar script -->
+  <!-- <script src="static/script.js" defer></script> -->
+</head>
+
+<body>
+
+  <!-- 🔴 REMOVED: legacy <nav class="sidebar ..."> ... </nav> -->
+
+  <!-- Overlay Prompt Message -->
+  <div id="overlayPrompt" class="prompt-message" style="display:none;">Tap the hoop to begin setup</div>
+  <div id="promptBar"></div>
+
+  <!-- ✅ Main Video + Overlay -->
+  <div class="session-container">
+    <div class="video-frame">
+      <video id="videoPlayer" muted playsinline></video>
+      <canvas id="overlay"></canvas>
+      <div class="session-status">SESSION IN PROGRESS...</div>
+    </div>
+  </div>
+
+  <!-- ✅ Coach Feedback + Shot Summary -->
+  <div id="coachNotes" style="
+    position: absolute; top: 10px; left: 10px;
+    max-width: 400px; background: rgba(0,0,0,0.7); color: #fff;
+    padding: 12px 16px; border-radius: 8px;
+    font-size: 14px; line-height: 1.4; z-index: 999;">
+    <strong>🤖 Coach Feedback</strong><br>
+    <span style="color:gray;">(No shot yet)</span>
+  </div>
+
+  <div id="shotOverlaySummary" style="
+    position: absolute;
+    bottom: 80px;
+    right: 20px;
+    padding: 10px 16px;
+    background: rgba(0,0,0,0.75);
+    color: white;
+    border-radius: 10px;
+    font-size: 14px;
+    line-height: 1.4;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    z-index: 20;
+    pointer-events: none;
+    display: none;"></div>
+
+  <!-- Hidden upload control the new “Content” menu will click -->
+  <input type="file" id="videoInput" accept="video/*" hidden />
+
+  <!-- Mount the new Hamburger menu + Feedback widget -->
+  <script type="module">
+    import { mountHamburgerMenu } from '/static/js/ui_menu.js';
+    import { installFeedbackWidget } from '/static/js/feedback_widget.js';
+
+    // Mount UI once DOM is ready
+    window.addEventListener('DOMContentLoaded', () => {
+      mountHamburgerMenu();
+      installFeedbackWidget();
+    });
+  </script>
+
+  <!-- (Keep) lightweight helpers already on the page -->
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const promptOverlay = document.getElementById("overlayPrompt");
+
+      window.showPrompt = (message) => {
+        promptOverlay.textContent = message;
+        promptOverlay.style.display = "block";
+      };
+      window.hidePrompt = () => { promptOverlay.style.display = "none"; };
+
+      window.lockHoop = function () {
+        hidePrompt();
+        console.log("✅ Hoop lock UI confirmed");
+      };
+
+      window.endSession = () => {
+        alert("✅ Session ended. Scroll down for summary.");
+      };
+    });
+  </script>
+</body>
+</html>

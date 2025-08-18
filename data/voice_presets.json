@@ -1,0 +1,16 @@
+[
+  {
+    "tts": "openai",
+    "lang": "en-US",
+    "voice": "verse",
+    "webVoiceName": "",
+    "tone": "supportive",
+    "model": "gpt-4o-mini",
+    "speed": 1.05,
+    "pitch": 0.9,
+    "bassDb": 3,
+    "trebleDb": -7,
+    "volume": 1,
+    "name": "My Coach Voice"
+  }
+]

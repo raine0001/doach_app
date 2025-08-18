@@ -1,0 +1,22 @@
+# secrets
+.env
+
+# data caches / large artifacts
+uploads/
+frame_cache/
+frames/
+datasets/
+labels/
+runs/
+weights/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env.bak
+
+
