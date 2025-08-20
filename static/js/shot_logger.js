@@ -24,26 +24,66 @@ try { window.drawShotStatsTable?.(); } catch {}
 try { window.updateBottomStats?.(); } catch {}
 
 // ===== Constants =====
-const PROX_X = 200, PROX_Y_ABOVE = 170, PROX_Y_BELOW = 100;
-const FINALIZE_MIN_LEN = 8;
-const POST_MIN_FRAMES = 12;
-const RETRY_MS = 350;
-const WEIGHTED_THRESH = 0.65;
+const PROX_X = 200, 
+PROX_Y_ABOVE = 170, 
+PROX_Y_BELOW = 100;
+
+const WEIGHTED_THRESH = 0.75;
+
+// weighted = onnx flicker
+// hybrid = adds region, a bit looser than weighted
+window.SHOT_SCORER_MODE ??= 'weighted';   // 'weighted' | 'hybrid'
+
+
+// ===== Scorer preferences =====
+window.SHOT_SCORER_MODE ??= (localStorage.getItem('doach_scorer_mode') || 'weighted');
+window.WEIGHTED_THRESH  ??= Number(localStorage.getItem('doach_weighted_thresh')) || 0.75;
+
+export function getScorerMode() {
+  return String(window.SHOT_SCORER_MODE || 'weighted').toLowerCase();
+}
+export function setScorerMode(mode = 'weighted') {
+  const m = String(mode).toLowerCase();
+  window.SHOT_SCORER_MODE = m;
+  localStorage.setItem('doach_scorer_mode', m);
+  console.log('[scorer] mode =', m);
+}
+window.setScorerMode = setScorerMode; // also available from console
+
+export function setWeightedThresh(v) {
+  const n = Math.max(0.5, Math.min(0.95, Number(v) || 0.75));
+  window.WEIGHTED_THRESH = n;
+  localStorage.setItem('doach_weighted_thresh', String(n));
+  console.log('[scorer] threshold =', n);
+}
+window.setWeightedThresh = setWeightedThresh;
+
 
 // ===== Helpers =====
 export function isBallInProximityZone(ball, opts = {}) {
   const hoop = getLockedHoopBox();
   if (!hoop || !ball) return false;
   const H = normHoop(hoop);
+  const P = currentProx();
 
-  const xHalf  = Math.max(PROX_X,       Math.round(H.w * (opts.xScale ?? 1.6)));
-  const yAbove = Math.max(PROX_Y_ABOVE, Math.round(H.h * (opts.yUp    ?? 2.0)));
-  const yBelow = Math.max(PROX_Y_BELOW, Math.round(H.h * (opts.yDown  ?? 1.2)));
+  const xHalf  = Math.max(P.X,       Math.round(H.w * (opts.xScale ?? 1.6)));
+  const yAbove = Math.max(P.Y_ABOVE, Math.round(H.h * (opts.yUp    ?? 2.0)));
+  const yBelow = Math.max(P.Y_BELOW, Math.round(H.h * (opts.yDown  ?? 1.2)));
 
   return (
     ball.x >= H.cx - xHalf && ball.x <= H.cx + xHalf &&
     ball.y >= H.cy - yAbove && ball.y <= H.cy + yBelow
   );
+}
+
+// use UI prox values
+function currentProx() {
+  const p = window.PREF_PROX || {};
+  return {
+    X:       Number.isFinite(p.x) ? p.x : 200,
+    Y_ABOVE: Number.isFinite(p.yAbove) ? p.yAbove : 170,
+    Y_BELOW: Number.isFinite(p.yBelow) ? p.yBelow : 100
+  };
 }
 
 // Global slow-mo FPS (editable in console: setFBFRate(0.8))
@@ -145,57 +185,62 @@ function getMissReason(trail, hoopBox) {
 }
 
 //-----------------------------------------------------------------//
-// shot_logger.js  — replace the whole detectAndLogShot function   //
+//                   Detect and log a shot summary                 //
 //-----------------------------------------------------------------//
 export function detectAndLogShot(trail, __frameIdx, hoopBox) {
+  if (!window.__readyForScoring) return false;
   if (!trail || trail.length < 3 || !hoopBox) return;
   if (__frameIdx === lastShotFrameId) return;
   lastShotFrameId = __frameIdx;
 
-  const first = trail[0];
+  // scorer mode & inputs
+  const mode = String(window.SHOT_SCORER_MODE || 'weighted').toLowerCase();
+
+  const first  = trail[0];
   const lastPt = trail.at(-1);
 
-  // arc metrics
-  const apexY = Math.min(...trail.map(p => p.y));
-  const arcHeight = Math.max(0, Math.round(hoopBox.y - apexY));
-  const releaseAngle = estimateReleaseAngle(trail);
-
-  // Build a center-safe hoop for the region scorer
-  const hoopForScore = {
-    ...hoopBox,
-    anchor: 'topleft',
-    cx: hoopBox.x + (hoopBox.w || 0) / 2,
-    cy: hoopBox.y + (hoopBox.h || 0) / 2,
-  };
+  // arc metrics (top-left hoop box → height from rim top)
+  const apexY       = Math.min(...trail.map(p => p.y));
+  const arcHeight   = Math.max(0, Math.round(hoopBox.y - apexY));
+  const releaseAngle= estimateReleaseAngle(trail);
 
   // net motion (guarded)
   let netMoved = null;
-  try { netMoved = detectNetMotionFromCanvas(window.videoCanvas || window.__videoCanvas, hoopBox); } catch {}
+  try {
+    const canvas = window.videoCanvas || window.__videoCanvas || null;
+    if (canvas && typeof detectNetMotionFromCanvas === 'function') {
+      netMoved = detectNetMotionFromCanvas(canvas, hoopBox);
+    }
+  } catch { /* ignore */ }
 
-  // region decision (uses evaluateShotByRegionsV2 under the hood)
-  const region = score(trail, hoopBox, netMoved) || {};
+  // region decision (defensive)
+  let region = {};
+  try { region = score(trail, hoopBox, netMoved) || {}; } catch { region = {}; }
   const regionMade = !!region.made;
   const entryAngle = Number.isFinite(region.entryAngle) ? region.entryAngle : 0;
 
-  // weighted score
+  // weighted (trail-only) score and decision
   const weightedScore = computeWeightedShotScore(trail);
-  const weightMade = weightedScore >= WEIGHTED_THRESH;
+  const weightMade    = weightedScore >= (window.WEIGHTED_THRESH ?? 0.75);
 
   // final decision + reason
-  const made = regionMade || weightMade;
+  const made   = mode === 'hybrid' ? (regionMade || weightMade) : weightMade;
   const reason = made ? null : (region.reason || getMissReason(trail, hoopBox));
 
-  // write result back onto the last frozen shot for trail coloring
+  // reflect decision back onto the last frozen shot (for trail coloring)
   const lastFrozen = ballState.shots.at?.(-1);
-  if (lastFrozen) lastFrozen.made = made;
+  if (lastFrozen) {
+    lastFrozen.made  = made;
+    lastFrozen.score = weightedScore;
+  }
 
-  // 🔹 capture a quick pose snapshot at the time we score (for the coach)
+  // optional pose snapshot for coach
   const poseSnapshot = (window.capturePoseSnapshot?.(window.playerState, hoopBox)) || null;
 
-  // log
+  // log record
   const shotRecord = {
     frameStart: first.frame,
-    frameEnd: lastPt.frame,
+    frameEnd:   lastPt.frame,
     trail,
     made,
     entryAngle,
@@ -204,39 +249,41 @@ export function detectAndLogShot(trail, __frameIdx, hoopBox) {
     missReason: reason,
     netMoved: !!netMoved,
     weightedScore,
+    scorerMode: mode,
+    regionMade,
+    weightMade,
     poseSnapshot
   };
   logShot(shotRecord);
 
-  // 🔊 Broadcast ONCE — listeners (coachAssistant + video_ui) will handle UI, table, voice
-try {
-  window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord }));
-  console.log('[shot_logger] shot:summary dispatched', shotRecord);
-} catch (e) {
-  console.warn('[shot_logger] shot:summary dispatch failed:', e);
-}
+  // notify listeners (coachAssistant, UI, etc.)
+  try {
+    window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord }));
+    console.log('[shot_logger] shot:summary dispatched', shotRecord);
+  } catch (e) {
+    console.warn('[shot_logger] shot:summary dispatch failed:', e);
+  }
 
-// (Optional) local visual overlays are fine; they don’t duplicate speech
-if (typeof canvasOverlay === 'function') {
-  canvasOverlay({ made, arcHeight, entryAngle, releaseAngle }, hoopBox);
-}
+  // optional on-canvas summary overlay
+  if (typeof canvasOverlay === 'function') {
+    canvasOverlay({ made, arcHeight, entryAngle, releaseAngle }, hoopBox);
+  }
 
-const madeShots  = shotLog.filter(s => s.made).length;
-const totalShots = shotLog.length || 1;
-const accuracy   = Math.round((madeShots / totalShots) * 100);
+  // quick HUD stats
+  const madeShots  = shotLog.filter(s => s.made).length;
+  const totalShots = shotLog.length || 1;
+  const accuracy   = Math.round((madeShots / totalShots) * 100);
 
-window.showShotBanner?.({
-  made, arcHeight, entryAngle, releaseAngle, accuracy, madeShots, totalShots
-});
+  window.showShotBanner?.({
+    made, arcHeight, entryAngle, releaseAngle, accuracy, madeShots, totalShots
+  });
 
-try { window.updateCoachNotes?.(shotRecord); } catch {}
-try { window.doachOnShot?.(shotRecord); } catch (e) { console.warn('[doach] feedback failed:', e); }
+  try { window.updateCoachNotes?.(shotRecord); } catch {}
+  try { window.doachOnShot?.(shotRecord); } catch (e) { console.warn('[doach] feedback failed:', e); }
 
-
-// reset release flag and frame-by-frame
-__releaseEventSent = false;
-if (__autoFBF) { window.frameMode?.off(); __autoFBF = false; }
-
+  // reset gates
+  __releaseEventSent = false;
+  if (__autoFBF) { window.frameMode?.off(); __autoFBF = false; }
 }
 
 // helper already used elsewhere in shot_logger.js
@@ -250,6 +297,7 @@ function normHoop(hoop) {
 }
 
 
+
 // ---------------------------------------------------------------- //
 //                        Start Shot Magic!                         //
 // ---------------------------------------------------------------- //
@@ -261,7 +309,7 @@ const WEIGHTS = {
   hoop: 0.15,
   net: 0.20,
   tubeHit: 0.30,
-  netMoved: 0.35,
+  netMoved: 0.4,
   trailCenter: 0.25,
 };
 
@@ -274,7 +322,7 @@ const TUNABLES = {
   NETLINE_POS: 0.92,
   DEPTH_POS: 1.22,
   TUBE_WIDTH_RATIO: 0.55,
-  TUBE_MIN_CONSEC: 2,
+  TUBE_MIN_CONSEC: 3,
   TUBE_ALLOW_GAPS: 2,
   SMALL_UP_TOL: 1.5,
   TRAIL_RADIUS: 15,
@@ -409,10 +457,15 @@ export function computeWeightedShotScore(trail) {
 
   const [nx1, ny1, nx2, ny2] = getRecentNetRegionSafe(H);
 
-  // Use ONLY the ball trail (last N points)
-  const tail = trail.slice(-TUNABLES.TAIL);
+  // Use only the last N points, but densify to survive brief occlusion
+  const tailRaw = trail.slice(-TUNABLES.TAIL);
+  const tail    = densifyTrail(tailRaw);            // ← NEW
 
-  // 1) hoop ellipse
+  // 0) apex must clear rim a little
+  const apexY = Math.min(...tail.map(p => p.y));
+  const apexAboveRim = apexY < (H.rimY - 6);        // ← NEW gating
+
+  // 1) hoop ellipse proximity
   const rx = (H.w/2) * (1 + TUNABLES.ELLIPSE_X);
   const ry = (H.h/2) * (1 + TUNABLES.ELLIPSE_Y);
   const inHoop = tail.some(p => {
@@ -420,47 +473,41 @@ export function computeWeightedShotScore(trail) {
     return dx*dx + dy*dy <= 1;
   });
 
-  // 2) center tube
+  // 2) center tube run after rim cross
   const tubeRun = tubeRunAfterCross(tail, H);
-  const tubeOK  = tubeRun >= TUNABLES.TUBE_MIN_CONSEC;
+  const tubeOK  = tubeRun >= Math.max(3, TUNABLES.TUBE_MIN_CONSEC); // ← stricter
 
-  // 3) net line crossing
+  // 3) net line crossing near center
   const crossed = crossedNetLine(tail, H);
 
   // 4) net region presence
   const pad = TUNABLES.NET_PAD;
   const inNet = tail.some(p => p.x >= (nx1-pad) && p.x <= (nx2+pad) && p.y >= (ny1-pad) && p.y <= (ny2+pad));
 
-  // 5) thick trail through center
-  const thickCenter = thickTrailCenterHit(tail, H);
+  // 5) thick center stripe (make it a bit narrower again)
+  const thickCenter = thickTrailCenterHit(tail, { ...H, w: H.w * 0.92 }); // ← slightly narrower
 
-  // Accumulate
-  let score = 0;
-  if (inHoop)            { score += WEIGHTS.hoop;         console.log('✅ Hoop ellipse +0.2'); }
-  else                    { console.log('🟥 no hoop ellipse'); }
+  // accumulate
+  let s = 0;
+  if (inHoop)             s += WEIGHTS.hoop;
+  if (inNet)              s += WEIGHTS.net;
+  if (tubeOK)             s += WEIGHTS.tubeHit;
+  if (crossed)            s += 0.3;                  // .3 is good
+  if (ballState.netMoved) s += WEIGHTS.netMoved;
+  if (thickCenter)        s += WEIGHTS.trailCenter;
 
-  if (inNet)             { score += WEIGHTS.net;          console.log('✅ Net region +0.2'); }
-  else                    { console.log('🟥 no net region'); }
-
-  if (tubeOK)            { score += WEIGHTS.tubeHit;      console.log(`✅ Tube run ${tubeRun} +0.3`); }
-  else                    { console.log(`🟥 Tube run ${tubeRun}`); }
-
-  if (crossed)           { score += 0.3;                 console.log('✅ Net line crossed +0.3'); }
-
-  if (ballState.netMoved){ score += WEIGHTS.netMoved;     console.log('✅ Net moved +0.35'); }
-
-  if (thickCenter)       { score += WEIGHTS.trailCenter;  console.log('✅ Thick trail center +0.25'); }
-  else                    { console.log('🟥 no thick trail center'); }
-
-  const centerPass = tubeOK || thickCenter || inHoop;
+  const centerPass = tubeOK || thickCenter;
   const strongThrough = crossed && centerPass;
 
-  if (strongThrough) score = Math.max(score, 0.80);
-  if (!centerPass)   score = Math.min(score, 0.60); // prevent net-only combos from scoring as makes
+  // hard gates:
+  if (!apexAboveRim)   s = Math.min(s, 0.55);        // low arc shouldn’t score high
+  if (strongThrough)   s = Math.max(s, 0.80);        // strong signal → high floor
+  if (!centerPass)     s = Math.min(s, 0.60);        // without tube/center, cap it
+  if (!crossed)        s = Math.min(s, 0.60);        // must cross net line to exceed 0.6
 
-  // console.log(`Score ${score.toFixed(2)} {inHoop, inNet, tubeRun, crossed, thickCenter}`, {inHoop,inNet,tubeRun,crossed,thickCenter});
   return score;
 }
+
 
 export function scoringTick(__frameIdx) {
   const hoopBox = getLockedHoopBox?.();
@@ -644,10 +691,11 @@ export function drawHoopProximityDebug(ctx) {
     const H = normHoop(hoop);
 
     // Same sizing as your original (constant margins), but center-safe
-    const x = H.cx - PROX_X;
-    const y = H.cy - PROX_Y_ABOVE;
-    const width  = PROX_X * 2;
-    const height = PROX_Y_ABOVE + PROX_Y_BELOW;
+    const P = currentProx();
+    const x = H.cx - P.X;
+    const y = H.cy - P.Y_ABOVE;
+    const width  = P.X * 2;``
+    const height = P.Y_ABOVE + P.Y_BELOW;
 
     ctx.save();
     const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
@@ -715,33 +763,62 @@ export function bufferDetectedObjects(objects) {
 }
 
 let lastNetPatch = null;
+let netPrimed = false;
+export function isNetPrimed() { return netPrimed; }
+
 
 export function detectNetMotion(canvas, hoopBox) {
   if (!canvas || !hoopBox) return false;
-
   const ctx = canvas.getContext('2d');
-  const [x, y, w, h] = [hoopBox.x, hoopBox.y + hoopBox.h, hoopBox.w, hoopBox.h * 0.6];
 
-  const imageData = ctx.getImageData(x, y, w, h);
-  const currentData = imageData.data;
+  // clamp region to canvas, use integers
+  let x = Math.floor(hoopBox.x);
+  let y = Math.floor(hoopBox.y + hoopBox.h);
+  let w = Math.floor(hoopBox.w);
+  let h = Math.floor(hoopBox.h * 0.6);
 
-  if (!lastNetPatch) {
-    lastNetPatch = new Uint8ClampedArray(currentData);
+  // clamp to bounds
+  x = Math.max(0, Math.min(x, canvas.width  - 1));
+  y = Math.max(0, Math.min(y, canvas.height - 1));
+  w = Math.max(1, Math.min(w, canvas.width  - x));
+  h = Math.max(1, Math.min(h, canvas.height - y));
+
+  // if region is tiny, reset baseline and bail
+  if (w < 2 || h < 2) { lastNetPatch = null; return false; }
+
+  let imageData;
+  try {
+    imageData = ctx.getImageData(x, y, w, h);
+  } catch (e) {
+    // getImageData will throw if the box is out of bounds
+    lastNetPatch = null;
     return false;
   }
 
+  const cur = imageData.data; // Uint8ClampedArray length = w*h*4
+
+  // (re)initialize baseline whenever size changes
+  if (!lastNetPatch || lastNetPatch.length !== cur.length) {
+    lastNetPatch = new Uint8ClampedArray(cur);
+    return false; // don't report motion on the first sample
+  }
+
+  // diff
   let changed = 0;
-  for (let i = 0; i < currentData.length; i += 4) {
-    const diff = Math.abs(currentData[i] - lastNetPatch[i]) +
-                 Math.abs(currentData[i+1] - lastNetPatch[i+1]) +
-                 Math.abs(currentData[i+2] - lastNetPatch[i+2]);
+  for (let i = 0; i < cur.length; i += 4) {
+    const diff = Math.abs(cur[i] - lastNetPatch[i]) +
+                 Math.abs(cur[i+1] - lastNetPatch[i+1]) +
+                 Math.abs(cur[i+2] - lastNetPatch[i+2]);
     if (diff > 30) changed++;
   }
 
-  lastNetPatch.set(currentData);
-  const percentMoved = changed / (currentData.length / 4);
-  return percentMoved > 0.08; // 8% pixel shift threshold
+  // update baseline AFTER diff
+  lastNetPatch.set(cur);
+
+  const percentMoved = changed / (cur.length / 4);
+  return percentMoved > 0.08;
 }
+
 
 // 🧪 Draw netMoved debug overlay during scoring check
 export function drawNetMotionStatus(canvas, netMoved) {
@@ -820,8 +897,8 @@ export function getRecentHoopRegion() {
   return latest?.box || null;
 }
 function isPointInTube(p, hoop) {
-  const x1 = hoop.x - TUBE_WIDTH / 2;
-  const x2 = hoop.x + TUBE_WIDTH / 2;
+  const x1 = hoop.x - TUBE_WIDTH / 3;
+  const x2 = hoop.x + TUBE_WIDTH / 3;
   const y1 = hoop.y;
   const y2 = hoop.y + TUBE_HEIGHT;
   return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;

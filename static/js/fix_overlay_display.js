@@ -6,6 +6,8 @@ import { getLockedHoopBox } from './hoop_tracker.js';
 import { drawBallTrails } from './ball_tracker.js';
 import { drawFinalShotSummary } from './shot_utils.js';
 
+export const USE_LOCAL_WORKER = true;
+
 let overlay = null;
 let ctx = null;
 let poseDetector = null;
@@ -18,19 +20,16 @@ window.__pickingHoop = false;
 
 
 // initialize and display overlay
-export function initOverlay(canvas, detector) {
-  if (!canvas || !detector) { console.warn("initOverlay: missing"); return; }
-  overlay = canvas;
+export function initOverlay(canvas, detector = null) {
+  if (!canvas) {
+    console.warn("⚠️ initOverlay: no canvas");
+    return;
+  }
 
-  // make sure overlay never blocks the UI unless we say so
+  overlay = canvas;
+  poseDetector = detector || window.poseDetector || null;
   overlay.style.position = 'absolute';
-  overlay.style.left = '0';
-  overlay.style.top = '0';
-  overlay.style.zIndex = '5';          // HUD is higher (e.g., 999)
-  overlay.style.pointerEvents = 'none'; // ✨ default: doesn't capture input
-  overlay.style.userSelect = 'none';
-  
-  poseDetector = detector;
+
 
   const video = document.getElementById('videoPlayer');
   if (video?.videoWidth && video?.videoHeight) {
@@ -38,25 +37,16 @@ export function initOverlay(canvas, detector) {
     overlay.height = video.videoHeight;
     ctx = overlay.getContext('2d');
   } else {
-    console.warn("⚠️ initOverlay: videoPlayer not ready or missing metadata.");
+    // video not ready yet; get a context anyway
+    ctx = overlay.getContext('2d');
+    console.warn("⚠️ initOverlay: video metadata not ready; will resize later in drawLiveOverlay");
   }
 
-  // make sure the overlay never intercepts input
-  overlay.style.pointerEvents = 'none';
-  overlay.style.userSelect    = 'none';
-  overlay.style.zIndex        = '5';
-  overlay.style.position = 'absolute';
-  
-  // Make overlay/HUD un-blockable
-  overlay.style.left = '0';
-  overlay.style.top = '0';
-  overlay.style.pointerEvents = 'none';
-  overlay.style.userSelect = 'none';
-  overlay.style.zIndex = '5'; // HUD stays above at 999
-
-  window.drawLiveOverlay    = drawLiveOverlay;
-  window.getOverlayContext  = () => ctx;
+  // expose for other modules, even if detector isn't ready yet
+  window.drawLiveOverlay   = drawLiveOverlay;
+  window.getOverlayContext = () => ctx;
 }
+
 
 // helper to toggle clickability
 export function setOverlayClickable(on) {
@@ -129,7 +119,7 @@ export function drawLiveOverlay(objects = [], playerState) {
   // Shot visuals
   drawHoopProximityDebug(ctx);
   drawShotTubeDebug(ctx);
-  drawBallTrails(ctx);
+  if ((window.PREF_SHOW?.trails) !== false) drawBallTrails(ctx);
   drawFinalShotSummary(ctx);
 
   // Visual fallback around hoop (only if locked)
@@ -144,27 +134,40 @@ export function drawLiveOverlay(objects = [], playerState) {
   }
 
   // Draw with TL, compute with center
-  const H = getLockedHoopBox?.(); // center
+  const H = getLockedHoopBox?.();
   if (H) {
+    const x1 = H.x - H.w / 2;
+    const y1 = H.y - H.h / 2;
     ctx.save();
     ctx.setLineDash([4]);
     ctx.strokeStyle = 'lime';
     ctx.lineWidth = 2;
-    ctx.strokeRect(H.x1, H.y1, H.w, H.h); // TL for canvas draw
-    ctx.beginPath();                       // debug: center dot
-    ctx.arc(H.cx, H.cy, 3, 0, 2*Math.PI);
+    ctx.strokeRect(x1, y1, H.w, H.h);
+    ctx.beginPath();
+    ctx.arc(H.x, H.y, 3, 0, 2 * Math.PI);
     ctx.fillStyle = 'red';
     ctx.fill();
     ctx.restore();
-  }
-
+}
 
   // Object detections
-  for (const obj of objects) {
+  const show = (window.PREF_SHOW || {});
+  for (const obj of (objects || [])) {
     if (!Array.isArray(obj.box) || obj.box.length !== 4) continue;
     const [x1, y1, x2, y2] = obj.box;
     const label = obj.label?.toLowerCase?.() || 'unknown';
-    const color = { basketball: 'yellow', hoop: 'red', player: 'cyan', net: 'orange', backboard: 'magenta' }[label] || 'white';
+
+    // visibility gates
+    if (label === 'player'     && show.player === false) continue;
+    if (label === 'basketball' && show.ball   === false) continue;
+    if (label === 'hoop'       && show.hoop   === false) continue;
+    if (label === 'backboard'  && show.backboard === false) continue;
+    if (label === 'net'        && show.net    === false) continue;
+
+    const color = {
+      basketball: 'yellow', hoop: 'red', player: 'cyan',
+      net: 'orange', backboard: 'magenta'
+    }[label] || 'white';
 
     ctx.save();
     ctx.strokeStyle = color;
@@ -181,13 +184,6 @@ export function drawLiveOverlay(objects = [], playerState) {
     ctx.beginPath(); ctx.arc(cx, cy, 3, 0, 2 * Math.PI); ctx.fill();
     ctx.restore();
   }
-
-  // Status frame border (draw once, with desired style)
-  ctx.save();
-  ctx.strokeStyle = 'lime';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(0, 0, overlay.width, overlay.height);
-  ctx.restore();
 }
 
 
@@ -200,77 +196,112 @@ const reusableYOLOCtx = reusableYOLOCanvas.getContext("2d");
  * - `src` can be the <video> element OR a canvas. We prefer <video>.
  * - While a request is in flight, we return the last good objects to avoid flicker.
  */
-export async function sendFrameToDetect(src, frameIndex, opts = {}) {
-  // If a detection is already running, keep showing the last stable result
+export async function sendFrameToDetectServer(canvas, frameIndex) {
   if (isDetectingFrame) {
-    const last = (window.lastDetectedFrame && Array.isArray(window.lastDetectedFrame.objects))
-      ? window.lastDetectedFrame.objects
-      : [];
-    // Don’t clear boxes while busy
-    return { objects: last };
+    return { objects: [] };
   }
-
   isDetectingFrame = true;
   try {
     const video = document.getElementById("videoPlayer");
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return { objects: [] };
 
-    // Prefer capturing straight from <video> (most reliable)
-    let useSrc = null;
-    let sw = 0, sh = 0, srcType = 'none';
+    reusableYOLOCanvas.width = vw;
+    reusableYOLOCanvas.height = vh;
+    reusableYOLOCtx.clearRect(0, 0, vw, vh);
+    reusableYOLOCtx.drawImage(video, 0, 0, vw, vh);   // use raw frame
 
-    if (video && video.videoWidth && video.videoHeight) {
-      useSrc = video;
-      sw = video.videoWidth;
-      sh = video.videoHeight;
-      srcType = 'video';
-    } else if (src && src.width && src.height) {
-      useSrc = src;               // fallback: an offscreen/source canvas
-      sw = src.width;
-      sh = src.height;
-      srcType = 'canvas';
-    }
-
-    if (!sw || !sh || sw < 32 || sh < 32) {
-      console.warn("⚠️ sendFrameToDetect: no valid capture size", { sw, sh, srcType, frameIndex });
-      return { objects: [] };
-    }
-
-    // Prepare capture surface at *exact* source size
-    reusableYOLOCanvas.width = sw;
-    reusableYOLOCanvas.height = sh;
-    reusableYOLOCtx.setTransform(1, 0, 0, 1, 0, 0);
-    reusableYOLOCtx.clearRect(0, 0, sw, sh);
-
-    // Draw the source frame
-    reusableYOLOCtx.drawImage(useSrc, 0, 0, sw, sh);
-
-    // Encode and send to your backend
-    const quality = typeof opts.jpegQuality === 'number' ? opts.jpegQuality : 0.85;
-    const dataURL = reusableYOLOCanvas.toDataURL("image/jpeg", quality);
-
+    const dataURL = reusableYOLOCanvas.toDataURL("image/jpeg", 0.5);
     const res = await fetch("/detect_frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ frame: dataURL, width: sw, height: sh }),
+      body: JSON.stringify({ frame: dataURL, width: vw, height: vh }),
     });
-
-    if (!res.ok) {
-      console.error(`❌ Detection error (frame ${frameIndex}):`, res.status, await res.text().catch(()=>""));
-      return { objects: [] };
-    }
-
-    const data = await res.json().catch(() => ({}));
-    // Be tolerant to shape changes: {objects:[...]} or {detections:[...]}
-    const objects = Array.isArray(data.objects)
-      ? data.objects
-      : (Array.isArray(data.detections) ? data.detections : []);
-
-    return { objects };
-  } catch (err) {
-    console.error(`❌ Detection failure (frame ${frameIndex}):`, err);
+    if (!res.ok) return { objects: [] };
+    return await res.json(); // {objects:[], frameIndex?}
+  } catch (e) {
+    console.warn('server detect failed:', e);
     return { objects: [] };
   } finally {
     isDetectingFrame = false;
+  }
+}
+
+// --- preferred path: local WebGPU/WASM if ready; fallback to server ---
+// fix_overlay_display.js
+
+// create the worker once
+if (!window.__detWorker) {
+  window.__detWorker = new Worker('/static/js/detector.worker.js', { type: 'module' });
+  window.__detReady = false;
+  window.__detPending = new Map();
+
+  __detWorker.onmessage = (e) => {
+    const m = e.data || {};
+    if (m.type === 'ready') { window.__detReady = true; return; }
+    if (m.type === 'result') {
+      const p = window.__detPending.get(m.frameIndex);
+      if (p) { window.__detPending.delete(m.frameIndex); p.resolve({ objects: m.objects || [], frameIndex: m.frameIndex }); }
+      return;
+    }
+    if (m.type === 'error') {
+      console.warn('[detector.worker] Error:', m.error);
+      // do not block selection if model fails — keep app responsive
+      window.__detReady = false;
+    }
+  };
+
+  (async () => {
+    // Absolute URLs so the worker (separate scope) can fetch them
+    const PRIMARY  = new URL('/static/models/best.onnx', location.origin).toString();
+    const FALLBACK = new URL('/static/models/backup_best.onnx',    location.origin).toString();
+
+    // Optional: existence probe so we don’t spam fetch errors
+    const primaryOk = await fetch(PRIMARY, { method: 'HEAD' }).then(r => r.ok).catch(() => false);
+    const fbOk      = await fetch(FALLBACK, { method: 'HEAD' }).then(r => r.ok).catch(() => false);
+
+    __detWorker.postMessage({
+      type: 'init',
+      modelUrl: primaryOk ? PRIMARY : null,
+      fbUrl:    fbOk ? FALLBACK : null,
+      labels:   ['basketball','hoop','net','backboard','player']
+    });
+
+    // If nothing is available, don’t block the UI. You can still select hoop and run pose.
+    if (!primaryOk && !fbOk) {
+      console.warn('[detector] No ONNX models found at /static/models. Selection will still work; detections will be empty.');
+    }
+  })();
+}
+
+
+export async function sendFrameToDetect(canvas, frameIndex) {
+  if (USE_LOCAL_WORKER && window.__detReady) {
+    if (!window.__detReady || isDetectingFrame) return { objects: [] };
+    isDetectingFrame = true;
+
+    try {
+      const bmp = await createImageBitmap(canvas);
+      const vw = canvas.width, vh = canvas.height;
+
+      const result = new Promise(resolve => {
+        window.__detPending.set(frameIndex, { resolve });
+        // fail‑safe timeout so we never hang a frame
+        setTimeout(() => {
+          if (window.__detPending.has(frameIndex)) {
+            window.__detPending.delete(frameIndex);
+            resolve({ objects: [], frameIndex });
+          }
+        }, 300);
+      });
+
+      __detWorker.postMessage({ type: 'detect', frameIndex, bitmap: bmp, ow: vw, oh: vh }, [bmp]);
+      return await result;
+    } finally {
+      isDetectingFrame = false;
+    }
+    } else {
+    return await sendFrameToDetectServer(canvas, frameIndex);
   }
 }
 
@@ -406,13 +437,8 @@ export function syncOverlayToVideo() {
   overlay.style.position = 'absolute';
   overlay.style.left = '0';
   overlay.style.top  = '0';
-  overlay.style.zIndex = '10'; // make sure it's above the video, below HUD
+  overlay.style.zIndex = '10';
 
-  // 👇 only force 'none' when NOT picking
-  if (!window.__pickingHoop) {
-    overlay.style.setProperty('pointer-events', 'none', 'important');
-    overlay.style.cursor = 'default';
-  }
   console.log("✅ Canvas & video locked:", vw, vh);
 }
 

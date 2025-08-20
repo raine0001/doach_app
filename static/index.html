@@ -4,17 +4,10 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>D🏀ACH</title>
+  <link rel="icon" href="/static/favicon.ico">
 
   <!-- Core app/scripts (load each ONCE) -->
   <script src="/static/js/coachAssistant.js"></script>
-  <script type="module" src="/static/js/shot_logger.js"></script>
-
-  <script type="module" src="/static/js/app.js"></script>
-
-  <script type="module">
-    import { mountHamburgerMenu } from '/static/js/ui_menu.js?v=2';
-    mountHamburgerMenu();
-  </script>
 
   <!-- Core libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
@@ -26,18 +19,14 @@
     window.PoseLandmarker = PoseLandmarker;
   </script>
 
-  <!-- Styles (keep your existing stylesheet) -->
+  <!-- Styles -->
   <link rel="stylesheet" href="static/style.css" />
-  <!-- (Optional) Boxicons; safe to keep or remove if unused elsewhere -->
+  <!-- Boxicons -->
   <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
 
-  <!-- REMOVE the old sidebar script -->
-  <!-- <script src="static/script.js" defer></script> -->
 </head>
 
 <body>
-
-  <!-- 🔴 REMOVED: legacy <nav class="sidebar ..."> ... </nav> -->
 
   <!-- Overlay Prompt Message -->
   <div id="overlayPrompt" class="prompt-message" style="display:none;">Tap the hoop to begin setup</div>
@@ -83,15 +72,10 @@
 
   <!-- Mount the new Hamburger menu + Feedback widget -->
   <script type="module">
-    import { mountHamburgerMenu } from '/static/js/ui_menu.js';
     import { installFeedbackWidget } from '/static/js/feedback_widget.js';
-
-    // Mount UI once DOM is ready
-    window.addEventListener('DOMContentLoaded', () => {
-      mountHamburgerMenu();
-      installFeedbackWidget();
-    });
+    window.addEventListener('DOMContentLoaded', () => installFeedbackWidget());
   </script>
+
 
   <!-- (Keep) lightweight helpers already on the page -->
   <script>
@@ -114,5 +98,43 @@
       };
     });
   </script>
+
+  <script>
+    function startNativeVoice() {
+      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'startVoice' });
+    }
+    function stopNativeVoice() {
+      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'stopVoice' });
+    }
+    </script>
+
+    
+
+<!-- ui menu (classic, auto-mounts) -->
+<script src="/static/js/ui_menu.js?v=2"></script>
+
+<!-- app entry (ESM) imports the rest of your modules -->
+<script type="module" src="/static/js/app.js?v=20250820"></script>
+
+<!-- local detector enable (ESM) -->
+<script type="module">
+  (async () => {
+    if (!window.localDetector) {
+      console.warn('[LocalDetector] not loaded; using server detector.');
+      return;
+    }
+    try {
+      const ok = await window.localDetector.enable(
+        '/static/models/best.onnx',
+        ['basketball','hoop','net','backboard','player']
+      );
+      console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
+    } catch (e) {
+      console.warn('[LocalDetector] init failed; using server detector.', e);
+    }
+  })();
+</script>
+
+
 </body>
 </html>

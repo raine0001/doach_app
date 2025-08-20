@@ -21,6 +21,20 @@
   const SPEAK_DEDUP_MS = 1200;
   let __lastSpeak = { text: '', at: 0 };
 
+  // ---- Pref bridges (new) ----
+  // Read new UI prefs if present; fall back to older doachPrefs values.
+  function isAudioOn() {
+    if (typeof window.PREF_AUDIO_ENABLED !== 'undefined') return !!window.PREF_AUDIO_ENABLED;
+    const p = doachGetPrefs();                 // legacy store
+    return (p.audioOn !== false);              // default true
+  }
+  function isMicAllowed() {
+    if (typeof window.PREF_ALLOW_MIC !== 'undefined') return !!window.PREF_ALLOW_MIC;
+    const p = doachGetPrefs();
+    return (p.allowMic !== false);             // default true
+  }
+
+
   // ---------- Prefs + Presets ----------
   const LS_KEY = 'doachPrefs';
 
@@ -98,6 +112,15 @@
     reset: () => memSave({made:[],miss:[],golden:null,lastShot:null})
     };
 
+  // Receives native transcripts (from the iOS wrapper)
+  window.handleVoiceTranscript = async (text) => {
+    const lower = (text || '').toLowerCase();
+    // Reuse your wake-word/capture logic, or just route to your Q&A:
+    if (window.doachSpeak) window.doachSpeak(`You said: ${text}`);
+    // window.webkit?.messageHandlers?.doach?.postMessage({action: 'startVoice'})
+  };
+
+  
 
   // Export on window
   window.doachGetPrefs = doachGetPrefs;
@@ -347,6 +370,11 @@
 
   // ---------- Public: speak ----------
   window.doachSpeak = async function(input){
+    // respect UI pref: Audio on/off
+    if (!isAudioOn()) {
+      console.log('[Doach] audio muted by preferences');
+      return;
+    }
     const p = {...{voice:DOACH.voice, tts:DOACH.tts, speed:1, volume:1, bassDb:0, trebleDb:0}, ...getPrefs()};
     const text = typeof input==='string' ? input : (input?.text || '');
     if(!text) return;
@@ -657,321 +685,455 @@
   return issues;
   };
 
+// ───────────────────────────────────────────────
+// Hands-Free Doach (standalone, no global collisions)
+// Exposes: window.doachHandsFree.start(), .stop(), .toggle(), .isActive()
+// ───────────────────────────────────────────────
+(() => {
+  if (window.__doachHFInit) return;          // prevent duplicate init
+  window.__doachHFInit = true;
 
-//  hands free Doach integration
-(function(){
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) {
+    console.warn('[Doach HF] Web Speech API not available');
+    window.doachHandsFree = { start(){}, stop(){}, toggle(){}, isActive:()=>false };
+    return;
+  }
 
+  // --- light metrics → answer helper (kept local to avoid globals)
   function answerFromMetrics(q, last, golden){
     if (!last?.poseSnapshot) return "I need a shot first to analyze.";
     const p = last.poseSnapshot;
     const g = golden || {};
     q = (q||'').toLowerCase();
+    const say = (s)=>s.replace(/\s+/g,' ').trim();
 
-    const say = (s) => s.replace(/\s+/g,' ').trim();
-
-    if (q.match(/foot|feet|base|stance/)) {
+    if (/foot|feet|base|stance/.test(q)) {
       const w = Math.round(p.stanceWidthFeet||p.stanceWidth||0);
-      const diff = (g.stanceWidthFeet? w - Math.round(g.stanceWidthFeet) : 0);
+      const tgt = g.stanceWidthFeet ? `, target ${Math.round(g.stanceWidthFeet)}px (Δ${w-Math.round(g.stanceWidthFeet)})` : '';
       const angle = Math.round(p.feetAngleDiff||0);
       const stag  = Math.round(p.feetStagger||0);
-      return say(`Feet width ${w}px${g.stanceWidthFeet?`, target ${Math.round(g.stanceWidthFeet)}px (Δ${diff})`:''}. 
-                  Toe alignment off by ${angle}°. ${stag>10?'Feet staggered; level your base.':'Base is level.'}`);
+      return say(`Feet width ${w}px${tgt}. Toe alignment off by ${angle}°. ${stag>10?'Feet staggered; level your base.':'Base is level.'}`);
     }
-
-    if (q.match(/release|follow/)) {
-      const ang = p.shoulderToWristAngle ?? 0;
+    if (/release|follow/.test(q)) {
+      const ang = Math.round(p.shoulderToWristAngle ?? 0);
       const high = p.releaseAboveShoulder ? "above" : "below";
       const wristVsElbow = (p.wristY!=null && p.elbowY!=null && p.wristY > p.elbowY + 10) ? "low" : "high";
       return say(`Arm angle ${ang}°. Release is ${high} shoulder. Wrist finished ${wristVsElbow}. Aim for a higher vertical finish.`);
     }
-
-    if (q.match(/power|leg|knee/)) {
+    if (/power|leg|knee/.test(q)) {
       const k = Math.round(p.kneeFlex||0);
       const tgt = g.kneeFlex ? `; target ~${Math.round(g.kneeFlex)}` : '';
       return say(`Knee bend ${k}px${tgt}. ${k < (g.kneeFlex||28)*0.75 ? 'Add more bend for power.' : 'Power from legs looked solid.'}`);
     }
-
-    if (q.match(/arc|entry/)) {
+    if (/arc|entry/.test(q)) {
       const ea = Math.round(last.entryAngle ?? 0);
-      const ga = golden?.entryAngle ? Math.round(golden.entryAngle) : 50;
+      const ga = g.entryAngle ? Math.round(g.entryAngle) : 50;
       return say(`Entry angle ${ea}°. ${Math.abs(ea-ga)<=5?'On target.': ea<ga?'A bit flat — add arc.':'A tad steep — soften the arc.'}`);
     }
-
-    if (q.match(/accur|make|made/)) {
-      const m = (window.DOACH_MEM.get().made||[]).length;
-      const total = (window.DOACH_MEM.get().made||[]).length + (window.DOACH_MEM.get().miss||[]).length;
-      const acc = total? Math.round(100*m/total):0;
-      return say(`Session accuracy ${acc}% (${m}/${total}).`);
+    if (/accur|make|made/.test(q)) {
+      const mem = window.DOACH_MEM?.get?.() || {};
+      const made = (mem.made||[]).length;
+      const miss = (mem.miss||[]).length;
+      const total = made + miss;
+      const acc = total ? Math.round(100*made/total) : 0;
+      return say(`Session accuracy ${acc}% (${made}/${total}).`);
     }
-
     return "Ask about feet, release, power, arc, or accuracy.";
   }
 
-  let rec=null, listening=false;
-  window.startDoachListener = function(){
-    if (!SR) { window.doachSpeak?.("Voice input not supported on this browser."); return; }
-    if (listening) return;
-    rec = new SR(); rec.lang='en-US'; rec.continuous=true; rec.interimResults=false;
-    rec.onresult = (e)=>{
+  // --- private state for this module (distinct names)
+  let hfRec = null;
+  let hfActive = false;
+  let hfStarting = false;
+  let hfRestartTimer = null;
+
+  function tryRestart() {
+    if (!hfRec || document.hidden || hfStarting || hfActive) return;
+    hfStarting = true;
+    try { hfRec.start(); }
+    catch { hfStarting = false; setTimeout(() => { try { hfRec.start(); hfStarting = true; } catch {} }, 400); }
+  }
+
+  async function start() {
+    if (hfActive || hfStarting) return;
+    // permission prime (helps UX)
+    try { await navigator.mediaDevices.getUserMedia({ audio:true }); } catch {}
+
+    hfRec = new SR();
+    hfRec.lang = 'en-US';
+    hfRec.continuous = true;       // hands-free mode
+    hfRec.interimResults = false;
+
+    hfRec.onstart = () => { hfStarting = false; hfActive = true; };
+
+    hfRec.onresult = (e) => {
       const transcript = Array.from(e.results).map(r=>r[0].transcript).join(' ');
-      const mem = window.DOACH_MEM.get();
+      const mem = window.DOACH_MEM?.get?.() || {};
       const reply = answerFromMetrics(transcript, mem.lastShot, mem.golden);
       window.doachSpeak?.(reply);
+
       const box = document.getElementById('coachNotes');
-      if (box) box.innerHTML = `<strong>🎙 You:</strong> ${transcript}<br><strong>🤖 Doach:</strong> ${reply}`;
+      if (box) box.innerHTML =
+        `<strong>🎙 You:</strong> ${transcript}<br><strong>🤖 Doach:</strong> ${reply}`;
     };
-    rec.onerror = ()=>{};
-    rec.onend = ()=>{ listening=false; };
-    rec.start(); listening=true;
+
+    hfRec.onerror = (ev) => {
+      const err = ev?.error || String(ev);
+      if (err === 'no-speech') return; // harmless; keep listening
+      if (['aborted','not-allowed','service-not-allowed','audio-capture'].includes(err)) {
+        stop(); return;                 // needs user action
+      }
+      // soft backoff restart
+      clearTimeout(hfRestartTimer);
+      hfRestartTimer = setTimeout(tryRestart, 800);
+    };
+
+    hfRec.onend = () => {
+      hfActive = false;
+      if (!document.hidden) {
+        clearTimeout(hfRestartTimer);
+        hfRestartTimer = setTimeout(tryRestart, 300);
+      }
+    };
+
+    hfStarting = true;
+    try { hfRec.start(); }
+    catch { hfStarting = false; setTimeout(() => { try { hfRec.start(); hfStarting = true; } catch {} }, 400); }
+
     window.doachSpeak?.("Listening. Ask about feet, release, power, arc, or accuracy.");
+  }
+
+  function stop() {
+    clearTimeout(hfRestartTimer);
+    hfRestartTimer = null;
+    hfStarting = false;
+    hfActive = false;
+    try { hfRec?.stop(); } catch {}
+    hfRec = null;
+  }
+
+  document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+
+  // public API
+  window.doachHandsFree = {
+    start, stop,
+    toggle(){ (hfActive || hfStarting) ? stop() : start(); },
+    isActive: () => hfActive
   };
-  window.stopDoachListener = function(){ try{ rec?.stop(); }catch{} listening=false; };
-  })();
+})();
 
-  let __lastShotEventAt = 0;
-  let __lastShotSig = '';
 
-  function shotSig(s) {
-    // build a stable signature using fields that don't change
-    return [
-      s.__idx ?? '',
-      s.id ?? '',
-      s.startFrame ?? '',
-      s.ts ?? '',
-      s.entryAngle ?? '',
-      s.releaseAngle ?? '',
-      s.made ? 1 : 0
-    ].join('|');
+let __processedShotKeys = new Set();
+const __processedExpireMs = 10_000; // keep keys ~10s then GC
+let __processedTimestamps = [];
+
+function makeShotKey(s) {
+  // Build a stable signature from fields that don't change across re-emits
+  const idLike = s.id ?? s.__idx ?? '';
+  const start = s.startFrame ?? s.start ?? '';
+  const end   = s.endFrame ?? s.end ?? '';
+  const video = s.videoId ?? s.src ?? '';
+  return [idLike, start, end, video].join('|');
+}
+
+function rememberKey(key) {
+  const now = Date.now();
+  __processedShotKeys.add(key);
+  __processedTimestamps.push([key, now]);
+  // GC old keys
+  while (__processedTimestamps.length &&
+        (now - __processedTimestamps[0][1]) > __processedExpireMs) {
+    const [oldKey] = __processedTimestamps.shift();
+    __processedShotKeys.delete(oldKey);
   }
+}
 
-  let __processedShotKeys = new Set();
-  const __processedExpireMs = 10_000; // keep keys ~10s then GC
-  let __processedTimestamps = [];
+window.addEventListener('shot:summary', (e) => {
+  // If we’ve already handled THIS object, bail (covers re-dispatch)
+  if (e.detail && e.detail.__doachHandled) return;
 
-  function makeShotKey(s) {
-    // Build a stable signature from fields that don't change across re-emits
-    const idLike = s.id ?? s.__idx ?? '';
-    const start = s.startFrame ?? s.start ?? '';
-    const end   = s.endFrame ?? s.end ?? '';
-    const video = s.videoId ?? s.src ?? '';
-    return [idLike, start, end, video].join('|');
+  const shot = e.detail;
+  const key = makeShotKey(shot || {});
+  if (key && __processedShotKeys.has(key)) return; // already handled a twin
+
+  // Mark original payload so a re-dispatch of the same object won’t run again
+  if (shot) shot.__doachHandled = true;
+  rememberKey(key);
+
+  console.log('[Doach] shot:summary handled key=', key, shot);
+
+  // proceed with your existing logic
+  const cloned = { ...shot };
+  if (!cloned.poseSnapshot && window.playerState) {
+    cloned.poseSnapshot = window.capturePoseSnapshot(window.playerState, window.getLockedHoopBox?.());
   }
+  window.DOACH_MEM.addShot(cloned);
+  window.updateCoachNotes?.(cloned);
+  //window.doachOnShot?.(cloned);   // speak + one-liner
+});
 
-  function rememberKey(key) {
-    const now = Date.now();
-    __processedShotKeys.add(key);
-    __processedTimestamps.push([key, now]);
-    // GC old keys
-    while (__processedTimestamps.length &&
-          (now - __processedTimestamps[0][1]) > __processedExpireMs) {
-      const [oldKey] = __processedTimestamps.shift();
-      __processedShotKeys.delete(oldKey);
+
+
+// ───────────────────────────────────────────────
+// DOACH Voice Q&A (single, hardened instance)
+// ───────────────────────────────────────────────
+(function () {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return; }
+
+  // Wake words (loose match)
+  const DOACH = (window.DOACH ||= {});
+  DOACH.WAKE_WORDS ||= ['hey doach', 'my coach', 'coach', 'douch'];
+
+  const prefs = (window.doachGetPrefs?.() || {});
+
+  // --- recognizer + state (define all the vars used below!)
+  const recog = new SR();
+  recog.lang = prefs.lang || 'en-US';
+  recog.interimResults = true;
+  recog.continuous = false;     // more reliable cross-browser than true
+
+  let listening = false;
+  let starting  = false;        // start() in-flight gate
+  let armed     = false;        // user armed (allowed auto-restart)
+  let restartTimer  = null;
+
+  let captureMode   = false;    // true after wake-word; captures the question
+  let captureTimer  = null;
+
+  const norm = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const hasWake = (t) => {
+    const n = norm(t);
+    return DOACH.WAKE_WORDS.some(w => n.includes(norm(w)));
+  };
+
+  function lastShot() { return window.DOACH_MEM?.lastShot?.() || null; }
+
+  function answerLocal(q) {
+    const L = lastShot();
+    if (!L) return "I don't have a shot yet. Take one and ask again.";
+    const p = L.poseSnapshot || {};
+    const parts = [];
+    const n = norm(q);
+
+    // Feet / stance
+    if (/(foot|feet|stance)/.test(n)) {
+      const w = p.stanceWidth;
+      parts.push(w == null
+        ? "I couldn't see your feet clearly."
+        : `Stance width was ${Math.round(w)}px — ${w < 100 ? 'a bit narrow' : 'solid'}. Aim for about shoulder width plus a bit.`);
     }
+    // Release / wrist / elbow
+    if (/(release|wrist|elbow|follow)/.test(n)) {
+      const ang = p.shoulderToWristAngle;
+      parts.push(ang == null
+        ? "I couldn't read your arm angle."
+        : `Release angle was ~${Math.round(ang)}°. Try finishing near 50–60° with a full follow-through.`);
+    }
+    // Power / knee bend
+    if (/(power|legs|knee|dip|bend)/.test(n)) {
+      const k = p.kneeFlex;
+      parts.push(k == null
+        ? "I couldn't estimate knee bend."
+        : `Knee bend was ~${Math.round(k)}px. Add a bit more load if the shot felt short.`);
+    }
+    // Arc / entry
+    if (/(arc|entry|angle)/.test(n)) {
+      const arc = Math.round(L.arcHeight || 0);
+      const entry = L.entryAngle ?? '–';
+      parts.push(`Arc ~${arc}px, entry ${entry}°. Target mid-40s to low-50s.`);
+    }
+    // Makes / accuracy
+    if (/(make|accuracy|percent|score)/.test(n)) {
+      const recent = window.DOACH_MEM?.recent?.(10) || [];
+      const made = recent.filter(s => s.made).length;
+      parts.push(`Last ${recent.length} shots: ${made} made (${recent.length ? Math.round(made / recent.length * 100) : 0}%).`);
+    }
+
+    if (!parts.length) {
+      const issues = window.summarizePoseIssues?.(L) || [];
+      parts.push(`Last shot was ${L.made ? 'made' : 'missed'} — arc ${Math.round(L.arcHeight || 0)}px, entry ${L.entryAngle ?? '–'}°, release ${L.releaseAngle ?? '–'}°.`);
+      if (issues[0]) parts.push(issues[0]);
+    }
+    return parts.join(' ');
   }
 
-  window.addEventListener('shot:summary', (e) => {
-    // If we’ve already handled THIS object, bail (covers re-dispatch)
-    if (e.detail && e.detail.__doachHandled) return;
-
-    const shot = e.detail;
-    const key = makeShotKey(shot || {});
-    if (key && __processedShotKeys.has(key)) return; // already handled a twin
-
-    // Mark original payload so a re-dispatch of the same object won’t run again
-    if (shot) shot.__doachHandled = true;
-    rememberKey(key);
-
-    console.log('[Doach] shot:summary handled key=', key, shot);
-
-    // proceed with your existing logic
-    const cloned = { ...shot };
-    if (!cloned.poseSnapshot && window.playerState) {
-      cloned.poseSnapshot = window.capturePoseSnapshot(window.playerState, window.getLockedHoopBox?.());
+  function showDot(on) {
+    const root = document.getElementById('hudRoot') || document.body || document.documentElement;
+    if (!root) return;
+    let dot = document.getElementById('doachVoiceDot');
+    if (!dot) {
+      dot = document.createElement('div');
+      dot.id = 'doachVoiceDot';
+      Object.assign(dot.style, {
+        position: 'absolute', right: '12px', top: '12px',
+        width: '10px', height: '10px', borderRadius: '50%',
+        background: 'red', opacity: '0.5', zIndex: 10050, pointerEvents: 'none'
+      });
+      root.appendChild(dot);
     }
-    window.DOACH_MEM.addShot(cloned);
-    window.updateCoachNotes?.(cloned);
-    //window.doachOnShot?.(cloned);   // speak + one-liner
+    dot.style.opacity = on ? '1' : '0.35';
+    dot.style.background = captureMode ? 'lime' : 'red';
+  }
+
+  // --- robust start/stop with gates
+  function tryStartRecog() {
+    if (document.hidden || starting || listening) return;
+    starting = true;
+    try { recog.start(); }
+    catch { starting = false; setTimeout(() => { try { recog.start(); starting = true; } catch {} }, 400); }
+  }
+
+  async function start() {
+    if (!isMicAllowed()) {                     // << new
+      console.warn('[Doach HF] mic disabled by preferences');
+      return;
+    }
+    
+    if (listening || starting) return;
+    // mic prime improves UX/permissions
+    try { await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {}
+    armed = true;
+    tryStartRecog();
+    showDot(true);
+  }
+
+  function stop() {
+    armed = false;
+    listening = false;
+    starting = false;
+    clearTimeout(restartTimer);
+    clearTimeout(captureTimer);
+    captureMode = false;
+    try { recog.stop(); } catch {}
+    showDot(false);
+  }
+
+  // --- handlers
+  recog.onstart = () => { starting = false; listening = true; showDot(true); };
+
+  recog.onresult = async (ev) => {
+    let finalText = '';
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      if (ev.results[i].isFinal) finalText += ev.results[i][0].transcript + ' ';
+    }
+    finalText = finalText.trim();
+    if (!finalText) return;
+
+    const lower = norm(finalText);
+
+    // Step 1: detect wake word
+    if (!captureMode && hasWake(lower)) {
+      captureMode = true;
+      showDot(true);
+      clearTimeout(captureTimer);
+      captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 5000);
+      window.doachSpeak?.("Yes?");
+      return;
+    }
+
+    // Step 2: capture the follow-up question
+    if (captureMode) {
+      clearTimeout(captureTimer);
+      captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 1500);
+
+      // strip wake words if included together
+      const wakeRe = new RegExp(DOACH.WAKE_WORDS.map(w => norm(w)).join('|'), 'g');
+      const q = lower.replace(wakeRe, '').trim();
+
+      let reply = answerLocal(q);
+
+      // Fallback to model for anything not covered by our quick rules
+      if (!/(feet|stance|release|wrist|elbow|power|knee|arc|entry|angle|make|accuracy)/.test(q) && DOACH.chatEndpoint) {
+        try {
+          const ctx = { lastShot: lastShot(), recent: window.DOACH_MEM?.recent?.(5) };
+          const r = await fetch(DOACH.chatEndpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: `You are Doach. User asked: "${finalText}". Use this context JSON:\n${JSON.stringify(ctx)}\nGive a specific, actionable answer in 1–2 short sentences.`,
+              model: DOACH.model
+            })
+          });
+          const j = await r.json();
+          if (j?.text) reply = j.text.trim();
+        } catch {}
+      }
+
+      window.doachSpeak?.(reply);
+    }
+  };
+
+  recog.onerror = (e) => {
+    const err = e?.error || String(e);
+
+    // Common & harmless — ignore (optional soft retry)
+    if (err === 'no-speech') {
+      if (armed && !document.hidden) {
+        clearTimeout(restartTimer);
+        restartTimer = setTimeout(tryStartRecog, 600);
+      }
+      return;
+    }
+
+    starting = false;
+    listening = false;
+
+    // Require a new user gesture for these — do not auto-restart
+    if (['aborted', 'not-allowed', 'service-not-allowed', 'audio-capture'].includes(err)) {
+      armed = false;
+      clearTimeout(restartTimer);
+      restartTimer = null;
+      showDot(false);
+      return;
+    }
+
+    // Backoff restart only if the user armed and tab visible
+    if (armed && !document.hidden) {
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(tryStartRecog, 800);
+    }
+  };
+
+  recog.onend = () => {
+    starting = false;
+    listening = false;
+    if (armed && !document.hidden) {
+      clearTimeout(restartTimer);
+      restartTimer = setTimeout(tryStartRecog, 300);
+    } else {
+      showDot(false);
+    }
+  };
+
+  // Pause on hidden tab; require re-arming on return
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stop();
   });
 
+  // Public controls
+  window.doachVoice = {
+    on: start,
+    off: stop,
+    toggle: () => (listening || starting ? stop() : start()),
+    isOn: () => listening
+  };
 
-  // ───────────────────────────────────────────────
-  // Voice Q&A: wake-word → capture → answer
-  // ───────────────────────────────────────────────
-  (function () {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return; }
-
-    // Wake words (loose match)
-    const DOACH = window.DOACH || (window.DOACH = {});
-    DOACH.WAKE_WORDS = DOACH.WAKE_WORDS || ['hey doach', 'my coach', 'coach', 'douch'];
-
-    const prefs = (window.doachGetPrefs?.() || {});
-    const recog = new SR();
-    recog.lang = prefs.lang || 'en-US';
-    recog.continuous = true;
-    recog.interimResults = true;
-
-    let listening = false;
-    let captureMode = false;          // true after wake-word; captures the question
-    let captureTimer = null;
-
-    const norm = (s) => String(s || '')
-      .toLowerCase()
-      .replace(/[^\p{L}\p{N}\s]/gu, '')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const hasWake = (t) => {
-      const n = norm(t);
-      return DOACH.WAKE_WORDS.some(w => n.includes(norm(w)));
-    };
-
-    function lastShot() {
-      return window.DOACH_MEM?.lastShot?.() || null;
-    }
-
-    function answerLocal(q) {
-      const L = lastShot();
-      if (!L) return "I don't have a shot yet. Take one and ask again.";
-      const p = L.poseSnapshot || {};
-      const parts = [];
-      const n = norm(q);
-
-      // Feet / stance
-      if (/(foot|feet|stance)/.test(n)) {
-        const w = p.stanceWidth;
-        if (w == null) parts.push("I couldn't see your feet clearly.");
-        else parts.push(`Stance width was ${Math.round(w)}px — ${w < 100 ? 'a bit narrow' : 'solid'}. Aim for about shoulder width plus a bit.`);
-      }
-
-      // Release / wrist / elbow
-      if (/(release|wrist|elbow|follow)/.test(n)) {
-        const ang = p.shoulderToWristAngle;
-        if (ang == null) parts.push("I couldn't read your arm angle.");
-        else parts.push(`Release angle was ~${Math.round(ang)}°. Try finishing near 50–60° with a full follow-through.`);
-      }
-
-      // Power / knee bend
-      if (/(power|legs|knee|dip|bend)/.test(n)) {
-        const k = p.kneeFlex;
-        if (k == null) parts.push("I couldn't estimate knee bend.");
-        else parts.push(`Knee bend was ~${Math.round(k)}px. Add a bit more load if the shot felt short.`);
-      }
-
-      // Arc / entry
-      if (/(arc|entry|angle)/.test(n)) {
-        const arc = Math.round(L.arcHeight || 0);
-        const entry = L.entryAngle ?? '–';
-        parts.push(`Arc ~${arc}px, entry ${entry}°. Target a consistent entry around mid-40s to low-50s.`);
-      }
-
-      // Makes / accuracy
-      if (/(make|accuracy|percent|score)/.test(n)) {
-        const recent = window.DOACH_MEM?.recent?.(10) || [];
-        const made = recent.filter(s => s.made).length;
-        parts.push(`Last ${recent.length} shots: ${made} made (${recent.length ? Math.round(made / recent.length * 100) : 0}%).`);
-      }
-
-      if (!parts.length) {
-        const issues = window.summarizePoseIssues?.(L) || [];
-        parts.push(`Last shot was ${L.made ? 'made' : 'missed'} — arc ${Math.round(L.arcHeight || 0)}px, entry ${L.entryAngle ?? '–'}°, release ${L.releaseAngle ?? '–'}°.`);
-        if (issues[0]) parts.push(issues[0]);
-      }
-      return parts.join(' ');
-    }
-
-    function showDot(on) {
-      const root = document.getElementById('hudRoot') || document.body || document.documentElement;
-      if (!root) return; // DOM not ready yet
-      let dot = document.getElementById('doachVoiceDot');
-      if (!dot) {
-        dot = document.createElement('div');
-        dot.id = 'doachVoiceDot';
-        Object.assign(dot.style, {
-          position: 'absolute', right: '12px', top: '12px',
-          width: '10px', height: '10px', borderRadius: '50%',
-          background: 'red', opacity: '0.5', zIndex: 10050, pointerEvents: 'none'
-        });
-        root.appendChild(dot);
-      }
-      dot.style.opacity = on ? '1' : '0.35';
-      dot.style.background = captureMode ? 'lime' : 'red';
-    }
-
-    function start() { if (listening) return; listening = true; try { recog.start(); } catch {} showDot(true); }
-    function stop()  { listening = false; try { recog.stop(); } catch {} clearTimeout(captureTimer); captureMode = false; showDot(false); }
-
-    recog.onresult = async (ev) => {
-      let finalText = '';
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        if (ev.results[i].isFinal) finalText += ev.results[i][0].transcript + ' ';
-      }
-      finalText = finalText.trim();
-      if (!finalText) return;
-
-      const lower = norm(finalText);
-
-      // Step 1: detect wake word
-      if (!captureMode && hasWake(lower)) {
-        captureMode = true;
-        showDot(true);
-        clearTimeout(captureTimer);
-        captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 5000);
-        window.doachSpeak?.("Yes?");
-        return;
-      }
-
-      // Step 2: capture the follow-up question
-      if (captureMode) {
-        clearTimeout(captureTimer);
-        captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 1500);
-
-        // strip wake words if included together
-        const wakeRe = new RegExp(DOACH.WAKE_WORDS.map(w => norm(w)).join('|'), 'g');
-        const q = lower.replace(wakeRe, '').trim();
-
-        let reply = answerLocal(q);
-
-        // Fallback to model for anything not covered by our quick rules
-        if (!/(feet|stance|release|wrist|elbow|power|knee|arc|entry|angle|make|accuracy)/.test(q)) {
-          try {
-            const ctx = { lastShot: lastShot(), recent: window.DOACH_MEM?.recent?.(5) };
-            const r = await fetch(DOACH.chatEndpoint, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                prompt: `You are Doach. User asked: "${finalText}". Use this context JSON:\n${JSON.stringify(ctx)}\nGive a specific, actionable answer in 1–2 short sentences.`,
-                model: DOACH.model
-              })
-            });
-            const j = await r.json();
-            if (j?.text) reply = j.text.trim();
-          } catch (e) { /* keep local reply */ }
-        }
-
-        window.doachSpeak?.(reply);
-      }
-    };
-
-    recog.onend = () => { if (listening) { try { recog.start(); } catch {} } };
-    recog.onerror = (e) => { console.warn('[Doach Voice] error', e?.error || e); };
-
-    // Public controls
-    window.doachVoice = {
-      on: start,
-      off: stop,
-      toggle: () => (listening ? stop() : start()),
-      isOn: () => listening
-    };
-
-    // Auto-start unless user disabled it in prefs
-    if (prefs.voiceWake !== false) {
+  // Auto-start unless user disabled it in prefs
+  if (prefs.voiceWake !== false) {
+  if (prefs.voiceWake !== false && isMicAllowed()) {
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => start());
     } else {
       start();
     }
-  }
-  })();
+  }}
+})();
+
   })();

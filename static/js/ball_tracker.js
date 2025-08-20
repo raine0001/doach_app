@@ -4,7 +4,7 @@ import { isBallInProximityZone } from './shot_logger.js';
 // ---- Config ----
 const MAX_FRAMES_TO_PROX = 40;   // frames after release before we give up
 const MAX_LIVE_TAIL      = 120;  // hard cap so trail never explodes
-const GAP_FILL_MAX       = 3;    // interpolate ≤3 frame holes
+const GAP_FILL_MAX       = 6;    // interpolate ≤3 frame holes
 const MIN_FREEZE_LEN     = 6;    // don’t freeze if comically short
 const PRE_ROLL_FRAMES    = 0;    // add for a little pre-roll
 const JUMP_PX_LIMIT_1    = 700;  // early path

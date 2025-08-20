@@ -147,6 +147,49 @@ window.frameMode = {
 
 
 
+// UI toggle for scorer mode (shot_logger.js/Weighted / Hybrid)  
+// UI toggle for scorer mode (Weighted / Hybrid)
+export function mountScorerToggle(container) {
+  const root = container || document.getElementById('promptBar') || document.body;
+  if (!root || root.__scorerToggleMounted) return;
+  root.__scorerToggleMounted = true;
+
+  const wrap = document.createElement('div');
+  wrap.className = 'scorer-toggle';
+  Object.assign(wrap.style, {
+    display: 'inline-flex',
+    gap: '10px',
+    alignItems: 'center',
+    marginLeft: '12px',
+    padding: '4px 6px',
+    background: 'rgba(0,0,0,.35)',
+    borderRadius: '8px'
+  });
+  wrap.innerHTML = `
+    <span style="opacity:.85">Scorer:</span>
+    <label><input type="radio" name="scorerMode" value="weighted"> Weighted</label>
+    <label><input type="radio" name="scorerMode" value="hybrid"> Hybrid</label>
+  `;
+  root.appendChild(wrap);
+
+  const apply = (m) => {
+    window.setScorerMode?.(m);
+    wrap.querySelectorAll('input[name="scorerMode"]').forEach(inp => {
+      inp.checked = (inp.value === m);
+    });
+  };
+
+  const saved = (window.SHOT_SCORER_MODE || localStorage.getItem('doach_scorer_mode') || 'weighted').toLowerCase();
+  apply(saved);
+
+  wrap.addEventListener('change', (e) => {
+    if (e.target?.name === 'scorerMode') apply(e.target.value);
+  });
+}
+window.mountScorerToggle = mountScorerToggle;
+
+
+
 export function setSessionStatus(text = '') {
   const root = ensureHudRoot();
   let badge = document.getElementById('sessionStatusBadge');

@@ -1,15 +1,15 @@
-# ✅ Unified DOACH app.py — optimized for dual model use, cleaned init, and removed /detect_video_init
+# Unified DOACH app.py — optimized for dual model use, cleaned init, and removed /detect_video_init
 
-from flask import Flask, request, Response, jsonify, send_from_directory
+from flask import Flask, request, Response, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import numpy as np
 import requests
 import cv2
+import os
 import torch
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics import YOLO
-import os
 import base64
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -19,6 +19,8 @@ import shutil
 import subprocess
 import json
 from pathlib import Path
+import io
+import wave
 
 torch.serialization.add_safe_globals([DetectionModel])
 
@@ -64,10 +66,9 @@ LABEL_TO_CLASS = {
 
 # 🔄 Load both models
 BASE_DIR = Path(__file__).resolve().parent
-# model_det = YOLO(BASE_DIR / "weights/best.pt")
-model_det = YOLO(BASE_DIR / "runs/detect/doach_gpt_v139/weights/best.pt")
-# model_seg = YOLO("training_output/doach_gpt_v1/weights/best.pt")          # Trained model
-print("✅ Models loaded: best.pt + best-seg.pt")
+model_det = YOLO(BASE_DIR / "weights/best.pt")
+# model_backup = YOLO(BASE_DIR / "weights/backup_best.pt")
+print("✅ Model loaded")
 
 # 🧠 In-memory state
 frame_memory = {'ball_path': [], 'frame_id': 0}
@@ -285,7 +286,7 @@ def api_coach():
     system = (
         "You are Doach, a concise basketball shooting coach. "
         "Be supportive and specific; give 1–3 concrete cues (e.g., 'elbow under ball', "
-        "'hold follow-through', 'higher arc'). Keep it under ~6 sentences."
+        "'hold follow-through', 'higher arc' , 'feet placement', 'snap wrist', 'release point'). Keep it under ~6 sentences."
         + lang_hint
     )
     msgs = [{"role": "system", "content": system}]
@@ -645,9 +646,6 @@ ALT_FRAME_DIR = os.path.join(app.root_path, 'frame_cache')  # fallback if symbol
 
 @app.route('/auto_detect_frame', methods=['POST'])
 def auto_detect_frame():
-    import os
-    from ultralytics import YOLO
-    import cv2
 
     data = request.get_json()
     folder = data['folder']
@@ -675,7 +673,7 @@ def auto_detect_frame():
         return jsonify({ 'error': f"Frame not found: {filename}" }), 500
 
     try:
-        model = YOLO("runs/detect/doach_gpt_v138/weights/best.pt")
+        model = YOLO("runs/detect/doach_gpt_v1313/weights/best.pt")
         model.model.names = ['basketball', 'hoop', 'net', 'backboard', 'player']  # must assign to model.model.names
 
         results = model.predict(image_path, conf=0.05, imgsz=1280)[0]
@@ -706,7 +704,6 @@ def auto_detect_frame():
 @app.route('/datasets/doach_seg/labels/train/<filename>')
 def serve_dataset_label(filename):
     return send_from_directory('datasets/doach_seg/labels/train', filename)
-
 
 # list_frame_folders route to populate dropdown on extraction page
 @app.route('/list_frame_folders')
@@ -851,42 +848,37 @@ def detect_frame():
     data = request.get_json()
     if not data or 'frame' not in data:
         return jsonify({'error': 'Missing frame'}), 400
-    
-    # print("🔍 Received frame:", len(data['frame']))
-    # print("📏 Resolution:", data.get("width"), data.get("height"))
 
     try:
-        # 🔄 Decode base64 image
+        # Decode base64 image
         b64 = data['frame'].split(',')[-1]
         img_data = base64.b64decode(b64)
         frame = cv2.imdecode(np.frombuffer(img_data, np.uint8), cv2.IMREAD_COLOR)
-        # print("✅ Frame decoded:", frame.shape)
 
-
-        # ✨ Optional: enhance contrast/sharpness
+        # Optional: crisp it up a bit
         sharpen_kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
         frame = cv2.filter2D(frame, -1, sharpen_kernel)
         frame = cv2.convertScaleAbs(frame, alpha=1.3, beta=15)
 
-        # 🧠 YOLO predict (low conf to capture all, we’ll filter manually)
+        # YOLO predict (low-ish conf; we'll filter below)
         results = model_det.predict(frame, conf=0.15, imgsz=1280)[0]
-        # print("🧪 Raw YOLO results:", results.boxes)
 
-
-        # 🔢 Your training class map — update if model class IDs differ
+        # Class ID -> label (must match training/export)
         label_map = {
             0: 'basketball',
             1: 'hoop',
-            2: 'player',
-            4: 'net'
+            2: 'net',
+            3: 'backboard',
+            4: 'player'
         }
 
-        # 🎯 Object-specific confidence filtering
+        # Per-class thresholds (tune as needed)
         class_conf_thresholds = {
-            'basketball': 0.41,
-            'hoop': 0.10,
-            'player': 0.33,
-            'net': 0.10
+            'basketball': 0.46,
+            'hoop':       0.12,  # was 0.02
+            'backboard':  0.10,  # was 0.02
+            'player':     0.40,  # was 0.33
+            'net':        0.15   # was 0.10
         }
 
         detections = []
@@ -894,22 +886,13 @@ def detect_frame():
             cls = int(det.cls[0])
             conf = float(det.conf[0])
             x1, y1, x2, y2 = map(int, det.xyxy[0])
-
             label = label_map.get(cls)
-            
-            # print(f"🔍 Detected class {cls} → {label}, conf={conf:.2f}, box=({x1},{y1},{x2},{y2})")
-
             if not label:
-                # print("⏭ Skipping: class not in label_map")
-                continue  # 🗑 Skip untracked class like 'backboard'
-
+                continue
             if conf < class_conf_thresholds.get(label, 0.25):
-                # print(f"⏭ Skipping {label}: conf {conf:.2f} < threshold {class_conf_thresholds[label]}")
-                continue  # 🧼 Too weak, discard
-
+                continue
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
-
             detections.append({
                 'label': label,
                 'confidence': round(conf, 3),
@@ -917,6 +900,84 @@ def detect_frame():
                 'y': cy,
                 'box': [x1, y1, x2, y2]
             })
+
+        # ---------- POST-PROCESS CORRECTIONS (runs BEFORE return) ----------
+        # helpers
+        def _w_h_ar(box):
+            x1, y1, x2, y2 = box
+            w = max(1, x2 - x1)
+            h = max(1, y2 - y1)
+            return w, h, w / float(h)
+
+        def _iou(a, b):
+            ax1, ay1, ax2, ay2 = a
+            bx1, by1, bx2, by2 = b
+            x1 = max(ax1, bx1)
+            y1 = max(ay1, by1)
+            x2 = min(ax2, bx2)
+            y2 = min(ay2, by2)
+            iw = max(0, x2 - x1)
+            ih = max(0, y2 - y1)
+            inter = iw * ih
+            ua = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+            return inter / float(ua) if ua > 0 else 0.0
+
+        bb = next((d for d in detections if d['label'] == 'backboard'), None)
+        ho = next((d for d in detections if d['label'] == 'hoop'), None)
+
+        # pass 1: flip player→net when it's flat & overlaps bb/hoop area
+        for d in detections:
+            if d['label'] != 'player':
+                continue
+            w, h, ar = _w_h_ar(d['box'])
+            area = w * h
+            near_bb = (bb and _iou(d['box'], bb['box']) > 0.15)
+            near_ho = (ho and _iou(d['box'], ho['box']) > 0.08)
+            if ar > 1.3 and (near_bb or near_ho):
+                if not bb:
+                    d['label'] = 'net'
+                else:
+                    bbw = bb['box'][2] - bb['box'][0]
+                    bbh = bb['box'][3] - bb['box'][1]
+                    if area < 0.35 * (bbw * bbh):
+                        d['label'] = 'net'
+
+        # pass 2: flip net→player when it's tall, bigger, and away from bb/hoop
+        for d in detections:
+            if d['label'] != 'net':
+                continue
+            w, h, ar = _w_h_ar(d['box'])
+            area = w * h
+            far_bb = (bb is None) or (_iou(d['box'], bb['box']) < 0.05)
+            far_ho = (ho is None) or (_iou(d['box'], ho['box']) < 0.03)
+            if ar < 0.9 and area > 3200 and far_bb and far_ho:
+                d['label'] = 'player'
+
+        # synthesize a hoop if missing (from net/backboard geometry)
+        if not any(d['label'] == 'hoop' for d in detections):
+            src = next((d for d in detections if d['label'] == 'net'), None) or \
+                  next((d for d in detections if d['label'] == 'backboard'), None)
+            if src:
+                x1, y1, x2, y2 = src['box']
+                w = max(1, x2 - x1)
+                cx = (x1 + x2) // 2
+                rim_w = max(40, int(0.55 * w))
+                xL = int(cx - rim_w / 2)
+                xR = int(cx + rim_w / 2)
+                yR = int(y1)  # rim ≈ top of net
+                detections.append({
+                    'label': 'hoop',
+                    'confidence': 0.51,
+                    'x': cx,
+                    'y': yR,
+                    'box': [xL, yR - 4, xR, yR + 4],
+                    'synthetic': True
+                })
+        # -------------------------------------------------------------------
+
+        # (optional) quick label histogram for debugging
+        # from collections import Counter
+        # print("Counts:", Counter([d['label'] for d in detections]))
 
         return jsonify({
             'frameIndex': frame_memory['frame_id'],
@@ -929,12 +990,8 @@ def detect_frame():
         return jsonify({'error': f'YOLO detection failed: {str(e)}'}), 500
 
 
-
-
-
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
-
 
 # WSGI entrypoint for PythonAnywhere
 application = app
