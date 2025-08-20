@@ -1,11 +1,12 @@
-# ✅ Unified DOACH app.py — optimized for dual model use, cleaned init, and removed /detect_video_init
+# Unified DOACH app.py — optimized for dual model use, cleaned init, and removed /detect_video_init
 
-from flask import Flask, request, Response, jsonify, send_from_directory
+from flask import Flask, request, Response, jsonify, send_from_directory, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import numpy as np
 import requests
 import cv2
+import os
 import torch
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics import YOLO
@@ -19,6 +20,8 @@ import shutil
 import subprocess
 import json
 from pathlib import Path
+import io
+import wave
 
 torch.serialization.add_safe_globals([DetectionModel])
 
@@ -65,9 +68,9 @@ LABEL_TO_CLASS = {
 # 🔄 Load both models
 BASE_DIR = Path(__file__).resolve().parent
 # model_det = YOLO(BASE_DIR / "weights/best.pt")
-model_det = YOLO(BASE_DIR / "runs/detect/doach_gpt_v139/weights/best.pt")
+model_det = YOLO(BASE_DIR / "weights/best.pt")
 # model_seg = YOLO("training_output/doach_gpt_v1/weights/best.pt")          # Trained model
-print("✅ Models loaded: best.pt + best-seg.pt")
+print("✅ Models loaded")
 
 # 🧠 In-memory state
 frame_memory = {'ball_path': [], 'frame_id': 0}
@@ -645,9 +648,6 @@ ALT_FRAME_DIR = os.path.join(app.root_path, 'frame_cache')  # fallback if symbol
 
 @app.route('/auto_detect_frame', methods=['POST'])
 def auto_detect_frame():
-    import os
-    from ultralytics import YOLO
-    import cv2
 
     data = request.get_json()
     folder = data['folder']
@@ -928,13 +928,8 @@ def detect_frame():
         traceback.print_exc()
         return jsonify({'error': f'YOLO detection failed: {str(e)}'}), 500
 
-
-
-
-
 if __name__ == '__main__':
     app.run(debug=True, port=5001)
-
 
 # WSGI entrypoint for PythonAnywhere
 application = app

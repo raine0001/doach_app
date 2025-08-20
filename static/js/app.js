@@ -43,43 +43,63 @@ export function setOverlayInteractive(on) {
 //           ------  Initialize overlay elements  -----         //
 //--------------------------------------------------------------//
 
-// Pick the active hoop before session start
+// One-time hoop picker (tap once to lock the rim)
 export function enableHoopPickOnce() {
   const ov = document.getElementById('overlay');
-  const promptEl = document.getElementById('overlayPrompt') || document.getElementById('promptBar');
+  const promptEl =
+    document.getElementById('overlayPrompt') ||
+    document.getElementById('promptBar');
+
   if (!ov) return;
-  if (window.__hoopConfirmed) return;
+  if (window.__hoopConfirmed) return; // already locked
+
+  // make overlay clickable & above the video
+  ov.style.pointerEvents = 'auto';
+  ov.style.position = 'absolute';
+  ov.style.left = '0';
+  ov.style.top = '0';
+  ov.style.zIndex = '10';
+  ov.style.cursor = 'crosshair';
+  ov.tabIndex = 0;
+  document.querySelector('.video-frame')
+    ?.style?.setProperty('position', 'relative');
 
   window.__pickingHoop = true;
-  window.__hoopPickArmed = true;
-  ov.style.setProperty('pointer-events', 'auto', 'important');
-  ov.style.cursor = 'crosshair';
 
-  const onPick = (e) => {
-    e.preventDefault(); e.stopPropagation();
+  const pickOnce = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
 
+    // use the same overlay element (ov) everywhere
     handleHoopSelection(e, ov, window.lastDetectedFrame, promptEl);
 
-    // confirmation and disarm
     window.__hoopConfirmed = true;
-    window.__hoopPickArmed = false;
     window.__pickingHoop = false;
 
-    ov.style.setProperty('pointer-events', 'none', 'important');
-    ov.style.cursor = 'default';
     if (promptEl) promptEl.style.display = 'none';
+    ov.style.cursor = 'default';
+    // keep pointerEvents = 'auto' so future UI clicks still work
+    // If you want to disable further clicking on the canvas, uncomment:
+    // ov.style.pointerEvents = 'none';
 
-    // let the prompt loop/listeners know
-    window.dispatchEvent?.(new CustomEvent('hoop:locked', { detail: getLockedHoopBox?.() }));
+    // notify anyone waiting
+    window.dispatchEvent?.(
+      new CustomEvent('hoop:locked', { detail: getLockedHoopBox?.() })
+    );
 
-    ov.removeEventListener('pointerdown', onPick);
-    ov.removeEventListener('click', onPick);
+    // unbind after the first successful pick
+    ov.removeEventListener('pointerdown', pickOnce);
+    ov.removeEventListener('click', pickOnce);
+
+    // kick analysis if your flow expects it here
+    window.startFrameAnalysis?.();
   };
 
-  ov.addEventListener('pointerdown', onPick, { once: true });
-  ov.addEventListener('click', onPick, { once: true });
-
+  // bind ONCE (support desktop & iOS)
+  ov.addEventListener('pointerdown', pickOnce, { passive: true });
+  ov.addEventListener('click', pickOnce, { passive: true });
 }
+
 
 window.enableHoopPickOnce = enableHoopPickOnce;
 
@@ -147,56 +167,42 @@ function installOverlayTracer() {
 }
 
 
-// ---- Boot & event wires ----
-document.addEventListener('DOMContentLoaded', () => {
-  const videoPlayer = document.getElementById('videoPlayer');
-  const videoInput  = document.getElementById('videoInput');
-  const overlay     = document.getElementById('overlay');
+// is the video loaded and ready for play/overlay?
+window.__readyForScoring = false;
+window.__detectorsWarmed = false;
+let __warmFrames = 0;
 
-  // Keep overlay pixel-locked to the video
-  videoPlayer.addEventListener('loadedmetadata', () => {
-    syncOverlayToVideo();
-  });
+function tickReadiness(objects, poses) {
+  const haveHoop = !!window.getLockedHoopBox?.();
+  const havePose = Array.isArray(poses) && poses.length > 0;
+  const haveBall = Array.isArray(objects) && objects.some(o => o.label === 'basketball' || o.label === 'ball');
+  if (haveHoop && havePose && haveBall) {
+    __warmFrames++;
+    if (__warmFrames >= 8) window.__readyForScoring = true; // ~0.25s at 30fps
+  }
+}
 
-  // Basic player hooks
-  videoPlayer.addEventListener('pause', () => { isTracking = false; });
-  videoPlayer.addEventListener('error', e => console.error('Video error:', e.target.error));
-  window.togglePlay = () => {
-    const gate = window.requireHoopOrPrompt;
-    if (typeof gate !== 'function' || !gate()) { videoPlayer.pause(); return; }
-    videoPlayer.paused ? videoPlayer.play() : videoPlayer.pause();
-  };
+async function prewarmDetectors(videoEl, canvasEl) {
+  // nudge pose off t=0 (your pose code guards 0, but this avoids the skip)
+  try {
+    if (videoEl.currentTime === 0) videoEl.currentTime = Math.min(0.08, (videoEl.duration || 1) * 0.01);
+  } catch {}
+  await new Promise(r => requestAnimationFrame(r));
 
+  const ctx = canvasEl.getContext('2d');
+  ctx.drawImage(videoEl, 0, 0, canvasEl.width, canvasEl.height);
 
-  // Kick analyzer if the hoop is already locked
-  videoPlayer.addEventListener('play', () => {
-    const gate = window.requireHoopOrPrompt;
-    console.log('[gate check]', {
-      hasFn: typeof gate === 'function',
-      confirmed: window.__hoopConfirmed,
-      hasBox: !!getLockedHoopBox?.()
-    });
-
-    if (typeof gate !== 'function' || !gate()) {
-      videoPlayer.pause();
-      return;
-    }
-
-    console.log('▶️ Video playback started');
-    window.analyzeVideoFrameByFrame?.(videoPlayer, overlay);
-  });
-
-
-  // File picker → load flow
-  videoInput?.addEventListener('change', (e) => window.handleVideoUpload?.(e));
-
-  // ref for use elsewhere
-  overlayEl = overlay;
-});
+  // one local/server detect without using the result
+  try { await sendFrameToDetect(canvasEl, -1); } catch {}
+  // one pose call to allocate internal buffers/timestamps
+  try { await forceSafePose(canvasEl, videoEl, -1); } catch {}
+  await new Promise(r => setTimeout(r, 120));
+}
 
 
 let __preDet = { on:false, raf:0, frame:0 };
 
+// Start pre-detection
 function startPreDetection(video) {
   if (__preDet.on) return;
   __preDet.on = true;
@@ -251,6 +257,58 @@ function stopPreDetection() {
   __preDet.raf = 0;
 }
 
+// ---- Boot & event wires ----
+document.addEventListener('DOMContentLoaded', () => {
+  const videoPlayer = document.getElementById('videoPlayer');
+  const videoInput  = document.getElementById('videoInput');
+  const overlay     = document.getElementById('overlay');
+
+  videoPlayer.addEventListener('loadedmetadata', () => {
+    syncOverlayToVideo();
+
+    // define startFrameAnalysis here so 'play' can call it
+    window.startFrameAnalysis = async () => {
+      if (!getLockedHoopBox?.()) return;        // still need the hoop
+      if (!window.__detectorsWarmed) {          // pre-warm once per video
+        await prewarmDetectors(videoPlayer, overlay);
+        window.__detectorsWarmed = true;
+      }
+      window.analyzeVideoFrameByFrame?.(videoPlayer, overlay);
+    };
+  });
+
+  // Basic player hooks (unchanged)
+  videoPlayer.addEventListener('pause', () => { isTracking = false; });
+  videoPlayer.addEventListener('error', e => console.error('Video error:', e.target.error));
+  window.togglePlay = () => {
+    const gate = window.requireHoopOrPrompt;
+    if (typeof gate !== 'function' || !gate()) { videoPlayer.pause(); return; }
+    videoPlayer.paused ? videoPlayer.play() : videoPlayer.pause();
+  };
+
+  // ▶️ On play, use startFrameAnalysis (not analyzeVideoFrameByFrame directly)
+  videoPlayer.addEventListener('play', () => {
+    const gate = window.requireHoopOrPrompt;
+    console.log('[gate check]', {
+      hasFn: typeof gate === 'function',
+      confirmed: window.__hoopConfirmed,
+      hasBox: !!getLockedHoopBox?.()
+    });
+
+    if (typeof gate !== 'function' || !gate()) {
+      videoPlayer.pause();
+      return;
+    }
+
+    console.log('▶️ Video playback started');
+    window.startFrameAnalysis?.();   // ✅ call the pre-warmed path
+  });
+
+  // File picker → load flow
+  videoInput?.addEventListener('change', (e) => window.handleVideoUpload?.(e));
+});
+
+
 
 //--------------------------------------------------------------//
 //     ----- Initialize the video player and overlay -----      //
@@ -259,18 +317,27 @@ window.handleVideoUpload = async function (event) {
   const file = event?.target?.files?.[0];
   if (!file) return;
 
-  const video = document.getElementById('videoPlayer');
+  const video  = document.getElementById('videoPlayer');
   const prompt = document.getElementById('overlayPrompt');
-  const loader = document.getElementById('session-status');
 
-  window.stopFrameAnalysis?.();  // ensure old RAF loop is dead
+  // ensure we have the overlay element in this scope
+  let overlayEl = document.getElementById('overlay');
+  if (!overlayEl) {
+    console.error('[load] overlay canvas not found');
+    return;
+  }
+  // expose if other modules reference window.overlayEl
+  window.overlayEl = overlayEl;
 
-  // Soft resets
+  // stop any previous analysis loop
+  window.stopFrameAnalysis?.();
+
+  // soft resets
   try { resetAll?.(); } catch {}
   try { resetPlayerTracker?.(); } catch {}
   try { resetShotStats?.(); } catch {}
 
-  // Local blob only (for now)
+  // local blob
   const blobURL = URL.createObjectURL(file);
   console.log('[load] begin', { name: file.name, size: file.size });
   try { video.pause(); } catch {}
@@ -278,27 +345,35 @@ window.handleVideoUpload = async function (event) {
   video.src = blobURL;
   video.load();
 
+  // on metadata, make sure overlay sizing/z-index is correct
   const onMeta = () => {
-    ensureOverlayCss();
-    installOverlayTracer();
+    ensureOverlayCss();          // positions .video-frame relative, etc.
+    installOverlayTracer?.();    // optional visual tracer
   };
   video.addEventListener('loadedmetadata', onMeta, { once: true });
 
-  // Wait for metadata or a clear error
+  // wait up to 10s for metadata
   await Promise.race([
     new Promise(res => video.addEventListener('loadedmetadata', res, { once: true })),
     new Promise((_, rej) => setTimeout(() => rej(new Error('metadata timeout')), 10000))
   ]);
 
-  // after metadata is confirmed
+  // after metadata
   try {
-    ensureOverlayCss?.();                          // stacking/sizing
-    initOverlay?.(overlayEl, window.poseDetector ?? {}); // safe even if poseDetector not ready yet
-    // after ensureOverlayCss(), initOverlay(...), etc. in handleVideoUpload
-    try { startPreDetection(video); } catch (e) { console.warn('predetect start failed:', e); }
-  } catch (e) { console.warn('initOverlay failed:', e); }
+    ensureOverlayCss?.();
 
-  // define with a captured canvas reference
+    // ✅ init overlay WITHOUT a fake detector — pose attaches later
+    initOverlay?.(overlayEl);
+
+    // optional pre-detect warmup, if you’ve got it
+    try { startPreDetection?.(video); } catch (e) {
+      console.warn('predetect start failed:', e);
+    }
+  } catch (e) {
+    console.warn('initOverlay failed:', e);
+  }
+
+  // define with captured refs
   window.startFrameAnalysis = () => {
     if (!getLockedHoopBox?.()) {
       console.warn('[analyze] not starting: hoop not locked');
@@ -308,7 +383,7 @@ window.handleVideoUpload = async function (event) {
       console.error('[analyze] no overlay canvas');
       return;
     }
-    try { stopPreDetection(); } catch {}
+    try { stopPreDetection?.(); } catch {}
     console.log('[analyze] starting main loop…');
     analyzeVideoFrameByFrame?.(video, overlayEl);
   };
@@ -318,18 +393,25 @@ window.handleVideoUpload = async function (event) {
     ready: video.readyState, src: video.currentSrc
   });
 
-  // Stack/size overlay and add click tracer
+  // (re)apply CSS and tracer (harmless if called twice)
   ensureOverlayCss();
-  installOverlayTracer();
+  installOverlayTracer?.();
 
-  // Show prompt, arm one-shot picker
-  if (prompt) { prompt.textContent = '📍 Tap the hoop to begin setup'; prompt.style.display = 'block'; }
-  enableHoopPickOnce();
+  // 🟢 arm the one-shot hoop picker and show the prompt
+  if (prompt) {
+    prompt.textContent = '📍 Tap the hoop to begin setup';
+    prompt.style.display = 'block';
+  }
+  // avoid double-binding if called again
+  if (!window.__hoopPickArmed) {
+    enableHoopPickOnce();
+    window.__hoopPickArmed = true;
+  }
 
-  // Controls
+  // mini controls overlay
   createPlaybackControls?.(video);
-
 };
+
 
 // ───────────────────────────────────────────────────────────────
 // Analyzer (event-driven, no time-warping of the video element)
@@ -474,6 +556,20 @@ window.analyzeVideoFrameByFrame = function analyzeVideoFrameByFrame(videoEl, can
         drawNetMotionStatus?.(buf, ballState.netMoved);
       }
 
+      // are we ready!?  pre-prep for video play
+      tickReadiness(window.lastDetectedFrame.objects, window.lastDetectedFrame.poses);
+
+      // draw overlays
+      updateDebugOverlay(window.lastDetectedFrame.poses, window.lastDetectedFrame.objects);
+      drawLiveOverlay(window.lastDetectedFrame.objects, playerState);
+
+      //skip scoring until we’re ready
+      if (!window.__readyForScoring) {
+        await new Promise(r => setTimeout(r, 1000 / 30));
+        videoElement.currentTime += 1 / 30;
+        __frameIdx++;
+        return;
+      }
 
       checkShotConditions?.(ballState, hoopBox, __frameIdx);
 

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>D🏀ACH</title>
+  <link rel="icon" href="/static/favicon.ico">
 
   <!-- Core app/scripts (load each ONCE) -->
   <script src="/static/js/coachAssistant.js"></script>
@@ -114,5 +115,27 @@
       };
     });
   </script>
+
+  <script>
+    function startNativeVoice() {
+      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'startVoice' });
+    }
+    function stopNativeVoice() {
+      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'stopVoice' });
+    }
+    </script>
+
+  <script type="module" src="/static/js/local_detector.js?v=2"></script>
+  <script type="module">
+    (async () => {
+      const ok = await window.localDetector.enable('/static/models/best.onnx', [
+        // put YOUR 9 class names in order
+        'basketball','hoop','player','net','backboard','class5','class6','class7','class8'
+      ]);
+      console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
+    })();
+  </script>
+
+
 </body>
 </html>

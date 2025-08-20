@@ -8,4 +8,8 @@ requests==2.31.0
 python-dotenv==1.0.1
 openai==1.35.7
 gunicorn==21.2.0
+torch==2.5.1+cpu
+torchvision==0.20.1+cpu
+--extra-index-url https://download.pytorch.org/whl/cpu
+Pillow==10.3.0
 

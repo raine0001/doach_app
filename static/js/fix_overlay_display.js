@@ -18,19 +18,14 @@ window.__pickingHoop = false;
 
 
 // initialize and display overlay
-export function initOverlay(canvas, detector) {
-  if (!canvas || !detector) { console.warn("initOverlay: missing"); return; }
-  overlay = canvas;
+export function initOverlay(canvas, detector = null) {
+  if (!canvas) {
+    console.warn("⚠️ initOverlay: no canvas");
+    return;
+  }
 
-  // make sure overlay never blocks the UI unless we say so
-  overlay.style.position = 'absolute';
-  overlay.style.left = '0';
-  overlay.style.top = '0';
-  overlay.style.zIndex = '5';          // HUD is higher (e.g., 999)
-  overlay.style.pointerEvents = 'none'; // ✨ default: doesn't capture input
-  overlay.style.userSelect = 'none';
-  
-  poseDetector = detector;
+  overlay = canvas;
+  poseDetector = detector || window.poseDetector || null;
 
   const video = document.getElementById('videoPlayer');
   if (video?.videoWidth && video?.videoHeight) {
@@ -38,25 +33,16 @@ export function initOverlay(canvas, detector) {
     overlay.height = video.videoHeight;
     ctx = overlay.getContext('2d');
   } else {
-    console.warn("⚠️ initOverlay: videoPlayer not ready or missing metadata.");
+    // video not ready yet; get a context anyway
+    ctx = overlay.getContext('2d');
+    console.warn("⚠️ initOverlay: video metadata not ready; will resize later in drawLiveOverlay");
   }
 
-  // make sure the overlay never intercepts input
-  overlay.style.pointerEvents = 'none';
-  overlay.style.userSelect    = 'none';
-  overlay.style.zIndex        = '5';
-  overlay.style.position = 'absolute';
-  
-  // Make overlay/HUD un-blockable
-  overlay.style.left = '0';
-  overlay.style.top = '0';
-  overlay.style.pointerEvents = 'none';
-  overlay.style.userSelect = 'none';
-  overlay.style.zIndex = '5'; // HUD stays above at 999
-
-  window.drawLiveOverlay    = drawLiveOverlay;
-  window.getOverlayContext  = () => ctx;
+  // expose for other modules, even if detector isn't ready yet
+  window.drawLiveOverlay   = drawLiveOverlay;
+  window.getOverlayContext = () => ctx;
 }
+
 
 // helper to toggle clickability
 export function setOverlayClickable(on) {
@@ -200,79 +186,50 @@ const reusableYOLOCtx = reusableYOLOCanvas.getContext("2d");
  * - `src` can be the <video> element OR a canvas. We prefer <video>.
  * - While a request is in flight, we return the last good objects to avoid flicker.
  */
-export async function sendFrameToDetect(src, frameIndex, opts = {}) {
-  // If a detection is already running, keep showing the last stable result
+export async function sendFrameToDetectServer(canvas, frameIndex) {
   if (isDetectingFrame) {
-    const last = (window.lastDetectedFrame && Array.isArray(window.lastDetectedFrame.objects))
-      ? window.lastDetectedFrame.objects
-      : [];
-    // Don’t clear boxes while busy
-    return { objects: last };
+    return { objects: [] };
   }
-
   isDetectingFrame = true;
   try {
     const video = document.getElementById("videoPlayer");
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw || !vh) return { objects: [] };
 
-    // Prefer capturing straight from <video> (most reliable)
-    let useSrc = null;
-    let sw = 0, sh = 0, srcType = 'none';
+    reusableYOLOCanvas.width = vw;
+    reusableYOLOCanvas.height = vh;
+    reusableYOLOCtx.clearRect(0, 0, vw, vh);
+    reusableYOLOCtx.drawImage(canvas, 0, 0, vw, vh);
 
-    if (video && video.videoWidth && video.videoHeight) {
-      useSrc = video;
-      sw = video.videoWidth;
-      sh = video.videoHeight;
-      srcType = 'video';
-    } else if (src && src.width && src.height) {
-      useSrc = src;               // fallback: an offscreen/source canvas
-      sw = src.width;
-      sh = src.height;
-      srcType = 'canvas';
-    }
-
-    if (!sw || !sh || sw < 32 || sh < 32) {
-      console.warn("⚠️ sendFrameToDetect: no valid capture size", { sw, sh, srcType, frameIndex });
-      return { objects: [] };
-    }
-
-    // Prepare capture surface at *exact* source size
-    reusableYOLOCanvas.width = sw;
-    reusableYOLOCanvas.height = sh;
-    reusableYOLOCtx.setTransform(1, 0, 0, 1, 0, 0);
-    reusableYOLOCtx.clearRect(0, 0, sw, sh);
-
-    // Draw the source frame
-    reusableYOLOCtx.drawImage(useSrc, 0, 0, sw, sh);
-
-    // Encode and send to your backend
-    const quality = typeof opts.jpegQuality === 'number' ? opts.jpegQuality : 0.85;
-    const dataURL = reusableYOLOCanvas.toDataURL("image/jpeg", quality);
-
+    const dataURL = reusableYOLOCanvas.toDataURL("image/jpeg", 0.5);
     const res = await fetch("/detect_frame", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ frame: dataURL, width: sw, height: sh }),
+      body: JSON.stringify({ frame: dataURL, width: vw, height: vh }),
     });
-
-    if (!res.ok) {
-      console.error(`❌ Detection error (frame ${frameIndex}):`, res.status, await res.text().catch(()=>""));
-      return { objects: [] };
-    }
-
-    const data = await res.json().catch(() => ({}));
-    // Be tolerant to shape changes: {objects:[...]} or {detections:[...]}
-    const objects = Array.isArray(data.objects)
-      ? data.objects
-      : (Array.isArray(data.detections) ? data.detections : []);
-
-    return { objects };
-  } catch (err) {
-    console.error(`❌ Detection failure (frame ${frameIndex}):`, err);
+    if (!res.ok) return { objects: [] };
+    return await res.json(); // {objects:[], frameIndex?}
+  } catch (e) {
+    console.warn('server detect failed:', e);
     return { objects: [] };
   } finally {
     isDetectingFrame = false;
   }
 }
+
+// --- preferred path: local WebGPU/WASM if ready; fallback to server ---
+export async function sendFrameToDetect(canvas, frameIndex) {
+  try {
+    if (window.localDetector?.ready) {
+      const res = await window.localDetector.detect(canvas, frameIndex);
+      return { objects: res.objects || [], frameIndex };
+    }
+  } catch (e) {
+    console.warn('[detect] local failed, fallback → server:', e);
+  }
+  return await sendFrameToDetectServer(canvas, frameIndex);
+}
+
 
 
 // record canvas tracing and coach summary

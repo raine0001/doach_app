@@ -148,6 +148,7 @@ function getMissReason(trail, hoopBox) {
 // shot_logger.js  — replace the whole detectAndLogShot function   //
 //-----------------------------------------------------------------//
 export function detectAndLogShot(trail, __frameIdx, hoopBox) {
+  if (!window.__readyForScoring) return false;
   if (!trail || trail.length < 3 || !hoopBox) return;
   if (__frameIdx === lastShotFrameId) return;
   lastShotFrameId = __frameIdx;
@@ -261,7 +262,7 @@ const WEIGHTS = {
   hoop: 0.15,
   net: 0.20,
   tubeHit: 0.30,
-  netMoved: 0.35,
+  netMoved: 0.4,
   trailCenter: 0.25,
 };
 
@@ -715,10 +716,11 @@ export function bufferDetectedObjects(objects) {
 }
 
 let lastNetPatch = null;
+let netPrimed = false;
+export function isNetPrimed() { return netPrimed; }
 
 export function detectNetMotion(canvas, hoopBox) {
   if (!canvas || !hoopBox) return false;
-
   const ctx = canvas.getContext('2d');
   const [x, y, w, h] = [hoopBox.x, hoopBox.y + hoopBox.h, hoopBox.w, hoopBox.h * 0.6];
 
@@ -727,7 +729,8 @@ export function detectNetMotion(canvas, hoopBox) {
 
   if (!lastNetPatch) {
     lastNetPatch = new Uint8ClampedArray(currentData);
-    return false;
+    netPrimed = true;            // ✅ baseline captured
+    return false;                // first sample never reports motion
   }
 
   let changed = 0;
