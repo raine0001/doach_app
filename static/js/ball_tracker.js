@@ -4,13 +4,11 @@ import { isBallInProximityZone } from './shot_logger.js';
 // ---- Config ----
 const MAX_FRAMES_TO_PROX = 40;   // frames after release before we give up
 const MAX_LIVE_TAIL      = 120;  // hard cap so trail never explodes
-const GAP_FILL_MAX       = 3;    // interpolate ≤3 frame holes
+const GAP_FILL_MAX       = 6;    // interpolate ≤3 frame holes
 const MIN_FREEZE_LEN     = 6;    // don’t freeze if comically short
-const PRE_ROLL_FRAMES    = 0;    // add for a little pre-roll
 const JUMP_PX_LIMIT_1    = 700;  // early path
 const JUMP_PX_LIMIT_2    = 1500; // later path
 const PRE_BUFFER_SIZE    = 90;   // frames
-const MIN_UP_RUN         = 3;    // need 3 upward frames to call it a release
 let preTrail = [];
 
 // ---- State machine ----
@@ -70,81 +68,109 @@ export function resetAll() {
   ballState.showFrozen = false;
 }
 
+// Attach the hoop to the ball state for tracking zone
 export function attachHoop(hoopLocked) {
-  // expects {x,y,w,h}; x,y = LEFT/TOP
   if (!hoopLocked) return;
-  ballState.hoop = { ...hoopLocked };
+  // Normalize: store as topleft with explicit anchor.
+  let h = { ...hoopLocked };
+  if (h.cx != null && h.cy != null) {
+    const w = Math.max(0, h.w || 0), H = Math.max(0, h.h || 0);
+    h = { x: Math.round(h.cx - w / 2), y: Math.round(h.cy - H / 2), w, h: H, anchor: 'topleft' };
+  } else {
+    h.anchor = 'topleft';
+    h.x = Math.round(h.x || 0);
+    h.y = Math.round(h.y || 0);
+  }
+  ballState.hoop = h;
 }
 
+// identify release frame for tracking
+// seed from existing points instead of wiping trail
 export function markRelease(frame) {
-  // estimate release inside the pre-buffer (ball started moving upward)
-  const startIdx = estimateReleaseIdx(preTrail);
-  const seed = preTrail.slice(startIdx);
+  const PRE_ROLL = Number(window.PRE_ROLL_FRAMES) || 12;
 
-  // Ignore duplicate release while already tracking this shot
-  if (ballState.state === State.TRACKING && ballState.releaseFrame != null) {
-    if (frame - ballState.releaseFrame <= 120) {
-      log('⏩ markRelease ignored (already tracking this shot)');
-      return;
-    }
+  // Take the last PRE_ROLL points we already drew (if any)
+  const keep = Array.isArray(ballState.trail) && ballState.trail.length
+    ? ballState.trail.slice(-PRE_ROLL)
+    : [];
+
+  // If you maintain a preTrail buffer, include it too (optional)
+  const src = (Array.isArray(ballState.preTrail) ? ballState.preTrail : []);
+  const take = Math.max(0, Math.min(PRE_ROLL - keep.length, src.length));
+  const seed = take ? src.slice(src.length - take) : [];
+
+  // 🔑 Do NOT wipe: start tracking with merged pre-roll
+  ballState.trail = [...seed, ...keep].map(p => ({
+    x: p.x, y: p.y, frame: p.frame ?? frame
+  }));
+
+  ballState.state = 'TRACKING';
+  ballState.releaseFrame = ballState.trail[0]?.frame ?? frame;
+  ballState.proxEnterFrame = ballState.proxEnterFrame ?? frame;
+  ballState.proxExitFrame = null;
+  ballState.showFrozen = false;
+  ballState.releaseSignaled = true;
+
+  try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: ballState.releaseFrame } })); } catch {}
+}
+
+
+// identify when ball enters proximity of the net to account for a shot attempt
+export function enterProximity(frame) {
+  // Only meaningful while pre-release (ARMING) or already TRACKING
+  if (ballState.state !== State.TRACKING && ballState.state !== State.ARMING) return;
+
+  // First time we see proximity for this attempt
+  if (ballState.proxEnterFrame == null) {
+    ballState.proxEnterFrame = frame;
+    log('🟩 Proximity ENTER @', frame);
   }
 
-  ballState.state = State.TRACKING;
-
-  ballState.trail = seed.length ? seed.map(p => ({ ...p })) : [];
-  ballState.releaseFrame = seed[0]?.frame ?? frame;
-  ballState.proxEnterFrame = null;
-  ballState.proxExitFrame = null;
-  preTrail.length = 0; // consumed
-  log('🎬 Release @', ballState.releaseFrame, `(seed=${seed.length})`);
-  ballState.showFrozen = false;
-}
-
-
-// identify when ball enters proximity of the next to account for a shot attempt
-export function enterProximity(frame) {
-  // called when point enters proximity zone
-  if (ballState.state === State.TRACKING || ballState.state === State.ARMING) {
-    if (ballState.proxEnterFrame == null) {
-      ballState.proxEnterFrame = frame;
-      log('🟩 Proximity ENTER @', frame);
-    }
-    // If we never started the shot yet, start it now (will seed from preTrail)
-    if (ballState.state === State.ARMING) markRelease(frame);
+  // If we were only arming and never fired release, do it now (once)
+  if (ballState.state === State.ARMING && !ballState.releaseSignaled) {
+    markRelease(frame);                  // your markRelease seeds from preTrail (no wipe)
+    ballState.releaseSignaled = true;    // latch so we never call it twice
+    try { window.dispatchEvent(new Event('shot:release')); } catch {}
   }
 }
 
 export function exitProximity(frame) {
   // called when point exits proximity zone
-  if (ballState.state === State.TRACKING) {
+  if (ballState.proxExitFrame == null) {
     ballState.proxExitFrame = frame;
-    ballState.state = State.FINALIZING;
     log('🟥 Proximity EXIT @', frame);
-    // freeze on next update tick (so last point is appended)
   }
+  // ⛔ Do NOT set FINALIZING here.
+  // Finalization (freeze + log + shot:summary) is handled centrally in checkShotConditions()
 }
 
 
 // Save only complete shots
 export function freezeShot(made = null) {
   if (ballState.trail.length < MIN_FREEZE_LEN) return;
-  // only save if we have both proximity enter & exit
+
+  // Require both proximity enter & exit (we only log complete prox segment)
   if (ballState.proxEnterFrame == null || ballState.proxExitFrame == null) {
     console.log('[trail] ⛔ not saved: incomplete proximity segment');
-    ballState.state = State.FROZEN; // still freeze/clear live
+    ballState.state = State.FROZEN;      // stop live trail anyway
+    ballState.showFrozen = true;
     return;
   }
+
   ballState.shots.push({
     made,
-    trail: ballState.trail.map(p => ({...p})),
-    release: ballState.releaseFrame,
+    trail: ballState.trail.map(p => ({ ...p })),
+    release:   ballState.releaseFrame,
     proxEnter: ballState.proxEnterFrame,
-    proxExit: ballState.proxExitFrame,
+    proxExit:  ballState.proxExitFrame,
   });
+
   ballState.state = State.FROZEN;
   ballState.showFrozen = true;
+
   console.log(`[trail] 💾 Shot saved (len=${ballState.trail.length})`);
 }
+
 
 
 export function downloadShotsJSON() {
@@ -162,29 +188,32 @@ export function updateBall(ball, frameIndex) {
   if (!ball || !Number.isFinite(ball.x) || !Number.isFinite(ball.y)) return;
   if (!ballState.hoop) return; // need hoop locked
 
+  // incoming coords are VIDEO px
   const p = { x: ball.x, y: ball.y, frame: frameIndex };
-  // Always keep a rolling pre-buffer while not tracking,
-  // so we can backfill the arc to the true release moment.
-  if (ballState.state === State.IDLE || ballState.state === State.ARMING) {
+  const state = ballState.state;
+
+  // --- Pre-roll while not tracking ---
+  if (state === State.IDLE || state === State.ARMING) {
+    // keep a small buffer so release can seed with continuity
     preTrail.push(p);
     if (preTrail.length > PRE_BUFFER_SIZE) preTrail.shift();
-  }
 
-  // when idle, decide if we should arm based on proximity (pre-release scanning)
-  if (ballState.state === State.IDLE) {
-    if (isBallInProximityZone(p)) {
+    // Arm only while NOT tracking; don't touch trail yet
+    const inProx = isBallInProximityZone(p);
+    if (inProx && state === State.IDLE) {
       ballState.state = State.ARMING;
       log('🟡 ARMING (proximity pre-release)');
     }
-    return; // do not accumulate trail yet
+    return; // <-- only return early in IDLE/ARMING
   }
 
-  // if TRACKING but never entered proximity, auto cancel after MAX_FRAMES_TO_PROX
-  if (ballState.state === State.TRACKING && ballState.proxEnterFrame == null) {
+  // --- From here on: TRACKING / FINALIZING only ---
+
+  // Cancel if we never reached proximity after release
+  if (state === State.TRACKING && ballState.proxEnterFrame == null) {
     const waited = frameIndex - (ballState.releaseFrame ?? frameIndex);
     if (waited > MAX_FRAMES_TO_PROX && !isBallInProximityZone(p)) {
       log('⌛ Cancel shot — no proximity within window');
-      // reset to FROZEN (no saved shot) or back to IDLE
       ballState.state = State.IDLE;
       ballState.trail = [];
       ballState.releaseFrame = null;
@@ -192,62 +221,60 @@ export function updateBall(ball, frameIndex) {
     }
   }
 
-  // proximity transitions while tracking
-  if (ballState.state === State.TRACKING) {
-    if (isBallInProximityZone(p)) {
+  // Proximity transitions while tracking
+  if (state === State.TRACKING) {
+    const inProx = isBallInProximityZone(p);
+    if (inProx) {
       if (ballState.proxEnterFrame == null) enterProximity(frameIndex);
-    } else {
-      // if we had already entered, exiting now means we can finalize
-      if (ballState.proxEnterFrame != null) exitProximity(frameIndex);
+    } else if (ballState.proxEnterFrame != null) {
+      exitProximity(frameIndex);
     }
   }
 
-  // collect live trail only AFTER release
-  if (ballState.state === State.TRACKING || ballState.state === State.FINALIZING) {
-    const last = ballState.trail.at(-1);
-    // ghost/jump guards
+  // --- Accumulate trail (TRACKING or FINALIZING) ---
+  if (state === State.TRACKING || state === State.FINALIZING) {
+    const trail = ballState.trail;
+
+    // de-dupe identical frame inserts
+    const last = trail.at?.(-1);
+    if (last && last.frame === p.frame) {
+      // replace if the new point is closer to last (optional)
+      const dNew  = Math.hypot(p.x - last.x, p.y - last.y);
+      if (dNew < 0.5) return; // same point
+    }
+
+    // jump guard (ignore huge teleports)
     if (last) {
       const dist = Math.hypot(p.x - last.x, p.y - last.y);
-      const maxJump = ballState.trail.length > 5 ? JUMP_PX_LIMIT_2 : JUMP_PX_LIMIT_1;
+      const maxJump = trail.length > 5 ? JUMP_PX_LIMIT_2 : JUMP_PX_LIMIT_1;
       if (dist > maxJump) return;
 
-      // fill small gaps (≤ GAP_FILL_MAX)
+      // fill small frame gaps
       const gap = p.frame - last.frame;
       if (gap > 1 && gap <= GAP_FILL_MAX) {
-        const dx = (p.x - last.x) / gap;
-        const dy = (p.y - last.y) / gap;
+        const dx = (p.x - last.x) / gap, dy = (p.y - last.y) / gap;
         for (let k = 1; k < gap; k++) {
-          ballState.trail.push({ x: last.x + dx * k, y: last.y + dy * k, frame: last.frame + k });
+          trail.push({ x: last.x + dx * k, y: last.y + dy * k, frame: last.frame + k });
         }
       }
     }
 
-    ballState.trail.push(p);
+    trail.push(p);
+
+    // keep live tail bounded
+    if (trail.length > MAX_LIVE_TAIL) {
+      trail.splice(0, trail.length - MAX_LIVE_TAIL);
+    }
   }
 
-  // finalize once we’ve exited proximity (we push the exit point first)
+  // finalize after exit (your scorer should call this by setting FINALIZING)
   if (ballState.state === State.FINALIZING) {
-    freezeShot(null);       // let scorer fill .made later
-    // stay in FROZEN until next release resets us
+    freezeShot(null);
   }
 }
+
 
 // ---------- utils ---------- //
-
-function estimateReleaseIdx(buf) {
-  if (!buf || buf.length < MIN_UP_RUN + 1) return 0;
-  // scan backwards for the last run of upward motion (y decreasing on canvas)
-  for (let i = buf.length - MIN_UP_RUN - 1; i >= 1; i--) {
-    let up = true;
-    for (let k = 0; k < MIN_UP_RUN; k++) {
-      const a = buf[i + k], b = buf[i + k + 1];
-      if (!(b.y < a.y)) { up = false; break; }  // not rising
-    }
-    if (up) return Math.max(0, i - 1); // include 1 frame pre-roll
-  }
-  return Math.max(0, buf.length - 18); // safe fallback
-}
-
 function log(...args) { console.log('[trail]', ...args); }
 
 // used in app.js.analyzeVideoFrameByFrame
@@ -297,7 +324,6 @@ export function drawBallTrails(ctx) {
     drawOutlinedCircles(ctx, ballState.trail, 15, 'rgba(180,130,255,0.95)', 2);
   }
 }
-
 
 function splitByPhase(trail, releaseF, enterF, exitF) {
   const idxFromFrame = f => {
@@ -430,10 +456,9 @@ function drawQualityRing(ctx, pts, radius = 20, stroke, lineWidth = 2) {
   ctx.restore();
 }
 
-
 // replay / draw a prior shot trail
 function drawOneShot(ctx, s) {
-  if (!s?.trail?.length) return;
+  if (!ctx || !s?.trail?.length) return;
   const { releaseSeg, arcSeg, proximitySeg } =
     splitByPhase(s.trail, s.release, s.proxEnter, s.proxExit);
 

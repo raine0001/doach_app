@@ -12,5 +12,16 @@
     "trebleDb": -7,
     "volume": 1,
     "name": "My Coach Voice"
+  },
+  {
+    "name": "steve",
+    "tts": "openai",
+    "voice": "verse",
+    "speed": 1.05,
+    "pitch": 0.95,
+    "volume": 0.4,
+    "bassDb": 20,
+    "trebleDb": -8,
+    "lang": "en-US"
   }
 ]

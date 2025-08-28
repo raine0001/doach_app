@@ -3,5 +3,8 @@
   "version": "0.1.0",
   "scripts": {
     "start": "echo 'Start script placeholder'"
+  },
+  "dependencies": {
+    "onnxruntime-web": "^1.20.0"
   }
 }

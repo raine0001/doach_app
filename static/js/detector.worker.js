@@ -1,25 +1,67 @@
-// static/js/detector.worker.js  (module worker)
-// attempt to use local resources
-// ONNX model in-browser (WebGPU if available, else WASM). Returns {label, confidence, box}.
+/* static/js/detector.worker.js  — classic worker (UMD ORT)
+ * Runs ONNX (wasm) and returns {label, confidence, box} in VIDEO pixels.
+ * Expected model(s): /static/models/best.onnx (and optional fb model).
+ * IMPORTANT: create this worker as CLASSIC in app.js:
+ *   const detWorker = new Worker('/static/js/detector.worker.js');
+ */
 
-let ort, session, inputName, inputShape;
-let MODEL_W = 640, MODEL_H = 640;
-let LABELS = ['basketball', 'hoop', 'player', 'net', 'backboard']; // override via init
+// ──────────────────────────────────────────────────────────────
+// ORT boot (UMD) — classic worker only; guard from double-import
+// ──────────────────────────────────────────────────────────────
+if (!self.__ORT_BOOTSTRAPPED__) {
+  if (!self.ort) {
+    importScripts('/static/vendor/onnxruntime-web/1.20.0/ort.min.js');
+  }
+  self.__ORT_BOOTSTRAPPED__ = true;
+}
+const ORT = self.ort;
 let provider = 'wasm';
 
-// Prefer WebGPU, fall back to WASM (with wasm paths set)
-async function loadOrt() {
+// WASM runtime config
+ORT.env.wasm.wasmPaths  = '/static/vendor/onnxruntime-web/1.20.0/';
+ORT.env.wasm.numThreads = 1;       // safest across browsers
+ORT.env.wasm.simd       = true;
+
+// ──────────────────────────────────────────────────────────────
+// Config & labels
+// ──────────────────────────────────────────────────────────────
+const DETECTOR_CFG_URL = '/static/config/detector.json';
+let MODEL_URL  = '/static/models/best.onnx';
+let MODEL_SIZE = 640;
+
+// **4-class fallback**; main thread may override via init.labels
+let LABELS = ['basketball', 'hoop', 'net','backboard', 'player'];
+let FB_LABELS = null;  // optional for fallback model
+
+// Normalization aliases
+const NORMALIZE = {
+  rim: 'hoop', ring: 'hoop', basket: 'hoop',
+  ball: 'basketball', 'sports ball': 'basketball',
+  person: 'player', player: 'player',
+  backboard: 'backboard',
+  net: 'net'
+};
+
+// Per-class score thresholds (tweak at runtime if needed)
+const THRESH = {
+  basketball: 0.26,
+  hoop:       0.68,
+  net:        0.25, 
+  player:     0.45,
+  backboard:  0.65
+};
+
+// ──────────────────────────────────────────────────────────────
+// Helpers
+// ──────────────────────────────────────────────────────────────
+async function loadDetectorConfig() {
   try {
-    ort = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/ort.webgpu.mjs');
-    provider = 'webgpu';
-  } catch (_) {
-    ort = await import('https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/ort.esm.min.js');
-    provider = 'wasm';
-    // make sure wasm binaries can be fetched
-    ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.20.0/dist/';
-    ort.env.wasm.numThreads = 2;
-    ort.env.wasm.simd = true;
-  }
+    const res = await fetch(DETECTOR_CFG_URL, { cache: 'no-store' });
+    if (!res.ok) return;
+    const cfg = await res.json();
+    if (cfg.model_url) MODEL_URL = cfg.model_url;
+    if (cfg.imgsz)     MODEL_SIZE = cfg.imgsz;
+  } catch {}
 }
 
 function letterboxBitmap(bmp, dw, dh) {
@@ -27,12 +69,13 @@ function letterboxBitmap(bmp, dw, dh) {
   const octx = oc.getContext('2d');
   octx.fillStyle = '#727272';
   octx.fillRect(0, 0, dw, dh);
+
   const iw = bmp.width, ih = bmp.height;
   const r = Math.min(dw / iw, dh / ih);
   const nw = Math.round(iw * r), nh = Math.round(ih * r);
   const dx = Math.floor((dw - nw) / 2), dy = Math.floor((dh - nh) / 2);
   octx.drawImage(bmp, 0, 0, iw, ih, dx, dy, nw, nh);
-  return { oc, dx, dy, r };
+  return { oc, dx, dy, r, iw, ih };
 }
 
 function hwcToCHWFloat(imgData, dw, dh) {
@@ -61,7 +104,7 @@ function iou(a, b) {
   return ua ? inter / ua : 0;
 }
 
-function nms(boxes, scores, labels, thr=0.45) {
+function nms(boxes, scores, labels, thr = 0.45) {
   const order = scores.map((s,i)=>[s,i]).sort((a,b)=>b[0]-a[0]).map(x=>x[1]);
   const keep = [];
   for (const i of order) {
@@ -74,12 +117,12 @@ function nms(boxes, scores, labels, thr=0.45) {
   return keep;
 }
 
-// YOLOv8-ish head: [1, C, N] or [1, N, C] → boxes/classes
-function postprocessYolo(output, dw, dh, dx, dy, r, ow, oh, scoreThr=0.25) {
+// Postprocess → VIDEO pixels; accepts override labels to prevent drift
+function postprocessYolo(output, dw, dh, dx, dy, r, iw, ih, ow, oh, scoreThr=0.25, labelsOverride=null) {
   const key = Object.keys(output)[0];
   const t = output[key];
-  const data = t.data;
-  const dims = t.dims;
+  const data = t.data, dims = t.dims;
+
   let rows, cols, trans = false;
   if (dims.length === 3) {
     if (dims[1] < dims[2]) { rows = dims[2]; cols = dims[1]; trans = true; } // [1,C,N]
@@ -87,55 +130,136 @@ function postprocessYolo(output, dw, dh, dx, dy, r, ow, oh, scoreThr=0.25) {
   } else if (dims.length === 2) { rows = dims[0]; cols = dims[1]; }
   else { rows = data.length / 84; cols = 84; }
 
-  const boxes = [], scores = [], clsIdx = [];
+  const LAB = labelsOverride || LABELS;
+  const boxes = [], scores = [], clsIdx = [], alts = [];
+
+  const toOrig = (cx, cy, w, h) => {
+    const x1m = cx - w/2, y1m = cy - h/2, x2m = cx + w/2, y2m = cy + h/2;
+    const lx1 = x1m - dx, ly1 = y1m - dy, lx2 = x2m - dx, ly2 = y2m - dy;
+    const bx1 = lx1 / r,  by1 = ly1 / r,  bx2 = lx2 / r,  by2 = ly2 / r;
+    const sx = ow / iw,   sy = oh / ih;
+    return [
+      Math.round(Math.max(0, Math.min(ow, bx1 * sx))),
+      Math.round(Math.max(0, Math.min(oh, by1 * sy))),
+      Math.round(Math.max(0, Math.min(ow, bx2 * sx))),
+      Math.round(Math.max(0, Math.min(oh, by2 * sy)))
+    ];
+  };
+
   for (let i = 0; i < rows; i++) {
     const at = c => trans ? data[c * rows + i] : data[i * cols + c];
     const cx = at(0), cy = at(1), w = at(2), h = at(3);
-    let best = -1, bestScore = 0;
+
+    let best = -1, bestScore = 0, alt = -1, altScore = 0;
     for (let c = 4; c < cols; c++) {
       const s = at(c);
-      if (s > bestScore) { bestScore = s; best = c - 4; }
+      if (s > bestScore) { alt = best; altScore = bestScore; best = c - 4; bestScore = s; }
+      else if (s > altScore) { alt = c - 4; altScore = s; }
     }
     if (bestScore < scoreThr) continue;
 
-    const x1m = cx - w/2, y1m = cy - h/2;
-    const x2m = cx + w/2, y2m = cy + h/2;
-
-    const x1 = Math.max(0, (x1m - dx) / r);
-    const y1 = Math.max(0, (y1m - dy) / r);
-    const x2 = Math.min(ow, (x2m - dx) / r);
-    const y2 = Math.min(oh, (y2m - dy) / r);
-
-    boxes.push([x1, y1, x2, y2]);
+    const b = toOrig(cx, cy, w, h);
+    boxes.push(b);
     scores.push(bestScore);
     clsIdx.push(best);
+    alts.push({ i: boxes.length - 1, alt, altScore });
   }
 
   const keep = nms(boxes, scores, clsIdx, 0.45);
-  return keep.map(i => ({
-    label: LABELS[clsIdx[i]] || `class_${clsIdx[i]}`,
-    confidence: +scores[i].toFixed(3),
-    box: boxes[i].map(v => Math.round(v))
-  }));
+
+  const out = [];
+  for (const i of keep) {
+    let raw  = LAB[clsIdx[i]] || `class_${clsIdx[i]}`;
+    let name = NORMALIZE[raw] || raw;
+    const thr = THRESH[name] ?? 0.25;
+    if (scores[i] < thr) continue;
+    out.push({ label: name, confidence: +scores[i].toFixed(3), box: boxes[i] });
+  }
+
+  // near-equal alt promotion for hoop/ball
+  const MARGIN_HOOP = 0.10, MARGIN_BALL = 0.08;
+  for (const a of alts) {
+    const rawAlt  = LAB[a.alt] || `class_${a.alt}`;
+    const altName = NORMALIZE[rawAlt] || rawAlt;
+    const j = a.i;
+    if ((altName === 'hoop'       && a.altScore >= Math.max(0, scores[j] - MARGIN_HOOP)) ||
+        (altName === 'basketball' && a.altScore >= Math.max(0, scores[j] - MARGIN_BALL))) {
+      out.push({ label: altName, confidence: +a.altScore.toFixed(3), box: boxes[j] });
+    }
+  }
+  return out;
 }
 
+// derive a thin rim band from net if hoop is missing (backboard optional legacy)
+function synthHoopFrom(src) {
+  const [x1, y1, x2, y2] = src.box;
+  const w  = Math.max(1, x2 - x1);
+  const cx = (x1 + x2) / 2;
+  const rimW = Math.max(40, Math.round(w * 0.55));
+  const xL = Math.round(cx - rimW / 2);
+  const xR = Math.round(cx + rimW / 2);
+  const yR = Math.round(y1);
+  return { label: 'hoop', confidence: 0.51, synthetic: true, box: [xL, yR - 4, xR, yR + 4] };
+}
+
+async function runSession(sess, inName, w, h, labels, bitmap, ow, oh) {
+  const { oc, dx, dy, r, iw, ih } = letterboxBitmap(bitmap, w, h);
+  const ctx = oc.getContext('2d', { willReadFrequently: true });
+  const imgData = ctx.getImageData(0, 0, w, h);
+  const chw = hwcToCHWFloat(imgData, w, h);
+  const tensor = new ORT.Tensor('float32', chw, [1, 3, h, w]);
+  const out = await sess.run({ [inName]: tensor });
+  return postprocessYolo(out, w, h, dx, dy, r, iw, ih, ow, oh, 0.05, labels);
+}
+
+// ──────────────────────────────────────────────────────────────
+let session, inputName, inputShape;
+let sessionFB = null, inputNameFB = null, inputShapeFB = null;
+let MODEL_W = 640, MODEL_H = 640;
+let MODEL_W_FB = 640, MODEL_H_FB = 640;
+
+// Init / Detect
+// ──────────────────────────────────────────────────────────────
 self.onmessage = async (e) => {
   const msg = e.data || {};
+
   if (msg.type === 'init') {
     try {
-      LABELS = Array.isArray(msg.labels) && msg.labels.length ? msg.labels : LABELS;
-      await loadOrt();
+      // pick up detector.json here (classic worker safe)
+      await loadDetectorConfig();
 
-      // Fully-qualified URL dont hit 127.0.0.1 by accident on prod
-      const modelUrl = msg.modelUrl;  // absolute from the loader
-      session = await ort.InferenceSession.create(modelUrl, { executionProviders:[provider], graphOptimizationLevel:'all' });
+      if (Array.isArray(msg.labels) && msg.labels.length) {
+        LABELS = msg.labels.slice();  // primary model label order
+      }
+      FB_LABELS = (Array.isArray(msg.fbLabels) && msg.fbLabels.length)
+        ? msg.fbLabels.slice()
+        : null;
 
-      inputName = session.inputNames[0];
+      // primary session
+      session = await ORT.InferenceSession.create(msg.modelUrl || MODEL_URL, {
+        executionProviders: [provider],
+        graphOptimizationLevel: 'all'
+      });
+      inputName  = session.inputNames[0];
       const meta = session.inputMetadata?.[inputName];
-      inputShape = meta?.dimensions || [1,3,640,640];
-      MODEL_H = inputShape[2] || 640;
-      MODEL_W = inputShape[3] || 640;
+      inputShape = meta?.dimensions || [1,3,MODEL_SIZE,MODEL_SIZE];
+      MODEL_H = inputShape[2] || MODEL_SIZE;
+      MODEL_W = inputShape[3] || MODEL_SIZE;
 
+      // optional fallback
+      if (msg.fbUrl) {
+        sessionFB = await ORT.InferenceSession.create(msg.fbUrl, {
+          executionProviders: [provider],
+          graphOptimizationLevel: 'all'
+        });
+        inputNameFB  = sessionFB.inputNames[0];
+        const metaFB = sessionFB.inputMetadata?.[inputNameFB];
+        inputShapeFB = metaFB?.dimensions || [1,3,MODEL_SIZE,MODEL_SIZE];
+        MODEL_H_FB = inputShapeFB[2] || MODEL_SIZE;
+        MODEL_W_FB = inputShapeFB[3] || MODEL_SIZE;
+      }
+
+      try { self.postMessage({ type: 'debug', msg: '[det] LABELS=' + JSON.stringify(LABELS) }); } catch {}
       self.postMessage({ type: 'ready', provider });
     } catch (err) {
       self.postMessage({ type: 'error', error: String(err) });
@@ -145,19 +269,36 @@ self.onmessage = async (e) => {
 
   if (msg.type === 'detect') {
     try {
-      const bmp = msg.bitmap; const ow = msg.ow; const oh = msg.oh;
-      const { oc, dx, dy, r } = letterboxBitmap(bmp, MODEL_W, MODEL_H);
-      const ctx = oc.getContext('2d', { willReadFrequently: true });
-      const imgData = ctx.getImageData(0, 0, MODEL_W, MODEL_H);
-      const chw = hwcToCHWFloat(imgData, MODEL_W, MODEL_H);
-      const tensor = new ort.Tensor('float32', chw, [1,3,MODEL_H,MODEL_W]);
-      const out = await session.run({ [inputName]: tensor });
-      const dets = postprocessYolo(out, MODEL_W, MODEL_H, dx, dy, r, ow, oh, 0.25);
+      if (!session) throw new Error('Detector not initialized');
+      const bmp = msg.bitmap, ow = msg.ow, oh = msg.oh;
+
+      // Stage 1: primary model
+      let dets = await runSession(session, inputName, MODEL_W, MODEL_H, LABELS, bmp, ow, oh);
+
+      // Optional synth hoop
+      if (!dets.some(d => d.label === 'hoop')) {
+        const net = dets.find(d => d.label === 'net');
+        if (net?.box?.length === 4) dets.push(synthHoopFrom(net));
+      }
+
+      // Stage 2: fallback (hoop-only assist)
+      if (!dets.some(d => d.label === 'hoop') && sessionFB) {
+        const cand = await runSession(sessionFB, inputNameFB, MODEL_W_FB, MODEL_H_FB, (FB_LABELS || LABELS), bmp, ow, oh);
+        const hoops = cand.filter(d => d.label === 'hoop' || d.label === 'rim');
+        if (hoops.length) {
+          hoops.sort((a,b) => b.confidence - a.confidence);
+          const h = hoops[0];
+          h.label = 'hoop'; h.synthetic = h.synthetic || true;
+          dets.push(h);
+        }
+      }
+
       self.postMessage({ type: 'result', frameIndex: msg.frameIndex, objects: dets });
     } catch (err) {
       self.postMessage({ type: 'error', error: String(err) });
     } finally {
-      if (msg.bitmap?.close) try { msg.bitmap.close(); } catch {}
+      if (msg.bitmap?.close) { try { msg.bitmap.close(); } catch {} }
     }
+    return;
   }
 };

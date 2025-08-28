@@ -238,6 +238,7 @@ body {
    Overlay & Layout
    =========================== */
 
+
 /* 🔔 Centered prompt message */
 #overlayPrompt {
   position: absolute;
@@ -563,3 +564,55 @@ main {
 #shotTableHUD th{ text-align:left; opacity:.8; font-weight:600; }
 
 
+/* ---------------- viewer -------------------- */
+/* ---------------- viewer -------------------- */
+
+/* ==== Video Stage ======================================================= */
+.video-frame {
+  position: relative;
+  width: 100%;
+  height: 100vh;            /* fill viewport; tweak if you want a header/footer */
+  background: #000;
+  overflow: hidden;
+}
+
+/* Video + overlay are layered and positioned/sized by JS (syncOverlayToVideo) */
+#videoPlayer,
+#overlay {
+  position: absolute;
+  display: block;
+}
+
+/* Video scales to fit while preserving aspect (letter/pillar boxes) */
+#videoPlayer {
+  object-fit: contain;
+  background: #000;
+}
+
+/* Overlay rides above the video */
+#overlay {
+  z-index: 10;
+  pointer-events: auto;      /* set to 'none' when not picking */
+}
+
+/* ==== HUD (always on top, never pushed under the stage) ================= */
+#coachNotes,
+#shotOverlaySummary {
+  position: fixed;
+  z-index: 20000;
+}
+
+#coachNotes {
+  top: 12px;
+  left: 12px;
+}
+
+#shotOverlaySummary {
+  right: 20px;
+  bottom: 20px;
+}
+
+
+
+/* ---------------- end viewer -------------------- */
+/* ---------------- end viewer -------------------- */

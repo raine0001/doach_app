@@ -19,6 +19,20 @@ export function syncTimestampWithVideo(video) {
   // console.log("🕓 Synced timestamp to", Math.round(lastValidTimestamp));
 }
 
+let __scale = { sx: 1, sy: 1 }, __dims = { vW: 0, vH: 0, cW: 0, cH: 0 };
+
+export function lockVideoCanvasMapping(videoEl, canvasEl) {
+  canvasEl.width  = videoEl.videoWidth;
+  canvasEl.height = videoEl.videoHeight;
+  canvasEl.style.width  = `${videoEl.videoWidth}px`;
+  canvasEl.style.height = `${videoEl.videoHeight}px`;
+  __dims = { vW: videoEl.videoWidth, vH: videoEl.videoHeight, cW: canvasEl.width, cH: canvasEl.height };
+  __scale = { sx: __dims.cW / __dims.vW, sy: __dims.cH / __dims.vH };
+}
+export function mapVideoToCanvas(pt) { return { x: pt.x * __scale.sx, y: pt.y * __scale.sy }; }
+export function rectCenterToTL(cx, cy, w, h) { return { x: cx - w/2, y: cy - h/2, w, h }; }
+export function resetCtx(ctx) { ctx.setTransform(1,0,0,1,0,0); ctx.imageSmoothingEnabled = true; }
+
 
 /**
  * Return scaling ratios from native video size to display dimensions
@@ -91,6 +105,15 @@ export function animateOverlayLoop(frame) {
   const promptBar = document.getElementById('promptBar');
   const idx = (frame.__frameIdx ?? frame.frameIndex ?? 0);
 
+  const ballDet = objects.find(o => o.label === 'basketball' && Array.isArray(o.box));
+  if (ballDet && lockedHoopBox) {
+    const [x1,y1,x2,y2] = ballDet.box;
+    const center = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
+    updateBall(center, idx);
+    // (optional) also run checkShotConditions here if this loop is active:
+    checkShotConditions(ballState, lockedHoopBox, idx);
+  }
+
   // latest detections for debug/UI
   window.lastDetectedFrame = frame;
   const objects = frame.objects || [];
@@ -98,7 +121,12 @@ export function animateOverlayLoop(frame) {
   // Keep the hoop steady and draw marker
   stabilizeLockedHoop(objects);
   const lockedHoopBox = getLockedHoopBox();
-  if (lockedHoopBox) attachHoop(lockedHoopBox);
+  if (lockedHoopBox) {
+   const tl = { x: lockedHoopBox.x - lockedHoopBox.w/2,
+                y: lockedHoopBox.y - lockedHoopBox.h/2,
+                w: lockedHoopBox.w, h: lockedHoopBox.h };
+   attachHoop(tl);
+  }
   if (lockedHoopBox && ctx) drawHoopMarker(ctx);
 
   // One‑time auto‑lock if user hasn’t set it

@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "namespace": "doach",
+  "classes": [
+    "basketball",        // 0
+    "hoop",              // 1
+    "net",               // 2
+    "backboard",         // 3
+    "player",            // 4
+    "golfclubwedge",     // 5
+    "golfclubdriver",    // 6
+    "golfclubputter",    // 7
+    "golfball",          // 8
+    "tennisracket",      // 9
+    "tennisball",        // 10
+    "baseballbat",       // 11
+    "baseball",          // 12
+    "hockeystick",       // 13
+    "puck",              // 14
+    "football",          // 15
+    "rugbyball",         // 16
+    "cricketbat",        // 17
+    "pingpongpaddle",    // 18
+    "pingpongball",      // 19
+    "badmintonracket"    // 20
+  ],
+  "profiles": {
+    "basketball":  [0,1,2,3,4],
+    "golf":        [5,6,7,8],
+    "tennis":      [9,10],
+    "baseball":    [11,12],
+    "hockey":      [13,14],
+    "football":    [15],
+    "rugby":       [16],
+    "cricket":     [17],
+    "tabletennis": [18,19],
+    "badminton":   [20]
+  },
+  "aliases": {
+    "tennis_racket": "tennisracket",
+    "tennis_ball": "tennisball",
+    "golf_club_wedge": "golfclubwedge",
+    "golf_club_driver": "golfclubdriver",
+    "golf_club_putter": "golfclubputter",
+    "golf_ball": "golfball",
+    "baseball_bat": "baseballbat",
+    "hockey_stick": "hockeystick",
+    "table_tennis_paddle": "pingpongpaddle",
+    "table_tennis_ball": "pingpongball",
+    "rugby_ball": "rugbyball",
+    "badminton_racket": "badmintonracket"
+  }
+}
+

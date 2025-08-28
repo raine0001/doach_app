@@ -8,7 +8,6 @@ import os
 import torch
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics import YOLO
-import os
 import base64
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -20,6 +19,9 @@ import json
 from pathlib import Path
 import io
 import wave
+from time import time
+import numpy as np
+from PIL import Image
 
 torch.serialization.add_safe_globals([DetectionModel])
 
@@ -246,7 +248,6 @@ ALLOWED_VOICES = {
 def api_tts():
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        import io, wave
         sr, dur = 24000, 0.3
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
@@ -868,11 +869,7 @@ def delete_reviewed_frame():
 
 # where the magic happens - what does the ai model see
 # app.py — drop-in replacement for /detect_frame
-from time import time
-import base64, io
-import numpy as np
-import cv2
-from PIL import Image
+
 
 # simple per-process pacing guard (optional)
 _last_call_ts = 0.0
@@ -966,5 +963,18 @@ if __name__ == '__main__':
     app.run(debug=True, port=5002)
 
 
-# WSGI entrypoint for PythonAnywhere
-application = app
+@app.route('/api/feedback', methods=['POST'])
+def handle_feedback():
+    try:
+        feedback_data = request.get_json()
+        if not feedback_data:
+            return jsonify({"error": "Missing feedback data"}), 400
+            
+        # Here you can process/store the feedback data as needed
+        # For example, log it to a file or database
+        print("Received feedback:", feedback_data)
+        
+        return jsonify({"status": "Feedback received"}), 200
+    except Exception as e:
+        print("Error handling feedback:", str(e))
+        return jsonify({"error": str(e)}), 500

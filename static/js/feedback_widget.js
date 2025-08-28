@@ -179,11 +179,17 @@ async function send(){
   }
 
   try {
-    const r = await fetch('/api/feedback', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
-    if (!r.ok) throw new Error('feedback API not available');
-    alert('Thanks! Your feedback was sent.');
-    msgInput.value='';
-  } catch {
+    const r = await fetch('/api/feedback', { 
+      method: 'POST', 
+      headers: {'Content-Type': 'application/json'}, 
+      body: JSON.stringify(payload) 
+    });
+    if (!r.ok) {
+      throw new Error(`Failed to submit feedback: ${r.status} ${await r.text()}`);
+    }
+    msgInput.value = '';
+  } catch (err) {
+    console.error('Feedback submission failed:', err);
     // queue locally if offline
     try {
       const q = JSON.parse(localStorage.getItem('doachFeedbackQueue')||'[]');
@@ -206,13 +212,18 @@ export function installFeedbackWidget(){
     try {
       const q = JSON.parse(localStorage.getItem('doachFeedbackQueue')||'[]'); if (!q.length) return;
       const rest = [];
-      for (const p of q) {
-        try {
-          const r = await fetch('/api/feedback', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p) });
-          if (!r.ok) throw 0;
-        } catch { rest.push(p); }
-      }
-      localStorage.setItem('doachFeedbackQueue', JSON.stringify(rest));
-    } catch {}
-  }, 2000);
-}
+        for (const p of q) {
+          try {
+            const r = await fetch('/api/feedback', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(p)
+            });
+            if (!r.ok) throw new Error('Failed to send feedback');
+          } catch { rest.push(p); }
+        }
+        localStorage.setItem('doachFeedbackQueue', JSON.stringify(rest));
+      } catch {} 
+    }, 2000);
+  }
+  

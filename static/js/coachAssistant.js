@@ -1,5 +1,72 @@
 // /static/coachAssistant.js
 
+// --- Coach voice state (persisted) ---
+window.__coachMuted = JSON.parse(localStorage.getItem('doach_muted') || 'false');
+
+// HUD mute button → toggle voice
+window.addEventListener('hud:mute-toggle', (e) => {
+  const muted = !!(e?.detail?.muted);
+  window.__coachMuted = muted;
+  try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
+
+  // 🔁 Keep doachPrefs in sync so window.doachSpeak() won't skip
+  try {
+    const get = window.doachGetPrefs?.() || {};
+    const next = { ...get, audioOn: !muted };
+    window.doachSetPrefs?.(next);
+  } catch {}
+});
+
+
+// Simple speak wrapper: use your existing doachSpeak if present, fallback to Web Speech
+function coachSpeak(text) {
+  if (window.__coachMuted) return;
+  if (!text) return;
+
+  if (typeof window.doachSpeak === 'function') {
+    try { window.doachSpeak(text); return; } catch (e) { console.warn('[coach] doachSpeak fail, fallback TTS', e); }
+  }
+
+  // Fallback browser TTS
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.0; u.pitch = 1.0;
+    window.speechSynthesis?.speak(u);
+  } catch {}
+}
+
+// --- De-dupe + formatter ---
+let __lastSpokenKey = null;
+
+function formatCoachLine(s) {
+  // keep it short & actionable
+  const verdict = s.made ? 'Make.' : 'Miss.';
+  const arc  = Number.isFinite(s.arcHeight) ? ` Arc ${Math.round(s.arcHeight)}.` : '';
+  const entry= Number.isFinite(s.entryAngle) ? ` Entry ${s.entryAngle}°.` : '';
+  const why  = (!s.made && s.missReason) ? ` ${s.missReason}.` : '';
+  return s.made
+    ? `Nice shot! ${verdict}${entry}${arc}`
+    : `Shot missed.${why}${entry}${arc}`;
+}
+
+// --- Speak once per shot summary ---
+window.addEventListener('shot:summary', (e) => {
+  const s = e?.detail || (window.shotLog?.at ? window.shotLog.at(-1) : null);
+  if (!s) return;
+
+  // de-dupe key
+  const key = `${+s.made}|${Math.round(s.arcHeight||0)}|${s.entryAngle}|${s.releaseAngle}|${s.frameEnd||''}`;
+  if (key === __lastSpokenKey) return;
+  __lastSpokenKey = key;
+
+  const line = formatCoachLine(s);
+  window.__lastCoachText = line;   // so UI can show the same line if needed
+  coachSpeak(line);
+});
+
+
+
+
 (function(){
   // ---------- Config ----------
   const DOACH = window.DOACH || {
@@ -20,6 +87,20 @@
 
   const SPEAK_DEDUP_MS = 1200;
   let __lastSpeak = { text: '', at: 0 };
+
+  // ---- Pref bridges (new) ----
+  // Read new UI prefs if present; fall back to older doachPrefs values.
+  function isAudioOn() {
+    if (typeof window.PREF_AUDIO_ENABLED !== 'undefined') return !!window.PREF_AUDIO_ENABLED;
+    const p = doachGetPrefs();                 // legacy store
+    return (p.audioOn !== false);              // default true
+  }
+  function isMicAllowed() {
+    if (typeof window.PREF_ALLOW_MIC !== 'undefined') return !!window.PREF_ALLOW_MIC;
+    const p = doachGetPrefs();
+    return (p.allowMic !== false);             // default true
+  }
+
 
   // ---------- Prefs + Presets ----------
   const LS_KEY = 'doachPrefs';
@@ -356,6 +437,11 @@
 
   // ---------- Public: speak ----------
   window.doachSpeak = async function(input){
+    // respect UI pref: Audio on/off
+    if (!isAudioOn()) {
+      console.log('[Doach] audio muted by preferences');
+      return;
+    }
     const p = {...{voice:DOACH.voice, tts:DOACH.tts, speed:1, volume:1, bassDb:0, trebleDb:0}, ...getPrefs()};
     const text = typeof input==='string' ? input : (input?.text || '');
     if(!text) return;
@@ -972,6 +1058,11 @@ window.addEventListener('shot:summary', (e) => {
   }
 
   async function start() {
+    if (!isMicAllowed()) {                     // << new
+      console.warn('[Doach HF] mic disabled by preferences');
+      return;
+    }
+    
     if (listening || starting) return;
     // mic prime improves UX/permissions
     try { await navigator.mediaDevices.getUserMedia({ audio: true }); } catch {}
@@ -1103,12 +1194,13 @@ window.addEventListener('shot:summary', (e) => {
 
   // Auto-start unless user disabled it in prefs
   if (prefs.voiceWake !== false) {
+  if (prefs.voiceWake !== false && isMicAllowed()) {
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => start());
     } else {
       start();
     }
-  }
+  }}
 })();
 
   })();

@@ -7,9 +7,67 @@ import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './ho
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection; 
 
-const FRAMEbyFRAME_RATE = 3;   //set frame by frame rate playback
+// Slow_arbiter.js — make sure it reads SLOW_RATE
+(function installSlowArbiter(){
+  if (window.__SlowInstalled) return; window.__SlowInstalled = true;
 
-// ---- Global slow-mo FPS (editable in console: setFBFRate(0.7)) ----
+  const getV = () => document.getElementById('videoPlayer') || document.querySelector('video');
+  let desired = 1, capTo = 0;
+
+  function cfgRate() {
+    const r = Number(window.SLOW_RATE ?? 0.35);
+    return (isFinite(r) && r > 0 && r <= 1) ? r : 0.35;
+  }
+  function setRate(r, why){
+    const v = getV(); if (!v) return;
+    if (v.playbackRate !== r) { try { v.playbackRate = r; } catch {} }
+    desired = r;
+    // console.log('[Slow]', why, '→', r);
+  }
+
+  window.addEventListener('shot:release', () => {
+    if (window.__fbfActive) return;    
+    capTo = performance.now() + 5000;
+    setRate(cfgRate(), 'release');
+    console.log('[video_ui] shot:release()');
+  });
+
+  window.addEventListener('shot:summary', () => {
+    capTo = 0;
+    setRate(1, 'summary');
+  });
+
+  window.addEventListener('shot:end', () => { setRate(1, 'end'); });
+
+  // NEW: unlock on early "end" signal too
+  window.addEventListener('shot:end', () => {
+    capTo = 0;
+    setRate(1, 'end');
+  });
+
+  // enforce / cap
+  (function tick(){
+    const v = getV();
+    if (window.__fbfActive) { requestAnimationFrame(tick); return; }
+    if (v && v.playbackRate !== desired) setRate(desired, 'enforce');
+    // hard stop if tracker has finalized or we bounced to idle
+    const bs = window.ballState || {};
+    if (desired < 0.99 && (bs.state === 'FROZEN' || bs.state === 'IDLE')) setRate(1, 'state');
+    if (desired < 0.99 && capTo && performance.now() > capTo) setRate(1, 'cap');
+    requestAnimationFrame(tick);
+  })();
+
+  // media hygiene — any manual interaction cancels slow-mo
+  const v = getV();
+  if (v) {
+    v.addEventListener('play',    () => setRate(1, 'play'));
+    v.addEventListener('pause',   () => setRate(1, 'pause'));
+    v.addEventListener('seeking', () => setRate(1, 'seek'));
+    v.addEventListener('ended',   () => setRate(1, 'ended'));
+  }
+})();
+
+// ---- Global slow-mo FPS ----
 window.FRAMEbyFRAME_RATE = window.FRAMEbyFRAME_RATE ?? 1.0; // default 1 fps
 window.setFBFRate = (fps) => {
   window.FRAMEbyFRAME_RATE = Math.max(0.25, Number(fps) || 1.0);
@@ -33,120 +91,111 @@ export function moveUploadToSidebar() {
   }
 }
 
+// ───────── Single-frame step (RVFC/arbiter-safe) ─────────
 
-// play, pause, manual step while paused, restart                         //
-// ───────── Frame-by-frame engine with analyzer back-pressure ─────────  //
+// Keep a tiny state so any old callers don't crash
 let __framePlay = { on:false, timer:null, cleanup:null, fps:12, video:null };
 
-function getFPS(v){ return Number(window.__videoFPS)>0 ? Number(window.__videoFPS) : 30; }
+function getVideoEl() {
+  return window.__videoEl
+      || window.video
+      || document.getElementById('videoPlayer')
+      || document.querySelector('video');
+}
 
-function stepOnce(v){ const fd=1/getFPS(v); try{ v.currentTime = Math.min(v.duration||Infinity, (v.currentTime||0)+fd); }catch{} }
+function getFPS(v) {
+  // prefer a known fps if you set it elsewhere; fall back to 30
+  return Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 30;
+}
 
+// No-op, just clears any legacy timers if they exist
 export function cancelFramePlay(){
   if (__framePlay.timer) clearTimeout(__framePlay.timer);
   if (__framePlay.cleanup) { try{ __framePlay.cleanup(); }catch{} }
   __framePlay = { on:false, timer:null, cleanup:null, fps:12, video:null };
 }
 
-//start frame by frame play - primarily for ball arc/shot analysis
-export function startFramePlay(video, fps=12){
-  cancelFramePlay();
-  __framePlay.on  = true;
-  __framePlay.fps = fps;
-  __framePlay.video = video;
-  video.pause(); // we drive time via seeks/sets
+// play control - step forward & back one frame
+export async function stepFrame(video, dir = +1){
+  video = video || getVideoEl();
+  if (!video) return;
 
-  if (window.__analyzerActive) {
-    const onDone = () => {
-      if (!__framePlay.on) return;
-      stepOnce(video);
-      clearTimeout(__framePlay.timer);
-      __framePlay.timer = setTimeout(() => { if (__framePlay.on) stepOnce(video); }, Math.max(0, 1000/fps + 50));
-    };
-    window.addEventListener('analyzer:frame-done', onDone);
-    __framePlay.cleanup = () => window.removeEventListener('analyzer:frame-done', onDone);
-    stepOnce(video); // kick initial step
+  try { video.pause(); } catch {}
+  const fps  = getFPS(video);
+  const dt   = (1 / fps) * (dir >= 0 ? 1 : -1);
+  const next = Math.max(0, Math.min((video.duration || Infinity), (video.currentTime || 0) + dt));
+  if (Math.abs(next - (video.currentTime || 0)) < 1e-6) return;
+
+  // wait until that frame is actually decoded/presented
+  const once = new Promise(res => video.addEventListener('seeked', res, { once:true }));
+  video.currentTime = next;
+  try { await once; } catch {}
+
+  // If app.js exposes a one-shot render hook, use it; otherwise
+  // any overlays will refresh next time you play.
+  if (typeof window.renderCurrentFrameOnce === 'function') {
+    try { window.renderCurrentFrameOnce(video); } catch {}
   } else {
-    const tick = () => {
-      if (!__framePlay.on) return;
-      stepOnce(video);
-      __framePlay.timer = setTimeout(tick, Math.max(0, 1000/fps));
-    };
-    tick();
+    // Emit a lightweight signal in case the analyzer listens for manual steps
+    window.dispatchEvent(new CustomEvent('video:stepped', { detail: { time: video.currentTime }}));
   }
 }
 
-// Step frame by frame
-export function stepFrame(video, dir=+1){
+// Legacy FBF shell (kept only so old callers won’t crash)
+export function startFramePlay(/* video, fps */){
+  console.log('[video_ui] startFramePlay() ignored (RVFC/arbiter active)');
   cancelFramePlay();
-  video.pause();
-  const fd=1/getFPS(video);
-  try { video.currentTime = Math.max(0, Math.min((video.duration||0), (video.currentTime||0)+dir*fd)); }
-  catch(e){ console.warn('[stepFrame] failed:', e); }
 }
 
-function getVideoEl() {
-  return window.__videoEl
-      || window.video
-      || document.getElementById('videoPlayer')   // your ensureHudRoot uses this id
-      || document.getElementById('video')
-      || document.querySelector('video');
-}
-
-
-// ---- expose frame-by-frame controls for other files ----
 window.frameMode = {
-  on() {
-    const vid = getVideoEl();
-    if (vid && !__framePlay.on) { startFramePlay(vid, FRAMEbyFRAME_RATE); vid.pause(); }
-  },
-  off() { if (__framePlay.on) cancelFramePlay(); },
-  isOn() { return !!__framePlay.on; }
+  on()  { console.log('[video_ui] frameMode.on() ignored (RVFC/arbiter active)'); },
+  off() { cancelFramePlay(); },
+  isOn(){ return false; }
 };
 
-// slow-motion helpers  -----------------------------------------------//
 
-// Auto slow-mo at release, back to normal at summary
-// Auto slow-mo at release, back to normal at summary
-(function attachFBFHandlers(){
-  if (window.__fbfWired) return;   // prevent duplicates
-  window.__fbfWired = true;
+// UI toggle for scorer mode (Weighted / Hybrid)
+export function mountScorerToggle(container) {
+  const root = container || document.getElementById('promptBar') || document.body;
+  if (!root || root.__scorerToggleMounted) return;
+  root.__scorerToggleMounted = true;
 
-  let resumeAfterFBF = false;      // we turned slow-mo on → resume later
+  const wrap = document.createElement('div');
+  wrap.className = 'scorer-toggle';
+  Object.assign(wrap.style, {
+    display: 'inline-flex',
+    gap: '10px',
+    alignItems: 'center',
+    marginLeft: '12px',
+    padding: '4px 6px',
+    background: 'rgba(0,0,0,.35)',
+    borderRadius: '8px'
+  });
+  wrap.innerHTML = `
+    <span style="opacity:.85">Scorer:</span>
+    <label><input type="radio" name="scorerMode" value="weighted"> Weighted</label>
+    <label><input type="radio" name="scorerMode" value="hybrid"> Hybrid</label>
+  `;
+  root.appendChild(wrap);
 
-  function onRelease(e){
-    console.log('[video_ui] shot:release', e?.detail);
-    const vid = getVideoEl();
-    if (!vid) return console.warn('[video_ui] no <video> element found');
-    resumeAfterFBF = true;
-    const rate = Number(window.FRAMEbyFRAME_RATE) || 1.0;
-    startFramePlay(vid, rate);
-    vid.pause();
-    console.log('[video_ui] FBF ON @', rate, 'fps');
-  }
+  const apply = (m) => {
+    window.setScorerMode?.(m);
+    wrap.querySelectorAll('input[name="scorerMode"]').forEach(inp => {
+      inp.checked = (inp.value === m);
+    });
+  };
 
-  function onSummary(e){
-    console.log('[video_ui] shot:summary', e?.detail);
-    cancelFramePlay();
-    if (resumeAfterFBF) {
-      const vid = getVideoEl();
-      if (vid && vid.paused) { try { vid.play(); } catch (err) { console.warn('[video_ui] resume failed', err); } }
-      resumeAfterFBF = false;
-      console.log('[video_ui] FBF OFF → resume play');
-    } else {
-      console.log('[video_ui] FBF OFF');
-    }
-  }
+  const saved = (window.SHOT_SCORER_MODE || localStorage.getItem('doach_scorer_mode') || 'weighted').toLowerCase();
+  apply(saved);
 
-  window.addEventListener('shot:release', onRelease);
-  window.addEventListener('shot:summary', onSummary);
-})();
+  wrap.addEventListener('change', (e) => {
+    if (e.target?.name === 'scorerMode') apply(e.target.value);
+  });
+}
+window.mountScorerToggle = mountScorerToggle;
 
 
-//  end slow mo helpers  -----------------------------------------------//
-
-
-
+// where are we in the session
 export function setSessionStatus(text = '') {
   const root = ensureHudRoot();
   let badge = document.getElementById('sessionStatusBadge');
@@ -165,8 +214,9 @@ export function setSessionStatus(text = '') {
   badge.style.display = text === null ? 'none' : 'block';
 }
 
-
-// ───────── Playback controls UI (mounted inside hudRoot) ─────────
+// -----------------------------------------------------------------//
+// ───────── Playback controls UI (mounted inside hudRoot) ─────────//
+// -----------------------------------------------------------------//
 export function createPlaybackControls(video) {
   window.__videoEl = video;
   // remove any previous bar (prevent duplicates after re-load)
@@ -406,14 +456,45 @@ export function mountSessionHUD() {
     root.appendChild(bar);
 
     const muteBtn = bar.querySelector('#hudMute');
+
+    // --- unified apply function: UI, storage, prefs, event
+    const applyMute = (muted) => {
+      // button reflects CURRENT state
+      muteBtn.setAttribute('data-muted', muted ? '1' : '0');
+      muteBtn.textContent = muted ? '🔇' : '🔊';
+
+      // persist & sync with doachPrefs so doachSpeak() logic matches HUD
+      try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
+      try {
+        const prefs = window.doachGetPrefs?.() || {};
+        // audioOn === !muted
+        window.doachSetPrefs?.({ ...prefs, audioOn: !muted });
+      } catch {}
+
+      // notify coachAssistant.js (it listens for this)
+      window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted } }));
+    };
+
+    // --- initialize from saved state (prefer HUD key, then doachPrefs)
+    let savedMuted = false;
+    try {
+      if (localStorage.getItem('doach_muted') != null) {
+        savedMuted = JSON.parse(localStorage.getItem('doach_muted'));
+      } else {
+        const p = window.doachGetPrefs?.() || {};
+        if (typeof p.audioOn !== 'undefined') savedMuted = !p.audioOn;
+      }
+    } catch {}
+    applyMute(savedMuted);
+
+    // --- click to toggle
     muteBtn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const on = muteBtn.getAttribute('data-active') === '1';
-      muteBtn.setAttribute('data-active', on ? '0' : '1');
-      muteBtn.textContent = on ? '🔇' : '🔊';
-      window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted: !on }}));
+      const muted = muteBtn.getAttribute('data-muted') === '1';
+      applyMute(!muted);
     });
 
+    // other HUD buttons (unchanged)
     bar.querySelector('#endSessionBtn').addEventListener('click', (e) => {
       e.stopPropagation();
       window.dispatchEvent(new CustomEvent('hud:end-session'));
@@ -430,6 +511,7 @@ export function mountSessionHUD() {
   }
   return bar;
 }
+
 
 /** Update numbers in the bottom HUD bar */
 export function updateSessionHUD({ taken=0, made=0, accuracy=0, elapsedSec=0 } = {}) {
@@ -632,8 +714,11 @@ export function showShotBanner(summary, ms = 2500) {
 window.showShotBanner = showShotBanner;  // keep global for shot_logger
 
 window.addEventListener('shot:summary', (e) => {
-  window.recordShotSummary?.(e.detail);
+  const summary = e?.detail || (window.shotLog?.at ? window.shotLog.at(-1) : null);
+  if (!summary) return;
+  try { window.recordShotSummary?.(summary); } catch {}
 });
+
 
 
 // Initialize HUD for video element
@@ -700,7 +785,7 @@ function ensureShotTableStyles(){
   document.head.appendChild(css);
 }
 
-(function installSlowMoFailsafe(){
+(function installSlowFailsafe(){
   const v = document.querySelector('#videoPlayer') || document.querySelector('video');
   if (!v) return;
 
@@ -718,17 +803,25 @@ function ensureShotTableStyles(){
   v.addEventListener('ended',          () => { setRate(1); });
 
   // Optional hooks, if your code toggles slow-mo deliberately:
-  window.addEventListener('video:slowmo:on',  () => setRate(0.25));
-  window.addEventListener('video:slowmo:off', () => setRate(1));
+  window.addEventListener('video:Slow:on',  () => setRate(0.25));
+  window.addEventListener('video:Slow:off', () => setRate(1));
 
   // Hard guard: don’t allow slow-mo to linger
   (function tick(){
-    // if rate < 0.9 for > 2000ms, bail out to 1×
-    if (v.playbackRate < 0.9 && performance.now() - lastRateSetAt > 2000) {
+    // if rate < 0.9 longer than configured slow-mo, bail out to 1×
+    const maxMs = Math.max(2000, (Number(window.Slow_MS) || 1200) + 600);
+    if (v.playbackRate < 0.9 && performance.now() - lastRateSetAt > maxMs) {
       setRate(1);
     }
     requestAnimationFrame(tick);
   })();
 })();
+
+
+// Hard exit to 1× as soon as summary is received
+window.addEventListener('shot:summary', () => {
+  const v = document.getElementById('videoPlayer') || document.querySelector('video');
+  if (v) { try { v.playbackRate = 1; } catch {} }
+});
 
 

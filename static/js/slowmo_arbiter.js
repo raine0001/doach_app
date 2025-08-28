@@ -1,82 +1,70 @@
-// slowmo_arbiter.js — single authority over playbackRate
-(function installSlowmoArbiter(){
-  if (window.__slowmoInstalled) return; window.__slowmoInstalled = true;
+// slowmo_arbiter.js — resilient slow-mo controller
 
-  const getVideo = () => window.__videoEl || document.getElementById('videoPlayer') || document.querySelector('video');
-  let v = getVideo();
-  if (!v) {
-    // if video isn't in the DOM yet, wait and retry once
-    window.addEventListener('DOMContentLoaded', () => {
-      v = getVideo();
-      if (!v) console.warn('[slowmo] no video element found');
-    });
+(function () {
+  const SLOW_FPS   = Number(window.slowmoFps || 3);
+  const MAX_FRAMES = Number(window.slowmoMaxFrames || 240); // hard cap ~8s at 30fps
+
+  let active = false;
+  let releaseFrame = null;
+  let lastSeenFrame = -1;
+
+  // You should implement these two using your existing player controls
+  function setPlaybackRate(rate) {
+    try { window.videoPlayer.playbackRate = rate; } catch {}
   }
+  function setToSlow() { setPlaybackRate(Math.max(0.1, SLOW_FPS / (window.sourceFps || 30))); }
+  function setToNormal() { setPlaybackRate(1); }
 
-  const state = {
-    target: 1.0,         // desired rate
-    reason: null,        // 'release' | 'manual' | null
-    until:  0,           // performance.now() deadline in ms
-    dbg:    false        // flip to true to see logs
-  };
-  const log = (...a)=> state.dbg && console.log('[slowmo]', ...a);
-
-  function setTarget(rate, why) {
-    if (!v) v = getVideo();
-    if (!v) return;
-    if (state.target !== rate) {
-      state.target = rate;
-      log('target ->', rate, 'reason:', why);
+  function armSlow(frame) {
+    releaseFrame = frame;
+    lastSeenFrame = frame;
+    if (!active) {
+      setToSlow();
+      active = true;
+      // console.log('[slowmo] ON @', frame);
     }
   }
 
-  function off(why='off') {
-    state.reason = null;
-    state.until  = 0;
-    setTarget(1.0, why);
-  }
-
-  function on({ rate=0.35, ms=1200, why='release' } = {}) {
-    state.reason = why;
-    state.until  = performance.now() + ms;
-    setTarget(rate, why);
-  }
-
-  // Main enforcement loop — if someone else changes the rate, we put it back
-  let raf = 0;
-  function tick() {
-    const now = performance.now();
-    if (state.reason && now >= state.until) {
-      log('window elapsed, back to normal');
-      off('window-elapsed');
+  function disarmSlow(reason, frame) {
+    if (active) {
+      setToNormal();
+      active = false;
+      // console.log('[slowmo] OFF:', reason, '@', frame);
     }
-    if (v && v.playbackRate !== state.target) {
-      try { v.playbackRate = state.target; } catch {}
-    }
-    raf = requestAnimationFrame(tick);
+    releaseFrame = null;
   }
-  raf = requestAnimationFrame(tick);
 
-  // Public API
-  window.slowmo = {
-    on, off,
-    info(){ return { target: state.target, reason: state.reason, remainingMs: Math.max(0, state.until - performance.now()), actual: v?.playbackRate }; },
-    debug(on=true){ state.dbg = !!on; }
+  // Public per-frame tick (call from your main loop)
+  window.slowmoTick = function slowmoTick(frameIdx) {
+    lastSeenFrame = frameIdx;
+
+    const bs = window.ballState || {};
+    // If we never armed, nothing to do
+    if (!active) return;
+
+    // 1) Normal end conditions
+    if (bs?.proxExitFrame != null || bs?.state === 'FROZEN') {
+      return disarmSlow('exit-or-frozen', frameIdx);
+    }
+
+    // 2) Safety: if we’ve been slow for too long, bail out
+    if (Number.isFinite(releaseFrame) && frameIdx - releaseFrame > MAX_FRAMES) {
+      return disarmSlow('timeout', frameIdx);
+    }
+
+    // 3) Safety: if we lost the hoop/ball for a while after release, bail out
+    if (bs?._btFramesOutside >= (Number(window.PROX_OUT_CONSEC_MIN) || 2) + 6) {
+      return disarmSlow('outside-too-long', frameIdx);
+    }
   };
 
-  // Wire canonical events
-  window.addEventListener('video:loaded',   () => off('video-loaded'));
-  window.addEventListener('shot:release',   () => on({ rate: 0.35, ms: 1200, why: 'release' })); // tweak here
-  window.addEventListener('shot:summary',   () => off('shot-summary'));
+  // Events from your scorer
+  window.addEventListener('shot:release', (e) => {
+    const frame = e?.detail?.frame ?? (window.ballState?.f ?? 0);
+    armSlow(frame);
+  });
 
-  // Media state changes should always cancel slow-mo
-  const ensureVideoListeners = () => {
-    if (!v) return;
-    v.addEventListener('play',   () => off('play'));
-    v.addEventListener('pause',  () => off('pause'));
-    v.addEventListener('seeking',() => off('seeking'));
-    v.addEventListener('ended',  () => off('ended'));
-  };
-  if (v) ensureVideoListeners(); else window.addEventListener('DOMContentLoaded', ensureVideoListeners);
-
-  log('installed');
+  // Either of these should kill slow-mo
+  window.addEventListener('shot:end',     (e) => disarmSlow('end',     e?.detail?.frame ?? lastSeenFrame));
+  window.addEventListener('shot:summary', (e) => disarmSlow('summary', e?.detail?.frame ?? lastSeenFrame));
 })();

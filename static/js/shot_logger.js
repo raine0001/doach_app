@@ -1,8 +1,28 @@
-// shot_logger.js — Clean, consolidated, weighted scoring always used
+// shot_logger.js — consolidated, weighted scoring always used
 
-import { score, showShotSummaryOverlay as canvasOverlay, estimateReleaseAngle, detectNetMotionFromCanvas, resetNetMotion } from './shot_utils.js';
-import { ballState, markRelease } from './ball_tracker.js';
+import {
+  score,
+  showShotSummaryOverlay as canvasOverlay,
+  estimateReleaseAngle,
+  detectNetMotionFromCanvas,
+  resetNetMotion
+} from './shot_utils.js';
+
+import { markRelease, freezeShot } from './ball_tracker.js';
 import { getLockedHoopBox } from './hoop_tracker.js';
+
+// lazy accessor breaks the TDZ on cyclic imports
+function BS() {
+  return (window.ballState || (window.ballState = {}));
+}
+function ensureBallLatches() {
+  const s = BS();
+  if (typeof s._lastInProx === 'undefined') s._lastInProx = false;
+  if (typeof s._lastY     === 'undefined') s._lastY     = 0;
+  if (typeof s.releaseSignaled === 'undefined') s.releaseSignaled = false;
+  if (typeof s.summarySignaled  === 'undefined') s.summarySignaled  = false;
+  return s;
+}
 
 const updateCoachNotes = (...args) => window.updateCoachNotes?.(...args);
 
@@ -12,7 +32,6 @@ window.shotLog = shotLog;
 let lastShotFrameId = -1;
 let __lastScoredCount = 0; // how many frozen shots we've already scored
 window.__shotFinalizeLock = false;
-let __autoFBF = false; 
 let __releaseEventSent = false;
 
 
@@ -24,70 +43,194 @@ try { window.drawShotStatsTable?.(); } catch {}
 try { window.updateBottomStats?.(); } catch {}
 
 // ===== Constants =====
-const PROX_X = 200, PROX_Y_ABOVE = 170, PROX_Y_BELOW = 100;
-const FINALIZE_MIN_LEN = 8;
-const POST_MIN_FRAMES = 12;
-const RETRY_MS = 350;
+const PROX_X = 200, 
+PROX_Y_ABOVE = 170, 
+PROX_Y_BELOW = 100,
+FBF_RATE = 3.0;   // ## fps (3 works good, 0.7 for super slow)
+
 const WEIGHTED_THRESH = 0.65;
 
+// weighted = onnx flicker
+// hybrid = adds region, a bit looser than weighted
+window.SHOT_SCORER_MODE ??= 'weighted';   // 'weighted' | 'hybrid'
+
+
+// ===== Scorer preferences =====
+window.SHOT_SCORER_MODE ??= (localStorage.getItem('doach_scorer_mode') || 'weighted');
+window.WEIGHTED_THRESH  ??= Number(localStorage.getItem('doach_weighted_thresh')) || WEIGHTED_THRESH;
+
+export function getScorerMode() {
+  return String(window.SHOT_SCORER_MODE || 'weighted').toLowerCase();
+}
+export function setScorerMode(mode = 'weighted') {
+  const m = String(mode).toLowerCase();
+  window.SHOT_SCORER_MODE = m;
+  localStorage.setItem('doach_scorer_mode', m);
+  console.log('[scorer] mode =', m);
+}
+window.setScorerMode = setScorerMode; // also available from console
+
+export function setWeightedThresh(v) {
+  const n = Math.max(0.5, Math.min(0.95, Number(v) || 0.75));
+  window.WEIGHTED_THRESH = n;
+  localStorage.setItem('doach_weighted_thresh', String(n));
+  console.log('[scorer] threshold =', n);
+}
+window.setWeightedThresh = setWeightedThresh;
+
+
 // ===== Helpers =====
-export function isBallInProximityZone(ball, opts = {}) {
-  const hoop = getLockedHoopBox();
-  if (!hoop || !ball) return false;
-  const H = normHoop(hoop);
 
-  const xHalf  = Math.max(PROX_X,       Math.round(H.w * (opts.xScale ?? 1.6)));
-  const yAbove = Math.max(PROX_Y_ABOVE, Math.round(H.h * (opts.yUp    ?? 2.0)));
-  const yBelow = Math.max(PROX_Y_BELOW, Math.round(H.h * (opts.yDown  ?? 1.2)));
-
-  return (
-    ball.x >= H.cx - xHalf && ball.x <= H.cx + xHalf &&
-    ball.y >= H.cy - yAbove && ball.y <= H.cy + yBelow
-  );
+// use UI prox values
+function currentProx() {
+  const p = window.PREF_PROX || {};
+  return {
+    X:       Number.isFinite(p.x) ? p.x : PROX_X,
+    Y_ABOVE: Number.isFinite(p.yAbove) ? p.yAbove : PROX_Y_ABOVE,
+    Y_BELOW: Number.isFinite(p.yBelow) ? p.yBelow : PROX_Y_BELOW
+  };
 }
 
-// Global slow-mo FPS (editable in console: setFBFRate(0.8))
-window.FRAMEbyFRAME_RATE ??= 3.0;   // try 1.0 fps (or 0.7 if you want super slow)
-const getFBFRate = () => Number(window.FRAMEbyFRAME_RATE) || 1.0;
-window.setFBFRate = (fps) => {
-  window.FRAMEbyFRAME_RATE = Math.max(0.25, Number(fps) || 1);
-  console.log('[video_ui] slow-mo rate set to', window.FRAMEbyFRAME_RATE, 'fps');
-};
 
-// ===== Core Shot Lifecycle =====
-let shotInProgress = false, awaitingBallReset = false;
+// ---------- shot cycle event conditions ----------  //
+let __awaitingBallReset = false;
 
-export function checkShotConditions(ballState, hoopBox, __frameIdx) {
-  const ball = ballState.trail.at(-1);
-  if (!ball || !hoopBox) return false;
-
-  const inProx = isBallInProximityZone(ball);
-  const belowNet = ball.y > hoopBox.y + hoopBox.h + 40;
-
- const alreadyTracking = ballState.state === 'TRACKING' && ballState.releaseFrame != null;
-  if (!shotInProgress && inProx && !awaitingBallReset && !alreadyTracking) {
-  shotInProgress = true;
-  shotState.inProgress = true;          
-  shotState.entryFrame = __frameIdx;    
-  markRelease(__frameIdx);
+// --- normalize hoop regardless of anchor ---
+function normLockedHoop(hoop) {
+  if (!hoop) return null;
+  const w = hoop.w ?? hoop.width ?? 0;
+  const h = hoop.h ?? hoop.height ?? 0;
+  if (Number.isFinite(hoop.cx) && Number.isFinite(hoop.cy)) {
+    const cx = hoop.cx, cy = hoop.cy, x1 = cx - w/2, y1 = cy - h/2;
+    return { cx, cy, w, h, x1, y1, x2: x1+w, y2: y1+h, rimTop: y1 };
   }
-
-if (shotInProgress && belowNet) {
-  shotInProgress = false;
-  shotState.inProgress = false;         
-  awaitingBallReset = true;
-  
-  // ball_tracker will freeze automatically on proximity exit.
-  // When frozen, score the last shot:
-  const last = ballState.shots.at(-1);
-  if (last && Array.isArray(last.trail) && last.trail.length >= 3) {
-    detectAndLogShot(last.trail, __frameIdx, hoopBox);
-  }
-  if (__autoFBF) { window.frameMode?.off(); __autoFBF = false; }
-  return true;
-
-  }
+  const x1 = hoop.x ?? 0, y1 = hoop.y ?? 0, cx = x1 + w/2, cy = y1 + h/2;
+  return { cx, cy, w, h, x1, y1, x2: x1+w, y2: y1+h, rimTop: y1 };
 }
+
+// Use UI prefs if present
+function proxBox(H) {
+  const PROX_X       = Number(window.proxX)      || 200;
+  const PROX_Y_ABOVE = Number(window.proxYAbove) || 170;
+  const PROX_Y_BELOW = Number(window.proxYBelow) || 100;
+  return { x1: H.cx - PROX_X, x2: H.cx + PROX_X, yTop: H.rimTop - PROX_Y_ABOVE, yBot: H.rimTop + PROX_Y_BELOW };
+}
+function inProx(pt, PB) {
+  return pt.x >= PB.x1 && pt.x <= PB.x2 && pt.y >= PB.yTop && pt.y <= PB.yBot;
+}
+
+// Latches for exit-direction logic
+if (typeof BS._lastInProx === 'undefined') BS._lastInProx = false;
+if (typeof BS._lastY     === 'undefined') BS._lastY     = 0;
+
+let __shotInProgress = false;
+let __awaitingReset  = false;
+
+export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
+  const H = normLockedHoop(hoopBox);
+  const last = ballStateRef?.trail?.at?.(-1);
+  if (!H || !last) return false;
+
+  // CHANGED: use the same normalized hoop to build prox box
+  const PROX = _proxBoxFromHoop(H);
+  const nowInProx =
+    (last.x >= PROX.x1 && last.x <= PROX.x2 && last.y >= PROX.yTop && last.y <= PROX.yBot);
+
+  const s = ensureBallLatches();
+
+  // Arm on enter OR if pose already fired release
+  if ((!__shotInProgress && nowInProx && !__awaitingReset) || s.releaseSignaled) {
+    __shotInProgress = true;
+    if (!s.releaseSignaled) {
+      try { markRelease?.(frameIndex); } catch {}
+      s.releaseSignaled = true;
+      try { window.dispatchEvent(new Event('shot:release')); } catch {}
+    }
+  }
+
+  // CHANGED: “belt & suspenders” finalization
+  const leftProx = s._lastInProx && !nowInProx;
+  const exitedBottomDownward = leftProx && (last.y >= PROX.yBot - 2) && (last.y >= s._lastY);
+  const exitedBottomByLatch  = (ballStateRef.proxExitFrame != null) && (last.y >= PROX.yBot - 2);
+  const exitedBottom = exitedBottomDownward || exitedBottomByLatch;
+
+  if (__shotInProgress && exitedBottom) {
+    __shotInProgress = false;
+    __awaitingReset  = true;
+
+    if (ballStateRef.state !== 'FROZEN') { try { freezeShot?.(null); } catch {} }
+
+    
+    // --- improved logging: prefer frozen trail; else tail of live trail ---
+    let shotRecord = null;
+    const frozen = ballStateRef.shots?.at?.(-1);
+    const trailForLog =
+      (frozen?.trail?.length >= 3) ? frozen.trail :
+      (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
+
+    if (trailForLog) {
+      try {
+        // use frameIndex from the exit frame; detectAndLogShot de-dupes internally
+        shotRecord = detectAndLogShot?.(trailForLog, frameIndex, hoopBox) || null;
+      } catch {}
+    }
+    // last resort: reuse the last record if we just wrote it
+    if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
+
+
+    if (!s.summarySignaled) {
+      s.summarySignaled = true;
+      try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+    }
+
+    // update latches
+    s._lastInProx = nowInProx;
+    s._lastY      = last.y;
+    return true;
+  }
+
+  // Allow next attempt once ball rises above rim
+  if (__awaitingReset && last.y < (H.rimTop - 40)) {
+    __awaitingReset     = false;
+    s.releaseSignaled   = false;
+    s.summarySignaled   = false;
+  }
+
+  s._lastInProx = nowInProx;
+  s._lastY      = last.y;
+  return false;
+}
+
+// Compute a normalized proximity box from a (center or topleft) hoop box
+function _proxBoxFromHoop(hoop) {
+  const H = normLockedHoop(hoop);
+  if (!H) return null;
+  const PROX_X       = Number(window.proxX)      || 200;
+  const PROX_Y_ABOVE = Number(window.proxYAbove) || 170;
+  const PROX_Y_BELOW = Number(window.proxYBelow) || 100;
+  return { H, x1: H.cx - PROX_X, x2: H.cx + PROX_X, yTop: H.rimTop - PROX_Y_ABOVE, yBot: H.rimTop + PROX_Y_BELOW };
+}
+
+/** Robust proximity test with small hysteresis while tracking */
+export function isBallInProximityZone(ballPt, hoopBox = null, opts = {}) {
+  if (!ballPt) return false;
+  const rawHoop = hoopBox || getLockedHoopBox?.();
+  const PB = _proxBoxFromHoop(rawHoop);
+  if (!PB) return false;
+
+  const s = BS();
+  const mode = opts.mode || 'stay';   // 'enter' (tighter) | 'stay' (looser)
+  const pad  = Number(opts.hysteresisPx) ??
+               ((s.state === 'TRACKING' || s.releaseSignaled) ? (Number(window.proxHys) || 6) : 0);
+
+  const x1 = PB.x1 - (mode === 'stay' ? pad : 0);
+  const x2 = PB.x2 + (mode === 'stay' ? pad : 0);
+  const yT = PB.yTop - (mode === 'stay' ? pad : 0);
+  const yB = PB.yBot + (mode === 'stay' ? pad : 0);
+
+  return (ballPt.x >= x1 && ballPt.x <= x2 && ballPt.y >= yT && ballPt.y <= yB);
+}
+
 
 // ===== Scoring =====
 function getMissReason(trail, hoopBox) {
@@ -145,58 +288,59 @@ function getMissReason(trail, hoopBox) {
 }
 
 //-----------------------------------------------------------------//
-// shot_logger.js  — replace the whole detectAndLogShot function   //
+//                   Detect and log a shot summary                 //
 //-----------------------------------------------------------------//
 export function detectAndLogShot(trail, __frameIdx, hoopBox) {
-  if (!window.__readyForScoring) return false;
   if (!trail || trail.length < 3 || !hoopBox) return;
-  if (__frameIdx === lastShotFrameId) return;
+  // de-dupe by frame + time + trail hash
+  if (__frameIdx === lastShotFrameId) return shotLog.at(-1) ?? null;
+  if (!shouldLogShot(trail, __frameIdx)) return shotLog.at(-1) ?? null;
   lastShotFrameId = __frameIdx;
 
-  const first = trail[0];
+  const mode   = String(window.SHOT_SCORER_MODE || 'weighted').toLowerCase();
+  const first  = trail[0];
   const lastPt = trail.at(-1);
 
-  // arc metrics
-  const apexY = Math.min(...trail.map(p => p.y));
-  const arcHeight = Math.max(0, Math.round(hoopBox.y - apexY));
+  // arc metrics (top-left hoop box → height from rim top)
+  const apexY        = Math.min(...trail.map(p => p.y));
+  const arcHeight    = Math.max(0, Math.round(hoopBox.y - apexY));
   const releaseAngle = estimateReleaseAngle(trail);
-
-  // Build a center-safe hoop for the region scorer
-  const hoopForScore = {
-    ...hoopBox,
-    anchor: 'topleft',
-    cx: hoopBox.x + (hoopBox.w || 0) / 2,
-    cy: hoopBox.y + (hoopBox.h || 0) / 2,
-  };
 
   // net motion (guarded)
   let netMoved = null;
-  try { netMoved = detectNetMotionFromCanvas(window.videoCanvas || window.__videoCanvas, hoopBox); } catch {}
+  try {
+    const canvas = window.videoCanvas || window.__videoCanvas || null;
+    if (canvas && typeof detectNetMotionFromCanvas === 'function') {
+      netMoved = detectNetMotionFromCanvas(canvas, hoopBox);
+    }
+  } catch {}
 
-  // region decision (uses evaluateShotByRegionsV2 under the hood)
-  const region = score(trail, hoopBox, netMoved) || {};
-  const regionMade = !!region.made;
-  const entryAngle = Number.isFinite(region.entryAngle) ? region.entryAngle : 0;
-
-  // weighted score
+  // region + weighted
+  let region = {};
+  try { region = score(trail, hoopBox, netMoved) || {}; } catch { region = {}; }
+  const regionMade    = !!region.made;
+  const entryAngle    = Number.isFinite(region.entryAngle) ? region.entryAngle : 0;
   const weightedScore = computeWeightedShotScore(trail);
-  const weightMade = weightedScore >= WEIGHTED_THRESH;
+  const weightMade    = weightedScore >= (window.WEIGHTED_THRESH ?? 0.75);
 
-  // final decision + reason
-  const made = regionMade || weightMade;
+  const made   = (mode === 'hybrid') ? (regionMade || weightMade) : weightMade;
   const reason = made ? null : (region.reason || getMissReason(trail, hoopBox));
 
-  // write result back onto the last frozen shot for trail coloring
-  const lastFrozen = ballState.shots.at?.(-1);
-  if (lastFrozen) lastFrozen.made = made;
+  // reflect decision back on last frozen shot (for coloring)
+  const lastFrozen = BS().shots?.at?.(-1);
+  if (lastFrozen) {
+    lastFrozen.made     = made;
+    lastFrozen.score    = weightedScore;
+    lastFrozen.netMoved = !!netMoved;
+  }
 
-  // 🔹 capture a quick pose snapshot at the time we score (for the coach)
+  // optional pose snapshot for coach
   const poseSnapshot = (window.capturePoseSnapshot?.(window.playerState, hoopBox)) || null;
 
-  // log
+  // build + log record
   const shotRecord = {
     frameStart: first.frame,
-    frameEnd: lastPt.frame,
+    frameEnd:   lastPt.frame,
     trail,
     made,
     entryAngle,
@@ -205,40 +349,40 @@ export function detectAndLogShot(trail, __frameIdx, hoopBox) {
     missReason: reason,
     netMoved: !!netMoved,
     weightedScore,
+    scorerMode: mode,
+    regionMade,
+    weightMade,
     poseSnapshot
   };
-  logShot(shotRecord);
+  const rec = logShot(shotRecord);
+  rec.__hash = trailHash(trail);   // stash for potential future de-dupe
 
-  // 🔊 Broadcast ONCE — listeners (coachAssistant + video_ui) will handle UI, table, voice
-try {
-  window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord }));
-  console.log('[shot_logger] shot:summary dispatched', shotRecord);
-} catch (e) {
-  console.warn('[shot_logger] shot:summary dispatch failed:', e);
+  // UI updates
+  try { drawShotStatsTable?.(); updateBottomStats?.(); } catch {}
+
+  // on-canvas summary overlay
+  if (typeof canvasOverlay === 'function') {
+    canvasOverlay({ made, arcHeight, entryAngle, releaseAngle }, hoopBox);
+  }
+
+  // banner
+  const madeShots  = shotLog.filter(s => s.made).length;
+  const totalShots = shotLog.length || 1;
+  const accuracy   = Math.round((madeShots / totalShots) * 100);
+  window.showShotBanner?.({ made, arcHeight, entryAngle, releaseAngle, accuracy, madeShots, totalShots });
+
+  // ✅ Coach / TTS exactly once per logged record
+  window.__lastAnnouncedShotId = window.__lastAnnouncedShotId || 0;
+  if (rec && window.__lastAnnouncedShotId !== rec.id) {
+    window.__lastAnnouncedShotId = rec.id;
+    try { window.doachOnShot?.(rec); } catch (e) { console.warn('[doach] feedback failed:', e); }
+  }
+
+  // DO NOT dispatch 'shot:summary' here (centralized in checkShotConditions)
+  return rec;
 }
 
-// (Optional) local visual overlays are fine; they don’t duplicate speech
-if (typeof canvasOverlay === 'function') {
-  canvasOverlay({ made, arcHeight, entryAngle, releaseAngle }, hoopBox);
-}
 
-const madeShots  = shotLog.filter(s => s.made).length;
-const totalShots = shotLog.length || 1;
-const accuracy   = Math.round((madeShots / totalShots) * 100);
-
-window.showShotBanner?.({
-  made, arcHeight, entryAngle, releaseAngle, accuracy, madeShots, totalShots
-});
-
-try { window.updateCoachNotes?.(shotRecord); } catch {}
-try { window.doachOnShot?.(shotRecord); } catch (e) { console.warn('[doach] feedback failed:', e); }
-
-
-// reset release flag and frame-by-frame
-__releaseEventSent = false;
-if (__autoFBF) { window.frameMode?.off(); __autoFBF = false; }
-
-}
 
 // helper already used elsewhere in shot_logger.js
 function normHoop(hoop) {
@@ -251,13 +395,14 @@ function normHoop(hoop) {
 }
 
 
+
 // ---------------------------------------------------------------- //
 //                        Start Shot Magic!                         //
 // ---------------------------------------------------------------- //
 
 // ---------------- Weighted Scorer (clean, top-left convention) ----------------
 
-// Tunables (kept modest; tweak if you like)
+// Tunables (kept modest; tweak as needed - goal to tie to Doach model for optimization)
 const WEIGHTS = {
   hoop: 0.15,
   net: 0.20,
@@ -275,7 +420,7 @@ const TUNABLES = {
   NETLINE_POS: 0.92,
   DEPTH_POS: 1.22,
   TUBE_WIDTH_RATIO: 0.55,
-  TUBE_MIN_CONSEC: 2,
+  TUBE_MIN_CONSEC: 3,
   TUBE_ALLOW_GAPS: 2,
   SMALL_UP_TOL: 1.5,
   TRAIL_RADIUS: 15,
@@ -410,10 +555,15 @@ export function computeWeightedShotScore(trail) {
 
   const [nx1, ny1, nx2, ny2] = getRecentNetRegionSafe(H);
 
-  // Use ONLY the ball trail (last N points)
-  const tail = trail.slice(-TUNABLES.TAIL);
+  // Use only the last N points, but densify to survive brief occlusion
+  const tailRaw = trail.slice(-TUNABLES.TAIL);
+  const tail    = densifyTrail(tailRaw);            // ← NEW
 
-  // 1) hoop ellipse
+  // 0) apex must clear rim a little
+  const apexY = Math.min(...tail.map(p => p.y));
+  const apexAboveRim = apexY < (H.rimY - 6);        // ← NEW gating
+
+  // 1) hoop ellipse proximity
   const rx = (H.w/2) * (1 + TUNABLES.ELLIPSE_X);
   const ry = (H.h/2) * (1 + TUNABLES.ELLIPSE_Y);
   const inHoop = tail.some(p => {
@@ -421,126 +571,87 @@ export function computeWeightedShotScore(trail) {
     return dx*dx + dy*dy <= 1;
   });
 
-  // 2) center tube
+  // 2) center tube run after rim cross
   const tubeRun = tubeRunAfterCross(tail, H);
-  const tubeOK  = tubeRun >= TUNABLES.TUBE_MIN_CONSEC;
+  const tubeOK  = tubeRun >= Math.max(3, TUNABLES.TUBE_MIN_CONSEC); // ← stricter
 
-  // 3) net line crossing
+  // 3) net line crossing near center
   const crossed = crossedNetLine(tail, H);
 
   // 4) net region presence
   const pad = TUNABLES.NET_PAD;
   const inNet = tail.some(p => p.x >= (nx1-pad) && p.x <= (nx2+pad) && p.y >= (ny1-pad) && p.y <= (ny2+pad));
 
-  // 5) thick trail through center
-  const thickCenter = thickTrailCenterHit(tail, H);
+  // 5) thick center stripe (make it a bit narrower again)
+  const thickCenter = thickTrailCenterHit(tail, { H, w: H.w * 0.92 }); // ← slightly narrower
 
-  // Accumulate
-  let score = 0;
-  if (inHoop)            { score += WEIGHTS.hoop;         console.log('✅ Hoop ellipse +0.2'); }
-  else                    { console.log('🟥 no hoop ellipse'); }
+  // accumulate
+  let s = 0;
+  if (inHoop)             s += WEIGHTS.hoop;
+  if (inNet)              s += WEIGHTS.net;
+  if (tubeOK)             s += WEIGHTS.tubeHit;
+  if (crossed)            s += 0.3;                  // .3 is good
+  if (BS().netMoved)       s += WEIGHTS.netMoved;
+  if (thickCenter)        s += WEIGHTS.trailCenter;
 
-  if (inNet)             { score += WEIGHTS.net;          console.log('✅ Net region +0.2'); }
-  else                    { console.log('🟥 no net region'); }
-
-  if (tubeOK)            { score += WEIGHTS.tubeHit;      console.log(`✅ Tube run ${tubeRun} +0.3`); }
-  else                    { console.log(`🟥 Tube run ${tubeRun}`); }
-
-  if (crossed)           { score += 0.3;                 console.log('✅ Net line crossed +0.3'); }
-
-  if (ballState.netMoved){ score += WEIGHTS.netMoved;     console.log('✅ Net moved +0.35'); }
-
-  if (thickCenter)       { score += WEIGHTS.trailCenter;  console.log('✅ Thick trail center +0.25'); }
-  else                    { console.log('🟥 no thick trail center'); }
-
-  const centerPass = tubeOK || thickCenter || inHoop;
+  const centerPass = tubeOK || thickCenter;
   const strongThrough = crossed && centerPass;
 
-  if (strongThrough) score = Math.max(score, 0.80);
-  if (!centerPass)   score = Math.min(score, 0.60); // prevent net-only combos from scoring as makes
+  // hard gates:
+  if (!apexAboveRim)   s = Math.min(s, 0.55);        // low arc shouldn’t score high
+  if (strongThrough)   s = Math.max(s, 0.80);        // strong signal → high floor
+  if (!centerPass)     s = Math.min(s, 0.60);        // without tube/center, cap it
+  if (!crossed)        s = Math.min(s, 0.60);        // must cross net line to exceed 0.6
 
-  // console.log(`Score ${score.toFixed(2)} {inHoop, inNet, tubeRun, crossed, thickCenter}`, {inHoop,inNet,tubeRun,crossed,thickCenter});
-  return score;
+  return s;
 }
 
 export function scoringTick(__frameIdx) {
   const hoopBox = getLockedHoopBox?.();
   if (!hoopBox) return;
+  const s = BS();
 
-  // --- 1) Emit shot:release exactly once per attempt (unchanged behavior) ---
-  if (ballState?.state === 'TRACKING' &&
-      ballState?.releaseFrame != null &&
-      !__releaseEventSent) {
+  // fire release once when tracking begins
+  if (s?.state === 'TRACKING' && s?.releaseFrame != null && !__releaseEventSent) {
     __releaseEventSent = true;
-    try {
-      window.dispatchEvent(
-        new CustomEvent('shot:release', { detail: { frame: ballState.releaseFrame } })
-      );
-    } catch {}
+    try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: s.releaseFrame } })); } catch {}
   }
 
-  // --- 2) When tracker freezes the attempt, score it ONCE from the TRAIL ---
-  if (ballState?.state === 'FROZEN' &&
-      Array.isArray(ballState.shots) &&
-      ballState.shots.length > __lastScoredCount) {
-
-    const s = ballState.shots.at(-1);
-    if (s?.trail?.length >= 3) {
-      // Refresh netMoved at freeze time (optional but helpful)
+  // score newly frozen shot
+  if (s?.state === 'FROZEN' && Array.isArray(s.shots) && s.shots.length > __lastScoredCount) {
+    const last = s.shots.at(-1);
+    if (last?.trail?.length >= 3) {
       try {
         const canvas = window.videoCanvas || window.__videoCanvas || null;
         if (canvas && typeof detectNetMotionFromCanvas === 'function') {
-          const moved = detectNetMotionFromCanvas(canvas, hoopBox);
-          ballState.netMoved = !!moved;
+          s.netMoved = !!detectNetMotionFromCanvas(canvas, hoopBox);
         }
       } catch {}
 
-      // ▶️ Score using the ball TRAIL only (not raw detections)
-      const score = computeWeightedShotScore(s.trail);
-      const made  = score >= (window.WEIGHTED_THRESH ?? 0.65);
+      const sc = computeWeightedShotScore(last.trail);
+      last.score = sc; last.made = sc >= (window.WEIGHTED_THRESH ?? 0.65); last.netMoved = !!s.netMoved;
 
-      // Attach for downstream consumers (and logs)
-      s.score    = score;
-      s.made     = made;
-      s.netMoved = !!ballState.netMoved;
-
-      // IMPORTANT: keep your original pipeline so slow-mo & UI fire:
-      // detectAndLogShot will emit 'shot:summary' that video_ui.js listens for.
-      try {
-        detectAndLogShot?.(s.trail, __frameIdx, hoopBox, {
-          score,
-          made,
-          netMoved: s.netMoved
-        });
-      } finally {
-        __lastScoredCount = ballState.shots.length;
-      }
+      // logging happens at finalize time in checkShotConditions
+      __lastScoredCount = s.shots.length;
     }
   }
 
-  // --- 3) Clear awaitingBallReset once ball leaves proximity (unchanged) ---
-  try {
-    const p = ballState.trail?.at?.(-1);
-    if (p && typeof isBallInProximityZone === 'function' && typeof awaitingBallReset !== 'undefined') {
-      if (!isBallInProximityZone(p)) awaitingBallReset = false;
-    }
-  } catch {}
-
-  // --- 4) When tracker returns to idle/ready, re-arm release gate for next shot ---
-  // (Adjust state names if yours differ; goal is to allow a new 'shot:release' later.)
-  if (ballState?.state === 'IDLE' || ballState?.state === 'READY' || ballState?.state === 'WAITING') {
+  // re-arm release for next attempt when idle
+  if (s?.state === 'IDLE' || s?.state === 'READY' || s?.state === 'WAITING') {
     __releaseEventSent = false;
   }
 }
-
 
 // ---------------------------------------------------------------- //
 //                        End Shot Magic!                           //
 // ---------------------------------------------------------------- //
 
-
 // ===== UI Helpers =====
-export function logShot(data) { shotLog.push({ id: shotLog.length + 1, timestamp: Date.now(), ...data }); }
+export function logShot(data) {
+  const rec = { id: shotLog.length + 1, timestamp: Date.now(), ...(data || {}) };
+  shotLog.push(rec);
+  return rec;
+}
 export function resetShotLog() { shotLog.length = 0; }
 
 export function drawShotStatsTable() {
@@ -620,10 +731,8 @@ export function updateBottomStats() {
   }
 }
 
-
 window.updateBottomStats = updateBottomStats;
 window.drawShotStatsTable = drawShotStatsTable;
-
 
 // ===== Supporting Functions =====
 
@@ -645,10 +754,11 @@ export function drawHoopProximityDebug(ctx) {
     const H = normHoop(hoop);
 
     // Same sizing as your original (constant margins), but center-safe
-    const x = H.cx - PROX_X;
-    const y = H.cy - PROX_Y_ABOVE;
-    const width  = PROX_X * 2;
-    const height = PROX_Y_ABOVE + PROX_Y_BELOW;
+    const P = currentProx();
+    const x = H.cx - P.X;
+    const y = H.cy - P.Y_ABOVE;
+    const width  = P.X * 2;
+    const height = P.Y_ABOVE + P.Y_BELOW;
 
     ctx.save();
     const prevDash = ctx.getLineDash ? ctx.getLineDash() : [];
@@ -701,6 +811,7 @@ export function drawShotTubeDebug(ctx) {
 
 export const shotState = { inProgress: false, entryFrame: -1 };
 
+// upon video load buffer detected net/hoop objects analysis
 export function bufferDetectedObjects(objects) {
   const nets = objects.filter(o => o.label === 'net' && o.box?.length === 4);
   const hoops = objects.filter(o => o.label === 'hoop' && o.box?.length === 4);
@@ -719,31 +830,57 @@ let lastNetPatch = null;
 let netPrimed = false;
 export function isNetPrimed() { return netPrimed; }
 
+// did the net move?
 export function detectNetMotion(canvas, hoopBox) {
   if (!canvas || !hoopBox) return false;
   const ctx = canvas.getContext('2d');
-  const [x, y, w, h] = [hoopBox.x, hoopBox.y + hoopBox.h, hoopBox.w, hoopBox.h * 0.6];
 
-  const imageData = ctx.getImageData(x, y, w, h);
-  const currentData = imageData.data;
+  // clamp region to canvas, use integers
+  let x = Math.floor(hoopBox.x);
+  let y = Math.floor(hoopBox.y + hoopBox.h);
+  let w = Math.floor(hoopBox.w);
+  let h = Math.floor(hoopBox.h * 0.6);
 
-  if (!lastNetPatch) {
-    lastNetPatch = new Uint8ClampedArray(currentData);
-    netPrimed = true;            // ✅ baseline captured
-    return false;                // first sample never reports motion
+  // clamp to bounds
+  x = Math.max(0, Math.min(x, canvas.width  - 1));
+  y = Math.max(0, Math.min(y, canvas.height - 1));
+  w = Math.max(1, Math.min(w, canvas.width  - x));
+  h = Math.max(1, Math.min(h, canvas.height - y));
+
+  // if region is tiny, reset baseline and bail
+  if (w < 2 || h < 2) { lastNetPatch = null; return false; }
+
+  let imageData;
+  try {
+    imageData = ctx.getImageData(x, y, w, h);
+  } catch (e) {
+    // getImageData will throw if the box is out of bounds
+    lastNetPatch = null;
+    return false;
   }
 
+  const cur = imageData.data; // Uint8ClampedArray length = w*h*4
+
+  // (re)initialize baseline whenever size changes
+  if (!lastNetPatch || lastNetPatch.length !== cur.length) {
+    lastNetPatch = new Uint8ClampedArray(cur);
+    return false; // don't report motion on the first sample
+  }
+
+  // diff
   let changed = 0;
-  for (let i = 0; i < currentData.length; i += 4) {
-    const diff = Math.abs(currentData[i] - lastNetPatch[i]) +
-                 Math.abs(currentData[i+1] - lastNetPatch[i+1]) +
-                 Math.abs(currentData[i+2] - lastNetPatch[i+2]);
+  for (let i = 0; i < cur.length; i += 4) {
+    const diff = Math.abs(cur[i] - lastNetPatch[i]) +
+                 Math.abs(cur[i+1] - lastNetPatch[i+1]) +
+                 Math.abs(cur[i+2] - lastNetPatch[i+2]);
     if (diff > 30) changed++;
   }
 
-  lastNetPatch.set(currentData);
-  const percentMoved = changed / (currentData.length / 4);
-  return percentMoved > 0.08; // 8% pixel shift threshold
+  // update baseline AFTER diff
+  lastNetPatch.set(cur);
+
+  const percentMoved = changed / (cur.length / 4);
+  return percentMoved > 0.08;
 }
 
 // 🧪 Draw netMoved debug overlay during scoring check
@@ -794,9 +931,11 @@ export function trailHash(trail) {
   return `${Math.round(head.x)},${Math.round(head.y)}-${Math.round(tail.x)},${Math.round(tail.y)}`;
 }
 
-let lastTrailHash = null;
-const SHOT_GAP_MS = 2000;
-const SHOT_GAP_FRAMES = 15;
+// prevent duplicate shot logging
+let lastTrailHash = null;  
+const SHOT_GAP_MS = 1500;  //1.5 sec 
+const SHOT_GAP_FRAMES = 10;  // and-or 10 frames
+let lastShotEndTime = 0;
 
 export function shouldLogShot(trail, __frameIdx) {
   const hash = trailHash(trail);
@@ -823,8 +962,8 @@ export function getRecentHoopRegion() {
   return latest?.box || null;
 }
 function isPointInTube(p, hoop) {
-  const x1 = hoop.x - TUBE_WIDTH / 2;
-  const x2 = hoop.x + TUBE_WIDTH / 2;
+  const x1 = hoop.x - TUBE_WIDTH / 3;
+  const x2 = hoop.x + TUBE_WIDTH / 3;
   const y1 = hoop.y;
   const y2 = hoop.y + TUBE_HEIGHT;
   return p.x >= x1 && p.x <= x2 && p.y >= y1 && p.y <= y2;

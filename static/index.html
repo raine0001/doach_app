@@ -2,140 +2,137 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+  />
+  <meta name="color-scheme" content="dark light" />
   <title>D🏀ACH</title>
-  <link rel="icon" href="/static/favicon.ico">
+  <link rel="icon" href="/static/favicon.ico" />
 
-  <!-- Core app/scripts (load each ONCE) -->
+  <!-- Core app/scripts (load each ONCE, keep order) -->
   <script src="/static/js/coachAssistant.js"></script>
-  <script type="module" src="/static/js/shot_logger.js"></script>
-
-  <script type="module" src="/static/js/app.js"></script>
-
-  <script type="module">
-    import { mountHamburgerMenu } from '/static/js/ui_menu.js?v=2';
-    mountHamburgerMenu();
-  </script>
+  
+  <!-- Slow-mo arbiter (listens for shot:release / shot:summary) -->
+  <script src="/static/js/slowmo_arbiter.js"></script>
 
   <!-- Core libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
 
-  <!-- MediaPipe Pose Model -->
+  <!-- MediaPipe Pose Model (exposes FilesetResolver, PoseLandmarker globally) -->
   <script type="module">
-    import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
+    import {
+      FilesetResolver,
+      PoseLandmarker
+    } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs";
     window.FilesetResolver = FilesetResolver;
     window.PoseLandmarker = PoseLandmarker;
   </script>
 
-  <!-- Styles (keep your existing stylesheet) -->
-  <link rel="stylesheet" href="static/style.css" />
-  <!-- (Optional) Boxicons; safe to keep or remove if unused elsewhere -->
-  <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
-
-  <!-- REMOVE the old sidebar script -->
-  <!-- <script src="static/script.js" defer></script> -->
+  <!-- Styles -->
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Boxicons -->
+  <link
+    href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css"
+    rel="stylesheet"
+  />
 </head>
 
-<body>
+<body data-app="doach" data-build="2025-08-22">
 
-  <!-- 🔴 REMOVED: legacy <nav class="sidebar ..."> ... </nav> -->
-
-  <!-- Overlay Prompt Message -->
-  <div id="overlayPrompt" class="prompt-message" style="display:none;">Tap the hoop to begin setup</div>
+  <!-- Prompt bar is fine -->
   <div id="promptBar"></div>
 
-  <!-- ✅ Main Video + Overlay -->
-  <div class="session-container">
-    <div class="video-frame">
-      <video id="videoPlayer" muted playsinline></video>
-      <canvas id="overlay"></canvas>
-      <div class="session-status">SESSION IN PROGRESS...</div>
+  <!-- ✅ Main Video + Overlay (single overlayPrompt only) -->
+  <div class="video-frame" id="videoFrame" style="position:relative">
+    <video id="videoPlayer" playsinline muted></video>
+    <canvas id="overlay"></canvas>
+
+    <div class="session-status" role="status" aria-live="polite">
+      SESSION IN PROGRESS...
+    </div>
+
+    <!-- keep just ONE prompt element with this id -->
+    <div id="overlayPrompt"
+         style="position:absolute; left:12px; top:12px; z-index:3;
+                background:rgba(0,0,0,.6); color:#fff; padding:.4rem .6rem;
+                border-radius:.5rem; font:600 13px/1.2 system-ui; display:none;">
+      📍 Tap the hoop to begin setup
     </div>
   </div>
 
-  <!-- ✅ Coach Feedback + Shot Summary -->
+  <!-- Coach Feedback + Shot Summary (unchanged) -->
   <div id="coachNotes" style="
     position: absolute; top: 10px; left: 10px;
     max-width: 400px; background: rgba(0,0,0,0.7); color: #fff;
     padding: 12px 16px; border-radius: 8px;
-    font-size: 14px; line-height: 1.4; z-index: 999;">
-    <strong>🤖 Coach Feedback</strong><br>
+    font-size: 14px; line-height: 1.4; z-index: 999;" aria-live="polite">
+    <strong>🤖 Coach Feedback</strong><br />
     <span style="color:gray;">(No shot yet)</span>
   </div>
 
   <div id="shotOverlaySummary" style="
-    position: absolute;
-    bottom: 80px;
-    right: 20px;
-    padding: 10px 16px;
-    background: rgba(0,0,0,0.75);
-    color: white;
-    border-radius: 10px;
-    font-size: 14px;
-    line-height: 1.4;
-    opacity: 0;
-    transition: opacity 0.4s ease;
-    z-index: 20;
-    pointer-events: none;
-    display: none;"></div>
+    position: absolute; bottom: 80px; right: 20px; padding: 10px 16px;
+    background: rgba(0,0,0,0.75); color: white; border-radius: 10px;
+    font-size: 14px; line-height: 1.4; opacity: 0; transition: opacity .4s ease;
+    z-index: 20; pointer-events: none; display: none;"></div>
 
-  <!-- Hidden upload control the new “Content” menu will click -->
   <input type="file" id="videoInput" accept="video/*" hidden />
 
-  <!-- Mount the new Hamburger menu + Feedback widget -->
+  <!-- Feedback widget -->
   <script type="module">
-    import { mountHamburgerMenu } from '/static/js/ui_menu.js';
-    import { installFeedbackWidget } from '/static/js/feedback_widget.js';
-
-    // Mount UI once DOM is ready
-    window.addEventListener('DOMContentLoaded', () => {
-      mountHamburgerMenu();
-      installFeedbackWidget();
-    });
+    import { installFeedbackWidget } from "/static/js/feedback_widget.js";
+    window.addEventListener("DOMContentLoaded", () => installFeedbackWidget());
   </script>
 
-  <!-- (Keep) lightweight helpers already on the page -->
+  <!-- Page boot: guard against duplicate listeners, set globals, lock overlay -->
   <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      const promptOverlay = document.getElementById("overlayPrompt");
+    (function bootIndexOnce(){
+      if (window.__indexBooted) return;
+      window.__indexBooted = true;
 
-      window.showPrompt = (message) => {
-        promptOverlay.textContent = message;
-        promptOverlay.style.display = "block";
-      };
-      window.hidePrompt = () => { promptOverlay.style.display = "none"; };
+      window.addEventListener("DOMContentLoaded", () => {
+        const video   = document.getElementById("videoPlayer");
+        const overlay = document.getElementById("overlay");
+        const prompt  = document.getElementById("overlayPrompt");
 
-      window.lockHoop = function () {
-        hidePrompt();
-        console.log("✅ Hoop lock UI confirmed");
-      };
+        // expose for modules that expect these
+        window.videoPlayer   = video;    // slowmo_arbiter uses this
+        window.overlayCanvas = overlay;
 
-      window.endSession = () => {
-        alert("✅ Session ended. Scroll down for summary.");
-      };
-    });
-  </script>
+        // prompt helpers
+        window.showPrompt = (msg) => { if (prompt){ prompt.textContent = msg; prompt.style.display = "block"; } };
+        window.hidePrompt = () => { if (prompt){ prompt.style.display = "none"; } };
+        window.lockHoop   = () => { window.hidePrompt?.(); console.log("✅ Hoop lock UI confirmed"); };
 
-  <script>
-    function startNativeVoice() {
-      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'startVoice' });
-    }
-    function stopNativeVoice() {
-      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'stopVoice' });
-    }
-    </script>
+        // resize/lock overlay when metadata is ready
+        video.addEventListener("loadedmetadata", () => {
+          try { window.ensureOverlayCss?.(); window.lockOverlayToVideo?.(); } catch {}
+        }, { once: true });
 
-  <script type="module" src="/static/js/local_detector.js?v=2"></script>
-  <script type="module">
-    (async () => {
-      const ok = await window.localDetector.enable('/static/models/best.onnx', [
-        // put YOUR 9 class names in order
-        'basketball','hoop','player','net','backboard','class5','class6','class7','class8'
-      ]);
-      console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
+        // detector readiness (single watcher)
+        (function waitReady(i=0){
+          if (window.__detReady) { console.log("✅ Local detector ready (worker)"); document.body.dataset.detector = "ready"; return; }
+          if (i > 50)           { console.warn("Detector not ready yet");         document.body.dataset.detector = "pending"; return; }
+          setTimeout(() => waitReady(i+1), 100);
+        })();
+
+        // reflect slow-mo state for quick visual checks
+        window.addEventListener("shot:release", () => { document.body.setAttribute("data-slowmo", "on"); },  { passive:true });
+        window.addEventListener("shot:summary", () => { document.body.setAttribute("data-slowmo", "off"); }, { passive:true });
+      });
     })();
+
+    // iOS native bridge (unchanged)
+    function startNativeVoice(){ window.webkit?.messageHandlers?.doach?.postMessage({ action: "startVoice" }); }
+    function stopNativeVoice(){  window.webkit?.messageHandlers?.doach?.postMessage({ action: "stopVoice"  }); }
   </script>
 
+  <!-- UI menu -->
+  <script src="/static/js/ui_menu.js?v=2"></script>
 
+  <!-- App entry (imports modules like analyze_frame.js, etc.) -->
+  <script type="module" src="/static/js/app.js?v=20250822"></script>
 </body>
+
 </html>
