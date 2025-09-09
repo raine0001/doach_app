@@ -1,0 +1,26 @@
+version: '3.8'
+services:
+  web:
+    build: .
+    ports:
+      - "5001:5001"  # Maps to app.py's port
+    volumes:
+      - .:/app
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - DOACH_MAX_ITERS=${DOACH_MAX_ITERS:-5}
+      - PYTHONUNBUFFERED=1
+    command: python app.py
+    networks:
+      - doach_net
+  playwright:
+    build: 
+      context: .
+      dockerfile: Dockerfile.test
+    depends_on:
+      - web
+    networks:
+      - doach_net
+networks:
+  doach_net:
+  

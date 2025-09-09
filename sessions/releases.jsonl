@@ -1,0 +1,28 @@
+{"ts": "2025-09-08T23:16:59.404Z", "sessionId": null, "shotId": null, "frame": 142617, "tMs": 1757373419402, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 860.1476014760148, "y": 239.11439114391143, "w": 88, "h": 36}}
+{"ts": "2025-09-08T23:16:59.705Z", "sessionId": null, "shotId": null, "frame": 142617, "tMs": 1757373419404, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 860.1476014760148, "y": 239.11439114391143, "w": 88, "h": 36}}
+{"ts": "2025-09-08T23:19:17.066Z", "sessionId": null, "shotId": null, "frame": 146738, "tMs": 1757373556764, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 950.2435351442602, "y": 144.57949662369552, "w": 88, "h": 36}}
+{"ts": "2025-09-08T23:19:17.074Z", "sessionId": null, "shotId": null, "frame": 146738, "tMs": 1757373556765, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 950.2435351442602, "y": 144.57949662369552, "w": 88, "h": 36}}
+{"ts": "2025-09-08T23:27:18.555Z", "sessionId": null, "shotId": null, "frame": 161182, "tMs": 1757374038287, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-08T23:27:18.592Z", "sessionId": null, "shotId": null, "frame": 161182, "tMs": 1757374038287, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-08T23:34:26.982Z", "sessionId": null, "shotId": null, "frame": 174034, "tMs": 1757374466701, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-08T23:34:27.006Z", "sessionId": null, "shotId": null, "frame": 174034, "tMs": 1757374466703, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-08T23:44:57.803Z", "sessionId": null, "shotId": null, "frame": 192960, "tMs": 1757375097501, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 941.4237342395587, "y": 145.58445995862883, "w": 88, "h": 36}}
+{"ts": "2025-09-08T23:44:57.807Z", "sessionId": null, "shotId": null, "frame": 192960, "tMs": 1757375097503, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 941.4237342395587, "y": 145.58445995862883, "w": 88, "h": 36}}
+{"ts": "2025-09-08T23:57:22.833Z", "sessionId": null, "shotId": null, "frame": 215308, "tMs": 1757375842451, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-08T23:57:22.836Z", "sessionId": null, "shotId": null, "frame": 215308, "tMs": 1757375842452, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:08:01.514Z", "sessionId": null, "shotId": null, "frame": 234472, "tMs": 1757376481453, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:08:01.757Z", "sessionId": null, "shotId": null, "frame": 234472, "tMs": 1757376481454, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:29:32.958Z", "sessionId": null, "shotId": null, "frame": 273206, "tMs": 1757377772334, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 941.4237342395587, "y": 144.2395587076438, "w": 88, "h": 36}}
+{"ts": "2025-09-09T00:29:32.963Z", "sessionId": null, "shotId": null, "frame": 273206, "tMs": 1757377772333, "via": "coach-pose", "poseSnapshot": null, "hoop": {"x": 941.4237342395587, "y": 144.2395587076438, "w": 88, "h": 36}}
+{"ts": "2025-09-09T00:35:48.667Z", "sessionId": null, "shotId": null, "frame": 284484, "tMs": 1757378148365, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:35:48.671Z", "sessionId": null, "shotId": null, "frame": 284484, "tMs": 1757378148366, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:46:36.899Z", "sessionId": null, "shotId": null, "frame": 303939, "tMs": 1757378796898, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:46:37.201Z", "sessionId": null, "shotId": null, "frame": 303939, "tMs": 1757378796899, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:47:19.694Z", "sessionId": null, "shotId": null, "frame": 305215, "tMs": 1757378839391, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:47:19.697Z", "sessionId": null, "shotId": null, "frame": 305215, "tMs": 1757378839392, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:51:20.538Z", "sessionId": null, "shotId": null, "frame": 312450, "tMs": 1757379080537, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:51:20.842Z", "sessionId": null, "shotId": null, "frame": 312450, "tMs": 1757379080538, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:54:48.613Z", "sessionId": null, "shotId": null, "frame": 318673, "tMs": 1757379287990, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:54:48.617Z", "sessionId": null, "shotId": null, "frame": 318673, "tMs": 1757379287991, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:55:02.236Z", "sessionId": null, "shotId": null, "frame": 319075, "tMs": 1757379301398, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}
+{"ts": "2025-09-09T00:55:02.240Z", "sessionId": null, "shotId": null, "frame": 319075, "tMs": 1757379301400, "via": "pose-heuristic-nohoop", "poseSnapshot": null, "hoop": null}

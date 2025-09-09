@@ -1,0 +1,1 @@
+# Placeholder for pose model or weights

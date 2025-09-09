@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Login • Doach</title>
+    <link rel="stylesheet" href="/static/style.css" />
+    <style>
+      body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:40px}
+      .card{max-width:420px;margin:auto;padding:24px;border:1px solid #ddd;border-radius:10px}
+      input,button{width:100%;padding:10px;margin:8px 0}
+      .row{display:flex;gap:8px}
+      .row>button{flex:1}
+      .muted{color:#777;font-size:12px}
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h2>Welcome to Doach</h2>
+      <input id="name" placeholder="First name (for the coach)" />
+      <input id="email" placeholder="Email" />
+      <input id="password" type="password" placeholder="Password" />
+      <div class="row">
+        <button id="btnLogin">Login</button>
+        <button id="btnRegister">Register</button>
+      </div>
+      <div class="muted" id="msg"></div>
+    </div>
+    <script>
+      async function post(url, body){ const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); if(!r.ok) throw new Error(await r.text()); return await r.json(); }
+      function setMsg(t){ document.getElementById('msg').textContent = t; }
+      async function login(){ try{ const name=document.getElementById('name').value.trim(); const email=document.getElementById('email').value.trim(); const password=document.getElementById('password').value; const j=await post('/api/auth/login',{email,password}); if(name) localStorage.setItem('firstname',name); location.href='/'; }catch(e){ setMsg('Login failed'); } }
+      async function register(){ try{ const name=document.getElementById('name').value.trim(); const email=document.getElementById('email').value.trim(); const password=document.getElementById('password').value; const j=await post('/api/auth/register',{name,email,password}); if(name) localStorage.setItem('firstname',name); location.href='/'; }catch(e){ setMsg('Register failed'); } }
+      document.getElementById('btnLogin').onclick=login; document.getElementById('btnRegister').onclick=register;
+    </script>
+  </body>
+  </html>
+

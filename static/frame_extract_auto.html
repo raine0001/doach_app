@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Frame Extractor</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+    #frameContainer, #skippedFrames {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+    }
+    .thumb {
+      width: 160px;
+      border: 1px solid #ccc;
+      padding: 4px;
+    }
+    .labelbox {
+      background: #111;
+      color: #0f0;
+      font-size: 11px;
+      padding: 2px 4px;
+      margin-top: 2px;
+      min-height: 24px;
+    }
+    #skippedContainer {
+      margin-top: 40px;
+      padding-top: 10px;
+      border-top: 1px solid #666;
+    }
+  </style>
+</head>
+<body>
+  <h2>🎥 DOACH Frame Extractor + Vision Labeler</h2>
+
+<!-- Upload and Live Labeling -->
+<section>
+  <input type="file" id="videoInput" accept="video/*" />
+  <label style="margin-left: 10px;">
+    <input type="checkbox" id="toggleBoxes" checked />
+    Show Boxes
+  </label>
+  <p id="status" style="margin-top: 10px;">
+    Drop a video file to extract frames and auto-label using GPT-4o and YOLOv8
+  </p>
+</section>
+
+<hr>
+
+<!-- Label Existing Extracted Frames -->
+<section>
+  <h3>📁 Continue Labeling Extracted Frames</h3>
+  <label for="folderNameInput">Session Folder:</label>
+  <input type="text" id="folderNameInput" placeholder="e.g. IMG_3030_format2" />
+  <button onclick="labelExistingFrames()">▶️ Run Labeling</button>
+</section>
+
+<div id="frameContainer" style="margin-top: 20px;"></div>
+
+<!-- Skipped / Rejected -->
+<section id="skippedContainer" style="margin-top: 40px; border-top: 1px solid #ccc; padding-top: 20px;">
+  <h3>⚠️ Skipped Frames</h3>
+  <p>
+    <a id="rejectedLink" href="#" target="_blank">🔗 Open Rejected Folder</a>
+  </p>
+  <div id="skippedFrames"></div>
+</section>
+
+<hr>
+
+<!-- Manual Review -->
+<section>
+  <h3>🛠️ Manual Review Queue</h3>
+  <label for="reviewFolderInput">Session Folder:</label>
+  <input type="text" id="reviewFolderInput" placeholder="e.g. IMG_3030_format2" />
+  <button onclick="loadManualReview()">📂 Load Review Frames</button>
+</section>
+
+<div id="manualReviewContainer" style="margin-top: 20px;"></div>
+
+
+  <script>
+    const input = document.getElementById('videoInput');
+    const status = document.getElementById('status');
+    const container = document.getElementById('frameContainer');
+    const skippedContainer = document.getElementById('skippedFrames');
+    const rejectedLink = document.getElementById('rejectedLink');
+
+    input.addEventListener('change', handleVideo);
+
+    async function handleVideo(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      status.textContent = '⏳ Uploading video...';
+
+      const formData = new FormData();
+      formData.append('video', file);
+
+      try {
+        const res = await fetch('/upload', {
+          method: 'POST',
+          body: formData
+        });
+
+        const data = await res.json();
+        if (data.video) {
+          status.textContent = '✅ Uploaded. Extracting frames...';
+
+          const filename = data.video.split('/').pop();  // e.g. IMG_3030.mp4
+          const videoName = filename.split('.')[0];       // e.g. IMG_3030
+
+          // Set rejected folder link
+          rejectedLink.href = `/frames/${videoName}/rejected/`;
+
+          const extractRes = await fetch('/extract_frames', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename })
+          });
+
+          const extractData = await extractRes.json();
+          container.innerHTML = '';
+          skippedContainer.innerHTML = '';
+
+          for (const frame of extractData.frames) {
+            const framePath = `/frames/${videoName}/${frame}`;
+            const wrapper = document.createElement('div');
+            wrapper.style.display = 'inline-block';
+            wrapper.style.textAlign = 'center';
+
+            const img = document.createElement('img');
+            img.src = framePath;
+            img.className = 'thumb';
+            wrapper.appendChild(img);
+
+            const canvas = document.createElement('canvas');
+            img.onload = () => {
+              canvas.width = img.width;
+              canvas.height = img.height;
+              drawBoxesOnCanvas(canvas, labelData.boxes); // ensure redraw after sizing
+            };
+            canvas.style.position = 'absolute';
+            canvas.style.top = '0';
+            canvas.style.left = '0';
+            canvas.style.pointerEvents = 'none';
+            canvas.style.border = '1px dashed rgba(255,255,255,0.1)';
+            wrapper.style.position = 'relative';
+
+            wrapper.appendChild(canvas);
+
+            const labelDiv = document.createElement('div');
+            labelDiv.className = 'labelbox';
+            labelDiv.innerText = '🔍 Labeling...';
+            wrapper.appendChild(labelDiv);
+
+            // Container placement: default to valid
+            container.appendChild(wrapper);
+
+            const visionRes = await fetch('/label_frame', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ path: framePath })
+            });
+
+            const labelData = await visionRes.json();
+
+            const showBoxes = document.getElementById('toggleBoxes').checked;
+            if (labelData.boxes && canvas && showBoxes) {
+              drawBoxesOnCanvas(canvas, labelData.boxes);
+            }
+
+            if (labelData.skipped) {
+            labelDiv.innerText = `⚠️ Skipped: ${labelData.summary || 'Missing required objects'}`;
+            labelDiv.style.color = '#ffcc00';
+            skippedContainer.appendChild(wrapper); // Move to skipped section
+
+            // ✅ Add Accept/Delete even if path doesn't contain '/manual_review/'
+            const video = videoName;
+            const frame = framePath.split('/').pop();
+
+            const actionDiv = document.createElement('div');
+            actionDiv.style.marginTop = '4px';
+
+            const acceptBtn = document.createElement('button');
+            acceptBtn.innerText = '✅ Accept';
+            acceptBtn.style.marginRight = '6px';
+            acceptBtn.onclick = async () => {
+              const res = await fetch('/review/accept', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ video, frame })
+              });
+              const json = await res.json();
+              wrapper.remove(); // remove from UI
+              alert(json.status);
+            };
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.innerText = '🗑 Delete';
+            deleteBtn.onclick = async () => {
+              const res = await fetch('/review/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ video, frame })
+              });
+              const json = await res.json();
+              wrapper.remove(); // remove from UI
+              alert(json.status);
+            };
+
+            actionDiv.appendChild(acceptBtn);
+            actionDiv.appendChild(deleteBtn);
+            wrapper.appendChild(actionDiv);
+
+            } else if (labelData.boxes && labelData.boxes.length > 0) {
+              let labelSummary = '';
+              const ballBox = labelData.boxes.find(b => b.label === 'basketball');
+              if (ballBox) {
+                labelSummary += `📍 basketball: [${ballBox.x_pct}%, ${ballBox.y_pct}%, ${ballBox.w_pct}%, ${ballBox.h_pct}%]<br>`;
+              }
+
+              const otherLabels = [...new Set(labelData.boxes.map(b => b.label).filter(l => l !== 'basketball'))];
+              if (otherLabels.length) {
+                labelSummary += `📦 ${otherLabels.join(', ')}`;
+              }
+
+              labelDiv.innerHTML = `✅ ${labelData.boxes.length} objects<br>${labelSummary}`;
+
+              // ✅ Append Accept/Delete buttons for manual review frames
+              if (framePath.includes('/manual_review/')) {
+                const video = framePath.split('/')[2];
+                const frame = framePath.split('/').pop();
+
+                const actionDiv = document.createElement('div');
+                actionDiv.style.marginTop = '4px';
+
+                const acceptBtn = document.createElement('button');
+                acceptBtn.innerText = '✅ Accept';
+                acceptBtn.style.marginRight = '6px';
+                acceptBtn.onclick = async () => {
+                  const res = await fetch('/review/accept', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ video, frame })
+                  });
+                  const json = await res.json();
+                  wrapper.remove(); // remove from UI
+                  alert(json.status);
+                };
+
+                const deleteBtn = document.createElement('button');
+                deleteBtn.innerText = '🗑 Delete';
+                deleteBtn.onclick = async () => {
+                  const res = await fetch('/review/delete', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ video, frame })
+                  });
+                  const json = await res.json();
+                  wrapper.remove(); // remove from UI
+                  alert(json.status);
+                };
+
+                actionDiv.appendChild(acceptBtn);
+                actionDiv.appendChild(deleteBtn);
+                wrapper.appendChild(actionDiv);
+              }
+
+            } else if (labelData.summary) {
+              labelDiv.innerText = `🧠 ${labelData.summary}`;
+            } else {
+              labelDiv.innerText = '❌ No objects found';
+            }
+          }
+
+
+          status.textContent = `✅ ${extractData.count} frames processed`;
+        } else {
+          status.textContent = '❌ Upload failed.';
+        }
+      } catch (err) {
+        console.error('Upload error', err);
+        status.textContent = '❌ Error during upload.';
+      }
+    }
+
+    function drawBoxesOnCanvas(canvas, boxes) {
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      const colorMap = {
+        basketball: 'red',
+        hoop: 'lime',
+        player: 'cyan',
+        net: 'orange',
+        backboard: 'purple'
+      };
+
+      for (const box of boxes) {
+        const x = (box.x_pct / 100) * canvas.width;
+        const y = (box.y_pct / 100) * canvas.height;
+        const w = (box.w_pct / 100) * canvas.width;
+        const h = (box.h_pct / 100) * canvas.height;
+
+        ctx.strokeStyle = colorMap[box.label] || 'white';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(x - w / 2, y - h / 2, w, h);
+
+        ctx.font = '10px sans-serif';
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.fillText(box.label, x - w / 2 + 2, y - h / 2 + 10);
+      }
+    }
+
+    async function labelExistingFrames() {
+  const folderName = document.getElementById('folderNameInput').value.trim();
+  if (!folderName) {
+    alert("Please enter a folder name like IMG_3030_format2");
+    return;
+  }
+
+  status.textContent = `🔎 Scanning folder: ${folderName}...`;
+
+  try {
+    // Get list of frames from the server (new route we’ll add)
+    const res = await fetch(`/list_frames/${folderName}`);
+    const data = await res.json();
+    if (!data.frames || data.frames.length === 0) {
+      status.textContent = `❌ No frames found in ${folderName}`;
+      return;
+    }
+
+    container.innerHTML = '';
+    skippedContainer.innerHTML = '';
+    rejectedLink.href = `/frames/${folderName}/rejected/`;
+
+    for (const frame of data.frames) {
+      const framePath = `/frames/${folderName}/${frame}`;
+      const wrapper = document.createElement('div');
+      wrapper.style.display = 'inline-block';
+      wrapper.style.textAlign = 'center';
+      wrapper.style.position = 'relative';
+
+      const img = document.createElement('img');
+      img.src = framePath;
+      img.className = 'thumb';
+      wrapper.appendChild(img);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 90;
+      canvas.style.position = 'absolute';
+      canvas.style.top = '0';
+      canvas.style.left = '0';
+      canvas.style.pointerEvents = 'none';
+      canvas.style.border = '1px dashed rgba(255,255,255,0.1)';
+      wrapper.appendChild(canvas);
+
+      const labelDiv = document.createElement('div');
+      labelDiv.className = 'labelbox';
+      labelDiv.innerText = '🔍 Labeling...';
+      wrapper.appendChild(labelDiv);
+
+      container.appendChild(wrapper);
+
+      const visionRes = await fetch('/label_frame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: framePath })
+      });
+
+      const labelData = await visionRes.json();
+
+      const showBoxes = document.getElementById('toggleBoxes').checked;
+      if (labelData.boxes && canvas && showBoxes) {
+        drawBoxesOnCanvas(canvas, labelData.boxes);
+      }
+
+      if (labelData.skipped) {
+        labelDiv.innerText = `⚠️ Skipped: ${labelData.summary || 'Missing required objects'}`;
+        labelDiv.style.color = '#ffcc00';
+        skippedContainer.appendChild(wrapper);
+      } else if (labelData.boxes && labelData.boxes.length > 0) {
+        let labelSummary = '';
+        const ballBox = labelData.boxes.find(b => b.label === 'basketball');
+        if (ballBox) {
+          labelSummary += `📍 basketball: [${ballBox.x_pct}%, ${ballBox.y_pct}%, ${ballBox.w_pct}%, ${ballBox.h_pct}%]<br>`;
+        }
+
+        const otherLabels = [...new Set(labelData.boxes.map(b => b.label).filter(l => l !== 'basketball'))];
+        if (otherLabels.length) {
+          labelSummary += `📦 ${otherLabels.join(', ')}`;
+        }
+
+        labelDiv.innerHTML = `✅ ${labelData.boxes.length} objects<br>${labelSummary}`;
+      } else if (labelData.summary) {
+        labelDiv.innerText = `🧠 ${labelData.summary}`;
+      } else {
+        labelDiv.innerText = '❌ No objects found';
+      }
+    }
+
+    status.textContent = `✅ Processed ${data.frames.length} frames in ${folderName}`;
+
+  } catch (err) {
+    console.error(err);
+    status.textContent = '❌ Failed to label existing frames.';
+  }
+}
+
+async function loadManualReview() {
+  const folder = document.getElementById('reviewFolderInput').value.trim();
+  if (!folder) {
+    alert("Please enter the video folder name.");
+    return;
+  }
+
+  const container = document.getElementById('manualReviewContainer');
+  container.innerHTML = '';
+  status.textContent = `🔍 Loading manual review frames for ${folder}...`;
+
+  const res = await fetch(`/manual_review/${folder}`);
+  const data = await res.json();
+
+  if (!data.frames.length) {
+    container.innerHTML = '<p>No frames found in manual_review/.</p>';
+    return;
+  }
+
+  for (const frame of data.frames) {
+    const framePath = `/frames/${folder}/manual_review/${frame}`;
+    const wrapper = document.createElement('div');
+    wrapper.style.display = 'inline-block';
+    wrapper.style.textAlign = 'center';
+    wrapper.style.position = 'relative';
+
+    const img = document.createElement('img');
+    img.src = framePath;
+    img.className = 'thumb';
+    wrapper.appendChild(img);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = 160;
+    canvas.height = 90;
+    canvas.style.position = 'absolute';
+    canvas.style.top = '0';
+    canvas.style.left = '0';
+    canvas.style.pointerEvents = 'none';
+    canvas.style.border = '1px dashed rgba(255,255,255,0.1)';
+    wrapper.appendChild(canvas);
+
+    const labelDiv = document.createElement('div');
+    labelDiv.className = 'labelbox';
+    labelDiv.innerText = '🧠 Review pending...';
+    wrapper.appendChild(labelDiv);
+
+    container.appendChild(wrapper);
+
+    // Call label_frame manually again
+    const visionRes = await fetch('/label_frame', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: framePath })
+    });
+
+    const labelData = await visionRes.json();
+
+    const showBoxes = document.getElementById('toggleBoxes').checked;
+    if (labelData.boxes && canvas && showBoxes) {
+      drawBoxesOnCanvas(canvas, labelData.boxes);
+    }
+
+    let labelSummary = '';
+    const ballBox = labelData.boxes.find(b => b.label === 'basketball');
+    if (ballBox) {
+      labelSummary += `📍 basketball: [${ballBox.x_pct}%, ${ballBox.y_pct}%, ${ballBox.w_pct}%, ${ballBox.h_pct}%]<br>`;
+    }
+
+    const otherLabels = [...new Set(labelData.boxes.map(b => b.label).filter(l => l !== 'basketball'))];
+    if (otherLabels.length) {
+      labelSummary += `📦 ${otherLabels.join(', ')}`;
+    }
+
+    labelDiv.innerHTML = `✅ ${labelData.boxes.length} objects<br>${labelSummary}`;
+  }
+
+  status.textContent = `✅ Loaded ${data.frames.length} manual review frames`;
+}
+
+  </script>
+</body>
+</html>

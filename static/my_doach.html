@@ -1,0 +1,444 @@
+<!-- my_doach.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>My Doach</title>
+  <link rel="stylesheet" href="static/style.css" />
+
+  <!-- Core libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+
+  <!-- MediaPipe Pose Model -->
+  <script type="module">
+    import {
+      FilesetResolver,
+      PoseLandmarker
+    } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
+    window.FilesetResolver = FilesetResolver;
+    window.PoseLandmarker = PoseLandmarker;
+  </script>
+
+  <!-- Styles & Icons -->
+  <link rel="stylesheet" href="static/style.css" />
+  <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
+  <script src="static/script.js" defer></script>
+
+
+  <style>
+    body { color:#eee; background:#0e0e0f; font:15px system-ui, -apple-system, Segoe UI, Roboto, sans-serif }
+    .card { max-width:840px; margin:24px auto; padding:16px; border:1px solid #333; border-radius:12px; background:#141416 }
+    .grid { display:grid; gap:12px }
+    .g2 { grid-template-columns: 1fr 1fr }
+    label { display:block; color:#bbb; font-size:12px; margin-bottom:4px }
+    select, input[type="text"], input[type="number"], textarea { width:100%; padding:10px; border-radius:10px; border:1px solid #2a2a2e; background:#0f0f12; color:#eee }
+    input[type="range"]{ width:100% }
+    .row { display:flex; gap:10px; align-items:center }
+    .btn { padding:8px 12px; border:1px solid #444; border-radius:10px; background:#1a1b1e; color:#eee; cursor:pointer }
+    .btn:hover { background:#22252a }
+    .pill { padding:6px 10px; border:1px solid #444; border-radius:999px; background:#1a1b1e; cursor:pointer }
+    .list { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px }
+    small.hint { color:#8b8b8b }
+  </style>
+
+</head>
+<body>
+
+  <!-- ✅ Sidebar Navigation -->
+  <nav class="sidebar locked" style="right: 0; left: auto;">
+    <div class="logo_items flex">
+      <span class="nav_image"><img src="static/assets/dot5.png" alt="logo_img" /></span>
+      <span class="logo_name">DOACH</span>
+      <i class="bx bx-lock-alt" id="lock-icon" title="Unlock Sidebar"></i>
+      <i class="bx bx-x" id="sidebar-close"></i>
+    </div>
+
+    <div class="menu_container">
+      <div class="menu_items">
+        <ul class="menu_item">
+          <div class="menu_title flex">
+            <span class="title">Dashboard</span>
+            <span class="line"></span>
+          </div>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-body"></i><span>Training</span></a></li>
+          <li class="item"><a href="shot_summary" class="link flex"><i class="bx bx-grid-alt"></i><span>Sessions</span></a></li>
+          <li class="item"><a href="my_doach" class="link flex"><i class="bx bxs-magic-wand"></i><span>Coach</span></a></li>
+          <li class="item">
+            <label for="videoInput" class="link flex" style="cursor: pointer;">
+              <i class="bx bx-video"></i><span>My Content</span>
+            </label>
+            <input type="file" id="videoInput" accept="video/*" style="display: none;" />
+          </li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-globe"></i><span>Community</span></a></li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-award"></i><span>Awards</span></a></li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-cog"></i><span>Settings</span></a></li>
+        </ul>
+      </div>
+
+      <div class="sidebar_profile flex">
+        <span class="nav_image"><img src="static/assets/dot5.png" alt="logo_img" /></span>
+        <div class="data_text">
+          <span class="name">'username'</span>
+          <span class="email">dave@doach.com</span>
+        </div>
+      </div>
+    </div>
+  </nav>
+
+
+  <section class="card">
+    <h2 style="margin:0 0 12px">🎙️ Doach Voice & Style</h2>
+
+    <div class="grid g2">
+      <div>
+        <label>Engine</label>
+        <select id="engine">
+          <option value="openai">OpenAI (studio-quality)</option>
+          <option value="web">Web Speech (many OS voices)</option>
+        </select>
+      </div>
+      <div>
+        <label>Language / Accent</label>
+        <select id="lang">
+          <option value="en-US">English (US)</option>
+          <option value="en-GB">English (UK)</option>
+          <option value="en-AU">English (AU)</option>
+          <option value="es-ES">Español (ES)</option>
+          <option value="es-MX">Español (MX)</option>
+          <option value="fr-FR">Français</option>
+          <option value="de-DE">Deutsch</option>
+          <option value="pt-BR">Português (BR)</option>
+          <option value="it-IT">Italiano</option>
+          <option value="ja-JP">日本語</option>
+          <option value="ko-KR">한국어</option>
+          <option value="zh-CN">中文 (简体)</option>
+        </select>
+      </div>
+
+      <!-- OpenAI voice picker -->
+      <div id="openaiVoiceWrap">
+        <label>OpenAI Voice</label>
+        <select id="openaiVoice">
+          <option value="alloy">alloy</option>
+          <option value="verse">verse</option>
+          <option value="sage">sage</option>
+          <option value="aria">aria</option>
+          <option value="coral">coral</option>
+          <option value="vivid">vivid</option>
+          <option value="bright">bright</option>
+          <option value="amber">amber</option>
+        </select>
+      </div>
+
+      <!-- WebSpeech voice picker -->
+      <div id="webVoiceWrap" style="display:none">
+        <label>Web Speech Voice</label>
+        <select id="webVoice"></select>
+      </div>
+
+      <div>
+        <label>Coaching Tone (hint for phrasing)</label>
+        <select id="tone">
+          <option value="supportive">Supportive</option>
+          <option value="energetic">Energetic</option>
+          <option value="concise">Concise</option>
+          <option value="technical">Technical</option>
+          <option value="direct">Direct</option>
+        </select>
+      </div>
+      <div>
+        <label>Model</label>
+        <select id="model">
+          <option value="gpt-4o-mini">gpt-4o-mini (fast)</option>
+          <option value="gpt-4o">gpt-4o (richer)</option>
+        </select>
+      </div>
+
+      <div>
+        <label>Speed <small id="speedVal">1.00×</small></label>
+        <input id="speed" type="range" min="0.8" max="1.3" step="0.05" value="1">
+      </div>
+      <div id="pitchWrap" style="display:none">
+        <label>Pitch (Web Speech)<small id="pitchVal">1.00</small></label>
+        <input id="pitch" type="range" min="0.5" max="2" step="0.05" value="1">
+      </div>
+
+      <div>
+        <label>Bass (dB) <small id="bassVal">0</small></label>
+        <input id="bass" type="range" min="-12" max="12" step="1" value="0">
+      </div>
+      <div>
+        <label>Treble (dB) <small id="trebleVal">0</small></label>
+        <input id="treble" type="range" min="-12" max="12" step="1" value="0">
+      </div>
+      <div>
+        <label>Volume <small id="volVal">100%</small></label>
+        <input id="volume" type="range" min="0" max="1" step="0.05" value="1">
+      </div>
+      <div>
+        <label>Sample Text</label>
+        <input id="sample" type="text" value="Nice work. Keep your elbow under the ball and hold your follow-through.">
+      </div>
+    </div>
+
+    <div class="row" style="margin-top:12px">
+      <button class="btn" id="save">💾 Save Current</button>
+      <button class="btn" id="test">▶︎ Test Voice</button>
+      <input id="presetName" type="text" placeholder="Preset name (e.g., Coach Mike)" style="flex:1">
+    </div>
+
+    <div style="margin-top:10px">
+      <label>Saved Presets</label>
+      <div id="presetList" class="list"></div>
+      <small class="hint">Click a preset to load it. Alt-click to delete.</small>
+    </div>
+
+    <p class="hint" style="margin-top:10px">
+      Tip: For OpenAI TTS, language follows the text. We auto-translate your English line to the selected language before synthesis.
+      For Web Speech, the OS/browser voice list controls accent and language.
+    </p>
+  </section>
+
+  <section class="card">
+    <h3>Ask Doach</h3>
+    <textarea id="q" rows="3" placeholder="e.g., how was my release of the ball?"></textarea>
+    <div class="row" style="margin-top:8px">
+      <label class="row" style="gap:8px"><input type="checkbox" id="speakAns" checked> Speak answer</label>
+      <button class="btn" id="ask">Ask</button>
+    </div>
+    <div id="ans" style="margin-top:10px; white-space:pre-wrap"></div>
+  </section>
+
+
+
+<script>
+/* Doach preset API shim — works even if coachAssistant.js didn’t set these yet */
+(function () {
+  const LS = 'doachPresetsLocal';
+
+  if (!window.doachLoadPresets) {
+    window.doachLoadPresets = async function () {
+      try {
+        const r = await fetch('/api/voice_presets');
+        if (r.ok) {
+          const j = await r.json();
+          return Array.isArray(j.presets) ? j.presets : [];
+        }
+      } catch (_) {}
+      try { return JSON.parse(localStorage.getItem(LS) || '[]'); }
+      catch { return []; }
+    };
+  }
+
+  if (!window.doachSavePreset) {
+    window.doachSavePreset = async function (preset) {
+      try {
+        const r = await fetch('/api/voice_presets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ preset })
+        });
+        if (r.ok) return true;
+      } catch (_) {}
+      // local fallback
+      const items = await window.doachLoadPresets();
+      const i = items.findIndex(x => x.name === preset.name);
+      if (i >= 0) items[i] = preset; else items.push(preset);
+      localStorage.setItem(LS, JSON.stringify(items));
+      return true;
+    };
+  }
+
+  if (!window.doachDeletePreset) {
+    window.doachDeletePreset = async function (name) {
+      try {
+        await fetch('/api/voice_presets/' + encodeURIComponent(name), { method: 'DELETE' });
+      } catch (_) {}
+      // local fallback
+      const items = await window.doachLoadPresets();
+      localStorage.setItem(LS, JSON.stringify(items.filter(x => x.name !== name)));
+      return true;
+    };
+  }
+})();
+</script>
+
+<script>
+  // Safe shims so the page never crashes even if coachAssistant.js loads later
+  window.doachGetPrefs = window.doachGetPrefs || function () {
+    try { return JSON.parse(localStorage.getItem('doachPrefs') || '{}'); }
+    catch { return {}; }
+  };
+  window.doachSetPrefs = window.doachSetPrefs || function (p) {
+    const v = p || {};
+    localStorage.setItem('doachPrefs', JSON.stringify(v));
+    window.__doachPrefs = v;
+    return v;
+  };
+</script>
+
+<!-- Load the assistant first -->
+<script defer src="/static/js/coachAssistant.js?v=5"
+        onload="window.__coachAssistantLoaded = true"
+        onerror="console.error('❌ coachAssistant.js failed to load (404?)');"></script>
+
+<script defer>
+  window.addEventListener('DOMContentLoaded', () => {
+    // Safety guard so the page doesn’t crash if the script fails to load
+    if (typeof window.doachGetPrefs !== 'function') {
+      console.warn('coachAssistant not loaded; using localStorage fallback');
+      window.doachGetPrefs = () => {
+        try { return JSON.parse(localStorage.getItem('doachPrefs')||'{}'); } catch { return {}; }
+      };
+      window.doachSetPrefs = (p) => {
+        const v = p || {};
+        localStorage.setItem('doachPrefs', JSON.stringify(v));
+        window.__doachPrefs = v;
+        return v;
+      };
+    }
+
+    const prefs = window.doachGetPrefs();
+  });
+</script>
+<script>
+(function(){
+  const $ = id => document.getElementById(id);
+
+  // hydrate browser voices for Web Speech
+  function fillWebVoices(lang=''){
+    const sel = $('webVoice');
+    sel.innerHTML = '';
+    const list = (window.doachListWebVoices ? window.doachListWebVoices(lang) : []);
+    list.forEach(v => {
+      const opt = document.createElement('option');
+      opt.value = v.name; opt.textContent = `${v.name}  (${v.lang})`;
+      sel.appendChild(opt);
+    });
+  }
+
+  // show/hide engine-specific controls
+  function toggleEngineUI(engine){
+    $('openaiVoiceWrap').style.display = engine === 'openai' ? '' : 'none';
+    $('webVoiceWrap').style.display    = engine === 'web'    ? '' : 'none';
+    $('pitchWrap').style.display       = engine === 'web'    ? '' : 'none';
+  }
+
+  // load prefs into UI
+  function prefsToUI(p){
+    $('engine').value     = p.tts || 'openai';
+    $('lang').value       = p.lang || 'en-US';
+    $('openaiVoice').value= p.voice || 'alloy';
+    $('webVoice').value   = p.webVoiceName || '';
+    $('tone').value       = p.tone || 'supportive';
+    $('model').value      = p.model || 'gpt-4o-mini';
+    $('speed').value      = p.speed ?? 1;
+    $('pitch').value      = p.pitch ?? 1;
+    $('bass').value       = p.bassDb ?? 0;
+    $('treble').value     = p.trebleDb ?? 0;
+    $('volume').value     = p.volume ?? 1;
+    $('speedVal').textContent  = Number($('speed').value).toFixed(2)+'×';
+    $('pitchVal').textContent  = Number($('pitch').value).toFixed(2);
+    $('bassVal').textContent   = $('bass').value;
+    $('trebleVal').textContent = $('treble').value;
+    $('volVal').textContent    = Math.round($('volume').value*100)+'%';
+    toggleEngineUI($('engine').value);
+  }
+
+  function uiToPrefs(){
+    return {
+      tts: $('engine').value,
+      lang: $('lang').value,
+      voice: $('openaiVoice').value,
+      webVoiceName: $('webVoice').value,
+      tone: $('tone').value,
+      model: $('model').value,
+      speed: Number($('speed').value),
+      pitch: Number($('pitch').value),
+      bassDb: Number($('bass').value),
+      trebleDb: Number($('treble').value),
+      volume: Number($('volume').value)
+    };
+  }
+
+  // wire sliders
+  $('speed').addEventListener('input', ()=> $('speedVal').textContent = Number($('speed').value).toFixed(2)+'×');
+  $('pitch').addEventListener('input', ()=> $('pitchVal').textContent = Number($('pitch').value).toFixed(2));
+  $('bass').addEventListener('input',  ()=> $('bassVal').textContent  = $('bass').value);
+  $('treble').addEventListener('input',()=> $('trebleVal').textContent= $('treble').value);
+  $('volume').addEventListener('input',()=> $('volVal').textContent   = Math.round($('volume').value*100)+'%');
+
+  $('engine').addEventListener('change', ()=> toggleEngineUI($('engine').value));
+  $('lang').addEventListener('change', ()=> fillWebVoices($('lang').value));
+
+  // presets list
+  async function refreshPresetList(){
+    const box = $('presetList'); box.innerHTML = '';
+    const items = await window.doachLoadPresets();
+    items.forEach(p => {
+      const pill = document.createElement('button');
+      pill.className = 'pill';
+      pill.textContent = p.name;
+      pill.title = 'Click to load • Alt+Click to delete';
+      pill.addEventListener('click', async (e) => {
+        if (e.altKey) {
+          await window.doachDeletePreset(p.name);
+          refreshPresetList();
+          return;
+        }
+        window.doachSetPrefs(p);
+        prefsToUI(p);
+      });
+      box.appendChild(pill);
+    });
+  }
+
+  // save current
+  $('save').addEventListener('click', async () => {
+    const name = $('presetName').value.trim() || 'My Coach Voice';
+    const p = uiToPrefs(); p.name = name;
+    window.doachSetPrefs(p);
+    await window.doachSavePreset(p);
+    await refreshPresetList();
+    alert('✅ Preset saved.');
+  });
+
+  // test voice
+  $('test').addEventListener('click', async () => {
+    const p = uiToPrefs(); window.doachSetPrefs(p);
+    const text = $('sample').value.trim() || 'Testing the coach voice.';
+    try { await window.doachSpeak(text); } catch(e){ alert(e.message || e); }
+  });
+
+  // ask doach demo
+  $('ask').addEventListener('click', async () => {
+    const q = $('q').value.trim(); if (!q) return;
+    const p = uiToPrefs(); window.doachSetPrefs(p);
+    $('ans').textContent = '…';
+    try {
+      const r = await fetch('/api/coach', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ prompt: q, model: $('model').value })
+      });
+      const j = await r.json();
+      const text = j.text || '(no reply)';
+      $('ans').textContent = text;
+      if ($('speakAns').checked) await window.doachSpeak(text);
+    } catch (e) {
+      $('ans').textContent = 'Error: ' + (e.message || e);
+    }
+  });
+
+  // init
+  fillWebVoices();
+  const p = window.doachGetPrefs() || {};
+  if (!p.webVoiceName && $('webVoice').options.length) {
+    $('webVoice').value = $('webVoice').options[0].value;
+  }
+  prefsToUI(p);
+  refreshPresetList();
+})();
+</script>
+</body>
+</html>

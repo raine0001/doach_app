@@ -1,0 +1,870 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DOACH • Frame Extractor + YOLO Labeler</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark light" />
+  <link rel="icon" href="/static/favicon.ico" />
+
+  <style>
+    :root{
+      --bg:#0f1115; --card:#141823; --card-2:#171b27; --text:#e7ebf0;
+      --muted:#97a3b6; --brand:#4caf50; --accent:#77a7ff; --line:#223048;
+      --chip:#1e2533; --chip-active:#2a874d;
+    }
+    *{box-sizing:border-box} html,body{height:100%}
+    body{margin:0;background:var(--bg);color:var(--text);
+      font:14px/1.45 system-ui,-apple-system,Segoe UI,Roboto,Inter,"Helvetica Neue",Arial}
+    h1,h2{margin:0 0 .6rem 0; font-weight:600}
+    h1{font-size:1.35rem} h2{font-size:1.15rem}
+    .wrap{max-width:1200px;margin:18px auto;padding:0 16px}
+    .toolbar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+      background:var(--card);padding:12px;border:1px solid var(--line);border-radius:12px}
+    .spacer{flex:1}
+    .btn{appearance:none;border:1px solid var(--line);background:var(--chip);
+      color:var(--text);padding:8px 10px;border-radius:10px;cursor:pointer}
+    .btn:hover{filter:brightness(1.12)} .btn.primary{background:var(--brand);border-color:transparent;color:#fff}
+    .btn.ghost{background:transparent}
+    select,input[type="number"],input[type="range"]{background:var(--card-2);color:var(--text);border:1px solid var(--line);
+      padding:8px 10px;border-radius:10px}
+    input[type="file"]{display:none}
+
+    .grid{display:grid;gap:16px}
+    .grid.cols-2{grid-template-columns:2fr 1fr} /* 2/3 vs 1/3 */
+    .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px}
+    .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    .chips{display:flex;flex-wrap:wrap;gap:8px}
+    .chip{background:var(--chip);border:1px solid var(--line);color:var(--text);
+      padding:6px 10px;border-radius:999px;cursor:pointer;font-size:13px}
+    .chip.active{background:var(--chip-active);border-color:transparent}
+    .muted{color:var(--muted)} .small{font-size:12px}
+    .table{width:100%;border-collapse:collapse}
+    .table th,.table td{padding:8px 10px;border-top:1px solid var(--line);text-align:left}
+    .table th{color:var(--muted);font-weight:500}
+    code{background:#0e1522;border:1px solid var(--line);padding:2px 6px;border-radius:6px}
+
+    /* Canvas region */
+    #canvasWrap{position:relative;width:100%;max-width:1024px;margin:0 auto;aspect-ratio:16/9}
+    #gridCanvas,#frameCanvas{position:absolute;inset:0;width:100%;height:100%}
+    #gridCanvas{pointer-events:none}
+
+    /* Side nav arrows */
+    .navBtn{
+      position:absolute;top:50%;transform:translateY(-50%);
+      width:42px;height:42px;border-radius:50%;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,.35);border:1px solid var(--line);cursor:pointer;user-select:none
+    }
+    .navBtn:hover{background:rgba(0,0,0,.5)}
+    #prevFrameBtn{left:8px} #nextFrameBtn{right:8px}
+
+    /* ONNX modal */
+    #onnxModal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999}
+    #onnxModal .panel{width:540px;max-width:94vw;margin:10vh auto;background:var(--card);
+      border:1px solid var(--line);border-radius:14px;padding:16px}
+    #onnxStatus{color:#9ad}
+    @media (max-width: 900px){ .grid.cols-2{grid-template-columns:1fr} }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="row" style="margin-bottom:8px">
+      <h1>🎥 DOACH Frame Extractor + YOLO Labeler</h1>
+      <span class="small muted" style="margin-left:auto">dataset: <code>doach_seg</code></span>
+    </div>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <label class="btn ghost" for="videoInput">Choose File</label>
+      <input type="file" id="videoInput" accept="video/*" />
+      <button class="btn" onclick="extractFrames()">Extract Frames</button>
+
+      <select id="folderInput"></select>
+      <button class="btn" onclick="loadImages()">Load</button>
+
+      <div class="spacer"></div>
+
+      <!-- Keep top-level save/clear for quick access -->
+      <div class="row">
+        <button class="btn" onclick="saveLabels()">💾 Save</button>
+        <button class="btn" onclick="clearBoxes()">🧹 Clear</button>
+      </div>
+    </div>
+
+    <!-- Controls & Canvas -->
+    <div class="grid cols-2" style="margin-top:16px">
+      <div class="card">
+        <h2>Labeling Tools</h2>
+
+        <!-- Sliders/rotate -->
+        <div class="row small" style="gap:14px; margin:6px 0 10px">
+          <label class="row"><input type="checkbox" id="gridToggle" checked /> <span class="muted">Show Grid</span></label>
+          <label>Size <span id="gridSizeValue" class="muted">10</span></label>
+          <input type="range" id="gridSizeSlider" min="5" max="100" step="5" value="10">
+          <span class="muted">•</span>
+          <label>Confidence <span id="confValue" class="muted">0.05</span></label>
+          <input type="range" id="confSlider" min="0.01" max="0.7" step="0.01" value="0.05">
+          <span class="muted">•</span>
+          <span>Rotate frame:</span>
+          <button class="btn" onclick="rotateFrame(90)">↻ +90°</button>
+          <button class="btn" onclick="rotateFrame(180)">⟳ 180°</button>
+          <button class="btn" onclick="rotateFrame(270)">↺ -90°</button>
+        </div>
+
+        <!-- File name + label count -->
+        <div class="row" style="margin-bottom:8px">
+          <div class="muted small" id="currentFrameInfo">—</div>
+          <div class="small" id="currentFrameStatus" style="margin-left:auto; color:#7adf8a">0 label(s)</div>
+        </div>
+
+        <!-- Canvas with overlay nav buttons -->
+        <div id="canvasWrap">
+          <canvas id="gridCanvas" width="1280" height="720"></canvas>
+          <canvas id="frameCanvas" width="1280" height="720"></canvas>
+          <div id="prevFrameBtn" class="navBtn" title="Prev">&#10094;</div>
+          <div id="nextFrameBtn" class="navBtn" title="Next">&#10095;</div>
+        </div>
+
+        <!-- Choose label + Auto-detect + Eraser -->
+        <div class="row" style="margin-top:12px">
+          <span class="muted">Choose label:</span>
+          <div id="categories" class="chips"></div>
+          <button id="eraserBtn" class="btn" style="margin-left:auto">🧽 Erase One</button>
+          <button class="btn" onclick="autoDetectCurrent()">🤖 Auto-Detect</button>
+          <button class="btn" onclick="autoDetectOpenAI()">🤖 OpenAI Detect</button>
+          <button id="resetIgnoreBtn" class="btn ghost">Reset ignore</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>📋 Label Data</h2>
+        <table class="table" id="labelTable">
+          <thead>
+            <tr><th>Label</th><th>X</th><th>Y</th><th>W</th><th>H</th><th>Source</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Train -->
+    <div class="card" style="margin-top:16px">
+      <div class="row">
+        <h2>🛠️ Train YOLO</h2>
+        <button id="trainBtn" class="btn primary" style="margin-left:auto" onclick="startTraining()">🚀 Start Training</button>
+      </div>
+      <div id="trainMonitor" style="display:none; margin-top:12px">
+        <div class="grid cols-2">
+          <table class="table">
+            <tbody id="trainRows">
+              <tr><th style="width:180px">Run</th><td id="t_run" class="muted">—</td></tr>
+              <tr><th>Epoch</th><td><span id="t_epoch">0</span>/<span id="t_epochs">0</span></td></tr>
+              <tr><th>Loss (train/val)</th><td id="t_loss" class="muted">—</td></tr>
+              <tr><th>mAP@50 / @50-95</th><td id="t_map" class="muted">—</td></tr>
+              <tr><th>ETA</th><td id="t_eta" class="muted">—</td></tr>
+              <tr><th>Last log</th><td id="t_log" class="muted">—</td></tr>
+            </tbody>
+          </table>
+          <div>
+            <progress id="t_progress" value="0" max="1" style="width:100%; height:10px"></progress>
+            <img id="trainPlot" alt="training results" style="display:none; margin-top:12px; max-width:100%; border:1px solid var(--line); border-radius:8px"/>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Latest models + ONNX -->
+    <div class="card" style="margin-top:16px">
+      <div class="row">
+        <h2>🧱 Latest Trained Models</h2>
+        <button id="refreshModelsBtn" class="btn" style="margin-left:auto">Refresh</button>
+      </div>
+      <div id="modelsStatus" class="muted small" style="margin:6px 0">—</div>
+      <table class="table" id="modelTable">
+        <thead><tr><th>Run</th><th>Modified</th><th>best.pt</th><th>Actions</th></tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="row" style="margin-top:10px">
+        <button id="onnxExportBtn" class="btn">🧪 Export ONNX</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ONNX modal -->
+  <div id="onnxModal">
+    <div class="panel">
+      <h3>Export ONNX</h3>
+      <p class="muted small" style="margin:.25rem 0 .6rem">Pick a trained weight and export to ONNX for the in-browser detector.</p>
+
+      <label class="small muted">Trained weight (best.pt)</label>
+      <select id="ptSelect" style="width:100%; margin:6px 0 8px"></select>
+
+      <div class="grid cols-2">
+        <div>
+          <label class="small muted">imgsz</label>
+          <input id="imgszInput" type="number" value="640" min="320" step="32" style="width:100%">
+        </div>
+        <div>
+          <label class="small muted">opset</label>
+          <input id="opsetInput" type="number" value="17" min="12" max="20" style="width:100%">
+        </div>
+      </div>
+
+      <div class="grid cols-2" style="margin-top:8px">
+        <div>
+          <label class="small muted">profile</label>
+          <select id="profileSelect" style="width:100%">
+            <option value="basketball" selected>basketball</option>
+            <option value="golf">golf</option><option value="tennis">tennis</option>
+            <option value="baseball">baseball</option><option value="hockey">hockey</option>
+            <option value="football">football</option><option value="rugby">rugby</option>
+            <option value="cricket">cricket</option><option value="tabletennis">tabletennis</option>
+            <option value="badminton">badminton</option>
+          </select>
+        </div>
+        <label class="row" style="align-items:flex-end; gap:8px">
+          <input id="activateChk" type="checkbox" checked> <span class="small">Activate after export</span>
+        </label>
+      </div>
+
+      <div id="onnxStatus" class="small" style="margin-top:10px">Ready.</div>
+      <div class="row" style="justify-content:flex-end; gap:8px; margin-top:12px">
+        <button id="onnxCancel" class="btn">Cancel</button>
+        <button id="onnxDoExport" class="btn primary">Export</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ===== Script ===== -->
+  <script>
+    // ---------- Core state ----------
+    const categories = ['basketball','hoop','net','player'];
+    const IDX = { basketball:0, hoop:1, net:2, player:3 };
+    const colorMap = { basketball:'red', hoop:'lime', net:'orange', player:'cyan' };
+
+    let currentLabel = categories[0];
+    let folderName = '', images = [], index = 0, boxes = [];
+    let startX = 0, startY = 0, isDrawing = false;
+
+    const gridCanvas = document.getElementById('gridCanvas');
+    const frameCanvas = document.getElementById('frameCanvas');
+    const gridCtx = gridCanvas.getContext('2d');
+    const ctx = frameCanvas.getContext('2d');
+
+    // Buttons near canvas
+    document.getElementById('prevFrameBtn').onclick = () => loadPrevious();
+    document.getElementById('nextFrameBtn').onclick = () => thenNext();
+
+    // Chips
+    function setupCategories(){
+      const container = document.getElementById('categories'); container.innerHTML='';
+      categories.forEach((cat,i)=>{
+        const b=document.createElement('button');
+        b.className='chip'+(i===0?' active':''); b.textContent=cat;
+        b.onclick=()=>{ currentLabel=cat; [...container.children].forEach(c=>c.classList.remove('active')); b.classList.add('active'); };
+        container.appendChild(b);
+      });
+    } setupCategories();
+
+    // -------- Eraser & suppression (box-level, IoU-based) --------
+    let eraseMode = false;
+    const frameSuppressBoxes = new Map(); // key: "folder/image" -> [{label,x,y,w,h}]
+    function frameKey(){ return (folderName && images[index]) ? `${folderName}/${images[index]}` : null; }
+    function getSuppressed(){ const k=frameKey(); return k ? (frameSuppressBoxes.get(k)||[]) : []; }
+    function addSuppressed(box){
+      const k=frameKey(); if(!k) return;
+      if(!frameSuppressBoxes.has(k)) frameSuppressBoxes.set(k, []);
+      frameSuppressBoxes.get(k).push({label:box.label, x:box.x, y:box.y, w:box.w, h:box.h});
+    }
+    function resetSuppressed(){ const k=frameKey(); if(k) frameSuppressBoxes.delete(k); }
+    function iou(a,b){
+      const ax2=a.x+a.w, ay2=a.y+a.h, bx2=b.x+b.w, by2=b.y+b.h;
+      const x1=Math.max(a.x,b.x), y1=Math.max(a.y,b.y), x2=Math.min(ax2,bx2), y2=Math.min(ay2,by2);
+      const iw=Math.max(0,x2-x1), ih=Math.max(0,y2-y1), inter=iw*ih, ua=a.w*a.h + b.w*b.h - inter;
+      return ua>0 ? inter/ua : 0;
+    }
+
+    // Check if we have a valid current frame
+    function hasCurrentFrame() {
+      return !!(folderName && images && images.length && images[index]);
+    }
+
+    // Grid + sliders
+    const gridSlider = document.getElementById('gridSizeSlider');
+    const gridValue  = document.getElementById('gridSizeValue');
+    const gridToggle = document.getElementById('gridToggle');
+    function updateGrid() {
+      gridCanvas.style.display = gridToggle.checked ? 'block' : 'none';
+      if (!hasCurrentFrame()) return;
+      drawBoxes(false);
+    }
+    gridSlider.addEventListener('input',()=>{ gridValue.textContent=gridSlider.value; updateGrid(); });
+    gridToggle.addEventListener('change',updateGrid);
+
+    // File & frames
+    async function extractFrames(){
+      const f=document.getElementById('videoInput').files[0]; if(!f) return;
+      const fd=new FormData(); fd.append('video',f);
+      const up = await fetch('/upload',{method:'POST',body:fd}).then(r=>r.json());
+      folderName = up.video.split('/').pop().split('.')[0];
+      await fetch('/extract_frames',{method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({filename: up.video.split('/').pop()})
+      });
+      await loadImages();
+    }
+    async function populateFolderList(){
+      const data=await fetch('/list_frame_folders').then(r=>r.json());
+      const sel=document.getElementById('folderInput'); sel.innerHTML='';
+      (data.folders||[]).forEach(f=>{ const o=document.createElement('option'); o.value=f; o.textContent=f; sel.appendChild(o); });
+    }
+    async function loadImages(){
+      folderName = document.getElementById('folderInput').value || folderName;
+      const data=await fetch(`/list_frames/${folderName}`).then(r=>r.json());
+      images = data.frames || []; index=0; await loadLabels(false); drawBoxes();
+    }
+
+    // Navigation (Next auto-saves if there are labels)
+    async function thenNext(){
+      if (boxes && boxes.length) { await saveLabels(); }
+      if(index<images.length-1){ index++; await loadLabels(false); drawBoxes(); }
+    }
+    async function loadPrevious(){
+      if(index>0){ index--; await loadLabels(false); drawBoxes(); }
+    }
+
+
+// Keep only sensible hoop/backboard/net candidates and prefer one coherent group
+function postFilterDetections(dets, imgW, imgH, opts = {}) {
+  // Per-class min size (pixels in **original image** space)
+  const minW = { hoop: 24, net: 24, backboard: 80, player: 30, basketball: 10 };
+  const minH = { hoop: 12, net: 24, backboard: 60, player: 60, basketball: 10 };
+
+  // 1) Size gate (and optional ROI gate later)
+  let arr = dets.filter(d => {
+    const w = d.box[2] - d.box[0], h = d.box[3] - d.box[1];
+    if (minW[d.label] && w < minW[d.label]) return false;
+    if (minH[d.label] && h < minH[d.label]) return false;
+    return true;
+  });
+
+  // 2) Group hoop/backboard/net by proximity/structure and keep best group
+  const hoops = arr.filter(d => d.label === 'hoop');
+  const nets  = arr.filter(d => d.label === 'net');
+  const bbs   = arr.filter(d => d.label === 'backboard');
+
+  function center(d) { return [(d.box[0] + d.box[2]) / 2, (d.box[1] + d.box[3]) / 2]; }
+  function dist(a,b) {
+    const ac = center(a), bc = center(b);
+    return Math.hypot(ac[0]-bc[0], ac[1]-bc[1]);
+  }
+
+  const groups = [];
+  for (const h of hoops) {
+    const nearBB  = bbs .filter(b => dist(h,b) < 200);
+    const nearNet = nets.filter(n => dist(h,n) < 150 && n.box[1] > h.box[1]); // net below hoop
+    const score = (h.confidence || 0.5) * 2
+                + (nearBB.length ? 2 : 0)
+                + (nearNet.length ? 2 : 0)
+                + (nearBB[0]?.confidence || 0) * 1.5
+                + (nearNet[0]?.confidence || 0) * 1.5;
+    groups.push({ h, bb: nearBB[0], nt: nearNet[0], score });
+  }
+
+  if (groups.length) {
+    groups.sort((a,b) => b.score - a.score);
+    const g = groups[0];
+    // keep the winning trio + any non-H/N/BB detections (player/ball)
+    arr = arr.filter(d =>
+      d === g.h || d === g.bb || d === g.nt ||
+      (d.label !== 'hoop' && d.label !== 'net' && d.label !== 'backboard')
+    );
+  }
+
+  return arr;
+}
+
+
+
+// ===== Label I/O =====
+let detectConfidence = 0.05;
+const confSlider = document.getElementById('confSlider');
+const confValue  = document.getElementById('confValue');
+confSlider.addEventListener('input', () => {
+  detectConfidence = parseFloat(confSlider.value);
+  confValue.textContent = detectConfidence.toFixed(2);
+});
+
+async function loadLabels(useModel = false) {
+  const imgName = images[index];
+  if (!imgName) return;
+  const txtName = imgName.replace(/\.(jpg|png)$/i, '.txt');
+
+  if (!useModel) {
+    // ---- Load saved YOLO labels (frames -> dataset fallback) ----
+    let labelText = '';
+    try {
+      let res = await fetch(`/load_yolo_label/${folderName}/${txtName}`);
+      if (!res.ok) {
+        res = await fetch(`/datasets/doach_seg/labels/train/${txtName}`);
+        if (!res.ok) throw new Error('no label');
+      }
+      labelText = await res.text();
+    } catch {
+      boxes = [];
+      drawBoxes();
+      updateLabelTable();
+      return;
+    }
+
+    boxes = labelText.trim().split('\n').map(line => {
+      const [cid, xC, yC, w, h] = line.split(' ').map(Number);
+      const label = categories[cid];
+      return {
+        label,
+        x: (xC - w / 2) * frameCanvas.width,
+        y: (yC - h / 2) * frameCanvas.height,
+        w: w * frameCanvas.width,
+        h: h * frameCanvas.height,
+        saved: true
+      };
+    });
+
+    drawBoxes();
+    updateLabelTable();
+    return;
+  }
+
+  // ---- Auto-detect (local model) returns {img_w,img_h,detections[]} ----
+  const resp = await fetch('/auto_detect_frame', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ folder: folderName, filename: imgName, confidence: detectConfidence })
+    });
+    if (!resp.ok) {
+      alert('Auto-detect failed'); 
+      return;
+    }
+    const payload = await resp.json();
+    const dets = Array.isArray(payload) ? payload : (payload.detections || []);
+    const imgW = Array.isArray(payload) ? 1280 : (payload.img_w || 1280);
+    const imgH = Array.isArray(payload) ? 720  : (payload.img_h || 720);
+
+    // filter away window-frame false positives & pick the best hoop group
+    const cleaned = postFilterDetections(dets, imgW, imgH);
+
+    const suppressed = getSuppressed();
+    boxes = cleaned
+      .map(o => {
+        // scale original-pixel boxes to current canvas size
+        const x1 = o.box[0] * (frameCanvas.width  / imgW);
+        const y1 = o.box[1] * (frameCanvas.height / imgH);
+        const x2 = o.box[2] * (frameCanvas.width  / imgW);
+        const y2 = o.box[3] * (frameCanvas.height / imgH);
+        return { label:o.label, x:x1, y:y1, w:(x2-x1), h:(y2-y1), auto:true, confidence:o.confidence };
+      })
+      .filter(rect => !suppressed.some(s => s.label === rect.label && iou(s, rect) > 0.45));
+
+    drawBoxes();
+    updateLabelTable();
+    }
+
+    // Debounced Auto-Detect button
+    let autoBusy = false;
+    async function autoDetectCurrent() {
+      if (autoBusy) return;
+      autoBusy = true;
+      const btn = document.querySelector('button[onclick="autoDetectCurrent()"]');
+      if (btn) { btn.disabled = true; btn.textContent = '🤖 Auto-Detect…'; }
+      try {
+        await loadLabels(true);
+      } catch (e) {
+        console.warn('auto-detect failed', e);
+      } finally {
+        autoBusy = false;
+        if (btn) { btn.disabled = false; btn.textContent = '🤖 Auto-Detect'; }
+      }
+    }
+
+
+    // OpenAI detect (assistive)
+    // OpenAI detect (assistive) — robust to both array/object payloads
+    let openaiBusy = false;
+    async function autoDetectOpenAI() {
+      if (openaiBusy) return;
+      openaiBusy = true;
+
+      // find button(s) labeled "OpenAI Detect"
+      const btns = [...document.querySelectorAll('button')].filter(b => b.textContent.includes('OpenAI Detect'));
+      btns.forEach(b => { b.disabled = true; b.textContent = '🤖 OpenAI Detect…'; });
+
+      try {
+        const imgName = images[index];
+        if (!imgName) return;
+
+        const resp = await fetch('/auto_detect_frame_openai', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            folder: folderName,
+            filename: imgName,
+            confidence: Math.max(0.15, +confSlider.value || 0.20)
+          })
+        });
+
+        if (!resp.ok) {
+          const err = await resp.text().catch(() => '');
+          console.warn('openai detect failed:', err);
+          alert('OpenAI detect failed. Check server logs.');
+          return;
+        }
+
+        const payload = await resp.json().catch(() => ({}));
+        if (payload && payload.error) {
+          console.warn('openai detect error:', payload.error);
+          alert(payload.error);
+          return;
+        }
+
+        // Support both shapes:
+        //  - legacy: payload is an array of detections
+        //  - new:    payload = { img_w, img_h, detections: [...] }
+        const dets = Array.isArray(payload) ? payload : (payload.detections || []);
+        const imgW = Array.isArray(payload) ? 1280 : (payload.img_w || 1280);
+        const imgH = Array.isArray(payload) ? 720  : (payload.img_h || 720);
+
+        // NEW:
+        const cleaned = postFilterDetections(dets, imgW, imgH);
+
+        const suppressed = getSuppressed();
+        boxes = cleaned
+          .map(o => {
+            const x1 = o.box[0] * (frameCanvas.width  / imgW);
+            const y1 = o.box[1] * (frameCanvas.height / imgH);
+            const x2 = o.box[2] * (frameCanvas.width  / imgW);
+            const y2 = o.box[3] * (frameCanvas.height / imgH);
+            return { label:o.label, x:x1, y:y1, w:(x2-x1), h:(y2-y1), auto:true, confidence:o.confidence };
+          })
+          .filter(rect => !suppressed.some(s => s.label === rect.label && iou(s, rect) > 0.45));
+
+        drawBoxes();
+        updateLabelTable();
+
+      } finally {
+        openaiBusy = false;
+        btns.forEach(b => { b.disabled = false; b.textContent = '🤖 OpenAI Detect'; });
+      }
+    }
+
+
+
+    function drawGridOverlay(spacing = 15) {
+      gridCtx.save();
+      gridCtx.strokeStyle = 'rgba(200,200,200,0.3)';
+      gridCtx.lineWidth = 1;
+      for (let x = 0; x <= gridCanvas.width; x += spacing) {
+        gridCtx.beginPath(); gridCtx.moveTo(x, 0); gridCtx.lineTo(x, gridCanvas.height); gridCtx.stroke();
+      }
+      for (let y = 0; y <= gridCanvas.height; y += spacing) {
+        gridCtx.beginPath(); gridCtx.moveTo(0, y); gridCtx.lineTo(gridCanvas.width, y); gridCtx.stroke();
+      }
+      gridCtx.restore();
+    }
+
+    async function saveLabels(){
+      const imgName = images[index]; if(!imgName) return;
+      const txtName = imgName.replace(/\.(jpg|png)$/i,'.txt');
+      const content = (boxes||[]).filter(b=>categories.includes(b.label) && b.w>0 && b.h>0)
+        .map(b=>{
+          const xc=(b.x+b.w/2)/frameCanvas.width, yc=(b.y+b.h/2)/frameCanvas.height,
+                w=b.w/frameCanvas.width, h=b.h/frameCanvas.height,
+                cid=categories.indexOf(b.label);
+          return `${cid} ${xc.toFixed(6)} ${yc.toFixed(6)} ${w.toFixed(6)} ${h.toFixed(6)}`;
+        }).join('\n');
+
+      const ok = await fetch('/save_yolo_label',{
+        method:'POST',headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({folder:folderName, filename:txtName, content})
+      });
+      if(ok.status===200){
+        boxes.forEach(b=>b.saved=true);
+        await fetch('/copy_label_to_dataset',{method:'POST',headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({folder:folderName, filename:txtName, image:imgName})
+        });
+        updateLabelTable();
+      }
+    }
+
+    function updateLabelTable() {
+      const tb = document.querySelector('#labelTable tbody');
+      tb.innerHTML = '';
+
+      boxes.forEach((box, i) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${box.label}</td>
+          <td>${Math.round(box.x)}</td>
+          <td>${Math.round(box.y)}</td>
+          <td>${Math.round(box.w)}</td>
+          <td>${Math.round(box.h)}</td>
+          <td>
+            ${box.saved ? '✅ saved' : (box.auto ? '🤖 detected' : '✏️ manual')}
+            <button class="btn small" data-del="${i}" style="margin-left:8px">🗑</button>
+          </td>
+        `;
+        tb.appendChild(tr);
+      });
+
+      tb.querySelectorAll('button[data-del]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const idx = parseInt(btn.getAttribute('data-del'), 10);
+          deleteBoxAt(idx, { suppressAuto: true });
+        });
+      });
+
+      const s = document.getElementById('currentFrameStatus');
+      s.textContent = `${boxes.length} label(s)`;
+      s.style.color = boxes.length ? '#7adf8a' : '#97a3b6';
+    }
+
+    // Canvas draw
+    function updateFilenameDisplay(){
+      const el=document.getElementById('currentFrameInfo');
+      el.textContent = images[index] ? `🖼️ ${images[index]}` : '—';
+    }
+    function drawBoxes(tempPreview=false,e=null){
+      if (!hasCurrentFrame()) {
+        gridCtx.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
+        ctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
+        updateFilenameDisplay();
+        return;
+      }
+      updateFilenameDisplay();
+      const img=new Image(); img.src=`/frames/${folderName}/${images[index]}?t=${Date.now()}`;
+      img.onload = () => {
+        gridCtx.clearRect(0, 0, gridCanvas.width, gridCanvas.height);
+        gridCtx.drawImage(img, 0, 0, gridCanvas.width, gridCanvas.height);
+        if (gridToggle.checked) drawGridOverlay(parseInt(gridSlider.value,10) || 15);
+
+        ctx.clearRect(0, 0, frameCanvas.width, frameCanvas.height);
+        boxes.forEach(box => {
+          const color = colorMap[box.label] || 'lime';
+          ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(box.auto ? [6] : []);
+          ctx.strokeRect(box.x, box.y, box.w, box.h);
+          ctx.setLineDash([]);
+          ctx.fillStyle = 'rgba(0,0,0,.85)';
+          const w = ctx.measureText(box.label).width + 6;
+          ctx.fillRect(box.x, box.y - 16, w, 14);
+          ctx.fillStyle = color;
+          ctx.fillText(box.label, box.x + 2, box.y - 4);
+        });
+
+        if(tempPreview && e){
+          const r=frameCanvas.getBoundingClientRect(), sx=frameCanvas.width/r.width, sy=frameCanvas.height/r.height;
+          const cx=(e.clientX-r.left)*sx, cy=(e.clientY-r.top)*sy;
+          const x=Math.min(startX,cx), y=Math.min(startY,cy), w=Math.abs(cx-startX), h=Math.abs(cy-startY);
+          ctx.setLineDash([5]); ctx.strokeStyle=colorMap[currentLabel]; ctx.strokeRect(x,y,w,h); ctx.setLineDash([]);
+        }
+      };
+    }
+
+    // Mouse handlers (allow multiple boxes per class now)
+    frameCanvas.addEventListener('mousedown', e => {
+      const r = frameCanvas.getBoundingClientRect(), sx = frameCanvas.width / r.width, sy = frameCanvas.height / r.height;
+      const x = (e.clientX - r.left) * sx, y = (e.clientY - r.top) * sy;
+
+      if (eraseMode) {
+        const idx = hitTestBox(x, y);
+        if (idx !== -1) deleteBoxAt(idx, { suppressAuto: true });
+        return;
+      }
+
+      startX = x; startY = y; isDrawing = true;
+    });
+
+    frameCanvas.addEventListener('mousemove', e => {
+      if (!isDrawing || eraseMode) return;
+      drawBoxes(true, e);
+    });
+
+    frameCanvas.addEventListener('mouseup', e => {
+      if (eraseMode) return;
+      if (!isDrawing) return;
+      const r = frameCanvas.getBoundingClientRect(), sx = frameCanvas.width / r.width, sy = frameCanvas.height / r.height;
+      const ex = (e.clientX - r.left) * sx, ey = (e.clientY - r.top) * sy;
+      const x = Math.min(startX, ex), y = Math.min(startY, ey), w = Math.abs(ex - startX), h = Math.abs(ey - startY);
+
+      // *** no "one box per label" filter anymore ***
+      boxes.push({ label: currentLabel, x, y, w, h });
+
+      isDrawing = false; drawBoxes(); updateLabelTable();
+    });
+
+    function deleteBoxAt(index, { suppressAuto = true } = {}) {
+      if (index < 0 || index >= boxes.length) return;
+      const removed = boxes.splice(index, 1)[0];
+      if (suppressAuto && removed) addSuppressed(removed); // suppress only this box (IoU-based)
+      drawBoxes(); updateLabelTable();
+    }
+
+    function hitTestBox(px, py) {
+      for (let i = boxes.length - 1; i >= 0; i--) {
+        const b = boxes[i];
+        if (px >= b.x && py >= b.y && px <= b.x + b.w && py <= b.y + b.h) return i;
+      }
+      return -1;
+    }
+
+    // Rotate
+    async function rotateFrame(degrees){
+      if(!images[index])return;
+      const body={folder:folderName, filename:images[index], degrees, rotate_labels:true};
+      const r=await fetch('/rotate_frame',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      if(r.ok) drawBoxes(false);
+    }
+
+
+
+    // Training monitor (unchanged)
+    const trainEl={ wrap:document.getElementById('trainMonitor'), run:document.getElementById('t_run'),
+      epoch:document.getElementById('t_epoch'), epochs:document.getElementById('t_epochs'), loss:document.getElementById('t_loss'),
+      map:document.getElementById('t_map'), eta:document.getElementById('t_eta'), log:document.getElementById('t_log'),
+      prog:document.getElementById('t_progress'), plot:document.getElementById('trainPlot') };
+    let trainPollTimer=null;
+    // Training monitor refs stay as-is…
+
+    
+
+    async function startTraining() {
+      // pick the current folder from memory OR the dropdown
+      const folder = folderName || document.getElementById('folderInput')?.value;
+      if (!folder) {
+        alert('Select a frame folder (e.g., IMG_2830) and click Load before starting training.');
+        return;
+      }
+
+      const btn = document.getElementById('trainBtn');
+      btn.disabled = true;
+      const prev = btn.textContent;
+      btn.textContent = '🚀 Starting…';
+
+      try {
+        const url = `/start_training/${encodeURIComponent(folder)}`; // backend accepts <folder>
+        const res = await fetch(url, { method: 'GET' });
+        if (!res.ok) {
+          const txt = await res.text().catch(()=>'');
+          console.error('start_training failed:', res.status, txt);
+          alert(`Training did not start (HTTP ${res.status}). See console for details.`);
+          return;
+        }
+        let data;
+        try { data = await res.json(); }
+        catch { data = { status: 'ok', note: 'non-JSON response' }; }
+
+        // show the monitor as before
+        trainEl.wrap.style.display = 'block';
+        trainEl.log.textContent = (data.status || 'started') + ' …';
+        tryTrainSSE() || startTrainPolling();
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      } finally {
+        btn.disabled = false;
+        btn.textContent = prev;
+      }
+    }
+
+    function tryTrainSSE(){ if(!('EventSource'in window))return false;
+      try{ const es=new EventSource('/train_stream'); es.onmessage=(ev)=>renderTrain(JSON.parse(ev.data));
+        es.onerror=()=>{es.close();startTrainPolling()}; return true; }catch{return false}
+    }
+    function startTrainPolling(){ clearInterval(trainPollTimer);
+      trainPollTimer=setInterval(async()=>{ try{const js=await fetch('/train_status',{cache:'no-store'}).then(r=>r.json()); renderTrain(js);}catch{} },2000);
+    }
+    function renderTrain(s){ if(!s)return; trainEl.wrap.style.display='block';
+      trainEl.run.textContent=s.run||'—'; trainEl.epoch.textContent=s.epoch??0; trainEl.epochs.textContent=s.epochs??0;
+      trainEl.loss.textContent=(s.loss_train!=null||s.loss_val!=null)?`${fmt(s.loss_train)} / ${fmt(s.loss_val)}`:'—';
+      trainEl.map.textContent=(s.map50!=null||s.map50_95!=null)?`${pct(s.map50)} / ${pct(s.map50_95)}`:'—';
+      trainEl.eta.textContent=s.eta_human||s.eta||'—'; trainEl.log.textContent=s.last_log||'—';
+      if(s.epoch!=null&&s.epochs){ trainEl.prog.value=Math.max(0,Math.min(1,s.epoch/Math.max(1,s.epochs))); }
+      if(s.run){ trainEl.plot.src=`/runs/detect/${s.run}/results.png?cb=${Date.now()}`; trainEl.plot.style.display='block'; }
+      if(s.done){ clearInterval(trainPollTimer); }
+    }
+    function fmt(v){ return (v==null)?'—':(typeof v==='number'?v.toFixed(4):String(v)); }
+    function pct(v){ return (v==null)?'—':(v<=1?(v*100).toFixed(1)+'%':v.toFixed(1)); }
+
+    // Models + ONNX (unchanged)
+    const modelsStatus=document.getElementById('modelsStatus');
+    const modelTbody=document.querySelector('#modelTable tbody');
+    document.getElementById('refreshModelsBtn').addEventListener('click',refreshModelTable);
+    async function refreshModelTable(){
+      modelsStatus.textContent='Loading…'; modelTbody.innerHTML='';
+      try{
+        const data=await fetch('/list_trained_models',{cache:'no-store'}).then(r=>r.json());
+        (data.models||[]).slice(0,5).forEach(m=>{
+          const tr=document.createElement('tr');
+          tr.innerHTML=`<td>${m.run}</td><td class="muted">${m.mtime_human}</td><td><code>${m.pt_path.replace(/^.*runs[\\/]/,'runs/')}</code></td>
+                        <td><button class="btn" onclick="openOnnxExport('${m.pt_path}')">Export ONNX…</button></td>`;
+          modelTbody.appendChild(tr);
+        });
+        modelsStatus.textContent=(data.models&&data.models.length)?'Done.':'No models found.';
+      }catch(e){ modelsStatus.textContent='Failed to load models.'; }
+    }
+
+    (function(){ // ONNX modal
+      const btn=document.getElementById('onnxExportBtn'), modal=document.getElementById('onnxModal');
+      const ptSelect=document.getElementById('ptSelect'), imgszInput=document.getElementById('imgszInput'), opsetInput=document.getElementById('opsetInput');
+      const profileSelect=document.getElementById('profileSelect'), activateChk=document.getElementById('activateChk');
+      const statusEl=document.getElementById('onnxStatus'), cancelBtn=document.getElementById('onnxCancel'), doExportBtn=document.getElementById('onnxDoExport');
+      window.openOnnxExport=(pt)=>{ modal.style.display='block'; refreshPtList().then(()=>{ const o=[...ptSelect.options].find(o=>o.value===pt); if(o) ptSelect.value=o.value; }); };
+      async function refreshPtList(){ statusEl.textContent='Loading trained weights…'; ptSelect.innerHTML='';
+        try{ const data=await fetch('/list_trained_models',{cache:'no-store'}).then(r=>r.json());
+          (data.models||[]).forEach(m=>{ const o=document.createElement('option'); o.value=m.pt_path; o.textContent=`${m.run} — ${m.mtime_human}`; ptSelect.appendChild(o); });
+          statusEl.textContent=ptSelect.value?'Ready.':'No best.pt found. Train first.';
+        }catch{ statusEl.textContent='Failed to load weights.'; } }
+      btn.addEventListener('click',()=>{ modal.style.display='block'; refreshPtList(); });
+      cancelBtn.addEventListener('click',()=>{ modal.style.display='none'; });
+      modal.addEventListener('click',(e)=>{ if(e.target===modal) modal.style.display='none'; });
+      doExportBtn.addEventListener('click', async ()=>{
+        const body={pt_path:ptSelect.value, imgsz:+(imgszInput.value||640), opset:+(opsetInput.value||17),
+          profile:profileSelect.value, simplify:true, dynamic:false, activate:activateChk.checked};
+        statusEl.textContent='Exporting…'; doExportBtn.disabled=true;
+        try{ const r=await fetch('/export_onnx',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+             const d=await r.json(); if(!r.ok) throw new Error(d.error||'Export failed');
+             statusEl.innerHTML=`✅ ONNX exported.<br>Model: <code>${d.detector_cfg?.model_url||'(not activated)'}</code><br>imgsz=${body.imgsz} opset=${body.opset}`;
+             refreshModelTable();
+        }catch(e){ statusEl.textContent='❌ '+e.message; } finally{ doExportBtn.disabled=false; }
+      });
+    })();
+
+    // Init
+    window.addEventListener('DOMContentLoaded',()=>{ gridValue.textContent=gridSlider.value; updateGrid(); populateFolderList(); refreshModelTable(); });
+
+    // Expose used fns
+    window.extractFrames   = extractFrames;
+    window.loadImages      = loadImages;
+    window.thenNext        = thenNext;
+    window.loadPrevious    = loadPrevious;
+    window.autoDetectCurrent = autoDetectCurrent;
+    window.saveLabels      = saveLabels;
+    window.rotateFrame     = rotateFrame;
+    window.startTraining   = startTraining;
+
+    // Eraser toggle button
+    const eraserBtn = document.getElementById('eraserBtn');
+    eraserBtn.addEventListener('click', () => {
+      eraseMode = !eraseMode;
+      eraserBtn.classList.toggle('primary', eraseMode);
+      eraserBtn.textContent = eraseMode ? '🧽 Erasing… (click a box)' : '🧽 Erase One';
+    });
+
+    // Reset ignore for this frame
+    const resetIgnoreBtn = document.getElementById('resetIgnoreBtn');
+    resetIgnoreBtn.addEventListener('click', () => {
+      resetSuppressed();
+      alert('Ignore cleared for this frame.');
+    });
+
+    // Robust clear
+    window.clearBoxes = function () { boxes = []; drawBoxes(); updateLabelTable(); };
+  </script>
+</body>
+</html>
