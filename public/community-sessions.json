@@ -1,0 +1,45 @@
+[
+  {
+    "id": "sess001",
+    "user": "Player22",
+    "tags": [
+      "arc",
+      "elbow"
+    ],
+    "video_url": "https://cdn.example.com/videos/sess001.webm",
+    "summary": {
+      "made_percentage": 0.83,
+      "avg_release_angle": 43.5,
+      "user_notes": "Focused on wrist follow-through."
+    }
+  },
+  {
+    "id": "sess002",
+    "user": "CoachMike",
+    "tags": [
+      "knees",
+      "release angle",
+      "consistency"
+    ],
+    "video_url": "https://cdn.example.com/videos/sess002.webm",
+    "summary": {
+      "made_percentage": 0.91,
+      "avg_release_angle": 47.2,
+      "user_notes": "Great improvement over last week."
+    }
+  },
+  {
+    "id": "sess003",
+    "user": "JordanR",
+    "tags": [
+      "high apex",
+      "follow-through"
+    ],
+    "video_url": "https://cdn.example.com/videos/sess003.webm",
+    "summary": {
+      "made_percentage": 0.76,
+      "avg_release_angle": 49.1,
+      "user_notes": "Still working on consistent elbow position."
+    }
+  }
+]

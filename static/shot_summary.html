@@ -1,0 +1,160 @@
+<!-- shot_summary.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Session Summary</title>
+
+  <!-- Core libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+
+  <!-- MediaPipe Pose Model -->
+  <script type="module">
+    import {
+      FilesetResolver,
+      PoseLandmarker
+    } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
+    window.FilesetResolver = FilesetResolver;
+    window.PoseLandmarker = PoseLandmarker;
+  </script>
+
+  <!-- Styles & Icons -->
+  <link rel="stylesheet" href="static/style.css" />
+  <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
+  <script src="static/script.js" defer></script>
+</head>
+<body>
+<!-- Sidebar Navigation -->
+  <nav class="sidebar locked" style="right: 0; left: auto;">
+    <div class="logo_items flex">
+      <span class="nav_image"><img src="static/assets/dot5.png" alt="logo_img" /></span>
+      <span class="logo_name">DOACH</span>
+      <i class="bx bx-lock-alt" id="lock-icon" title="Unlock Sidebar"></i>
+      <i class="bx bx-x" id="sidebar-close"></i>
+    </div>
+    <div class="menu_container">
+      <div class="menu_items">
+        <ul class="menu_item">
+          <div class="menu_title flex">
+            <span class="title">Dashboard</span>
+            <span class="line"></span>
+          </div>
+          <li class="item"><a href="/" class="link flex"><i class="bx bx-body"></i><span>Training</span></a></li>
+          <li class="item"><a href="shot_summary" class="link flex"><i class="bx bx-grid-alt"></i><span>Sessions</span></a></li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bxs-magic-wand"></i><span>Coach</span></a></li>
+          <li class="item">
+            <label for="videoInput" class="link flex" style="cursor: pointer;">
+              <i class="bx bx-video"></i><span>My Content</span>
+            </label>
+            <input type="file" id="videoInput" accept="video/*" style="display: none;" />
+          </li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-globe"></i><span>Community</span></a></li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-award"></i><span>Awards</span></a></li>
+          <li class="item"><a href="#" class="link flex"><i class="bx bx-cog"></i><span>Settings</span></a></li>
+        </ul>
+      </div>
+      <div class="sidebar_profile flex">
+        <span class="nav_image"><img src="static/assets/dot5.png" alt="logo_img" /></span>
+        <div class="data_text">
+          <span class="name">'username'</span>
+          <span class="email">dave@doach.com</span>
+        </div>
+      </div>
+    </div>
+  </nav>
+        <h3>Form Analysis</h3>
+        <div class="metric-item">
+          <span>Knee Bend</span>
+          <span id="kneeBend">--°</span>
+        </div>
+        <div class="metric-item">
+          <span>Elbow Position</span>
+          <span id="elbowPosition">--°</span>
+        </div>
+        <div class="metric-item">
+          <span>Shoulder Angle</span>
+          <span id="shoulderAngle">--°</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script type="module">
+    import { getSessionSummary } from './js/sessionSummary.js';
+    
+    function updateDashboard() {
+      const summary = getSessionSummary();
+      if (!summary) return;
+      // Update stats
+      document.getElementById('madePercentage').textContent = 
+        `${(summary.made_percentage * 100).toFixed(0)}%`;
+      document.getElementById('avgReleaseAngle').textContent = 
+        `${summary.avg_release_angle}°`;
+      document.getElementById('avgEntryAngle').textContent = 
+        `${summary.avg_entry_angle}°`;
+      document.getElementById('avgReleaseHeight').textContent = 
+        `${summary.avg_release_height} ft`;
+      
+      // Update form metrics
+      document.getElementById('kneeBend').textContent = 
+        `${summary.avg_knee_bend}°`;
+      document.getElementById('elbowPosition').textContent = 
+        `${summary.avg_elbow_position}°`;
+      document.getElementById('shoulderAngle').textContent = 
+        `${summary.avg_shoulder_angle}°`;
+    }
+    // Update initially and when new shots are logged
+    updateDashboard();
+    window.addEventListener('shotLogged', updateDashboard);
+  </script>
+  <style>
+    .summary-panel {
+      background: #fff;
+      padding: 1.5rem;
+      border-radius: 12px;
+      margin: 2rem auto;
+      max-width: 800px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .stat-item {
+      padding: 1rem;
+      background: #f8f9fa;
+      border-radius: 8px;
+      text-align: center;
+    }
+    .stat-label {
+      display: block;
+      font-size: 0.9rem;
+      color: #666;
+      margin-bottom: 0.5rem;
+    }
+    .stat-value {
+      font-size: 1.2rem;
+      font-weight: 600;
+      color: #000;
+    }
+    .form-metrics {
+      margin-top: 2rem;
+      padding: 1rem;
+      background: #f8f9fa;
+      border-radius: 8px;
+    }
+    .metric-group h3 {
+      margin: 0 0 1rem;
+      font-size: 1.1rem;
+    }
+    .metric-item {
+      display: flex;
+      justify-content: space-between;
+      padding: 0.5rem 0;
+      border-bottom: 1px solid #eee;
+    }
+  </style>
+</body>
+</html>

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>D🏀ACH</title>
+  <link rel="icon" href="/static/favicon.ico">
+
+  <script>  // debug flags (set before app.js)
+  window.__LOCAL_DETECTOR = false;   // don't spin up detector.worker.js
+  window.__forceServerDetect = true; // route to server
+  window.PD_PREFETCH_FPS = 10;       // throttle pre-detect to ~10 fps
+  window.__forceServerDetect = false; window.__LOCAL_DETECTOR = false;
+  window.DEBUG_FORCE_POSE_ACTIVE = true
+  window.DEBUG_FORCE_HOOP_LOCKED = true
+  window.DEBUG_FORCE_SESSION_ACTIVE = true
+  window.POSE_DEBUG = true; window.DOACH_RELEASE_TRACE = true
+  window.REL_SCORE_THRESH = 0.55
+  </script>  <!-- end debug flags -->
+
+  <!-- Core app/scripts (load each ONCE) -->
+  <script src="/static/js/coachAssistant.js"></script>
+  <script>
+    // Conditionally load auto probe tools via query param ?probe=release
+    (function(){ try { var q=new URLSearchParams(location.search||''); if((q.get('probe')||'').toLowerCase()==='release'){ var s=document.createElement('script'); s.type='module'; s.src='/static/js/auto_probe_release.js'; document.head.appendChild(s);} } catch(e){} })();
+  </script>
+
+  <!-- Core libraries -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+
+  <!-- Early shims: provide globals the tests probe before modules load -->
+  <script>
+    (function bootEarlyGlobals(){
+      try {
+        const isPW = !!(navigator.webdriver) || /playwright|headless/i.test(navigator.userAgent||'');
+        const urlHasE2E = /__e2e=1/.test(location.search||'');
+        window.__TEST_MODE = isPW || urlHasE2E;
+      } catch { window.__TEST_MODE = false; }
+      // E2E-friendly release/exit tuning
+      try {
+        window.RELEASE_DELAY_FRAMES   = 1;
+        window.REL_HAND_DIST_PX       = 120;
+        window.REL_POSE_STREAK        = 1;
+        window.REL_UPWARD_MIN_FRAMES  = 1;
+        window.EXIT_LINGER_FRAMES     = 8;
+        window.EXIT_BELOW_MARGIN      = 12;
+        window.proxX                  = 200;
+        window.proxYAbove             = 170;
+        window.proxYBelow             = 100;
+      } catch {}
+      // Prefer a dense slow-pass during shot windows for backend accuracy
+      try {
+        // Backend pre-roll cadence (analyzer pump when paused)
+        window.__PREROLL_FPS = window.__PREROLL_FPS || 10;
+        // Test-mode hardening: denser backend, ROI-only, server detect
+        if (window.__TEST_MODE) {
+          window.FBF_VISUAL_FPS = 10;
+          window.FBF_MIN_FRAMES = 48;         // ensure long sampling window
+          window.__forceServerDetect = true;
+          window.DETECT_ROI_ONLY = true;
+          window.__ROI_DETECT_ALWAYS = true;
+          window.ARC_SMOOTH = true;
+        }
+      } catch {}
+
+      // Overlay helpers: minimal no-op-safe fallbacks (replaced by module later)
+      if (typeof window.ensureOverlayCss !== 'function') {
+        window.ensureOverlayCss = function ensureOverlayCssFallback() {
+          try {
+            const ov  = document.getElementById('overlay');
+            const vid = document.getElementById('videoPlayer');
+            if (!ov || !vid) return;
+            const anchor = vid.parentElement || document.body;
+            if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
+            ov.style.position = 'absolute'; ov.style.left = '0'; ov.style.top  = '0';
+            ov.style.userSelect = 'none'; ov.style.pointerEvents = 'none'; ov.style.zIndex = '100';
+          } catch {}
+        };
+      }
+      if (typeof window.lockOverlayToVideo !== 'function') {
+        window.lockOverlayToVideo = function lockOverlayToVideoFallback() {
+          try {
+            const ov  = document.getElementById('overlay');
+            const vid = document.getElementById('videoPlayer');
+            if (!ov || !vid) return;
+            const r = vid.getBoundingClientRect();
+            const dpr = window.devicePixelRatio || 1;
+            ov.width  = Math.max(1, Math.round((vid.videoWidth  || r.width)  * dpr));
+            ov.height = Math.max(1, Math.round((vid.videoHeight || r.height) * dpr));
+          } catch {}
+        };
+      }
+
+      // Analyzer: stub that defers to real implementation once loaded
+      if (typeof window.analyzeVideoFrameByFrame !== 'function') {
+        window.analyzeVideoFrameByFrame = function analyzerDeferred(v, c) {
+          // Attempt immediate handoff if real impl already present
+          const real = (window.__realAnalyzeVideoFrameByFrame || window.legacyAnalyzeVideoFrameByFrame);
+          if (typeof real === 'function') { try { return real(v, c); } catch {} }
+          // Kick a fast poll to start once available
+          let tries = 0;
+          const t = setInterval(() => {
+            const fn = (window.__realAnalyzeVideoFrameByFrame || window.legacyAnalyzeVideoFrameByFrame);
+            if (typeof fn === 'function' || ++tries > 80) {
+              clearInterval(t);
+              if (typeof fn === 'function') { try { fn(v, c); } catch {} }
+            }
+          }, 50);
+          // Nudge: dynamically import analyzer to hurry availability
+          try {
+            import('/static/js/analyzer.js').then(m => {
+              try { (window.__bootLog ||= []).push('analyzer_import_ok'); } catch {}
+              if (typeof m?.analyzeVideoFrameByFrame === 'function') {
+                window.__realAnalyzeVideoFrameByFrame = m.analyzeVideoFrameByFrame;
+              }
+            }).catch((e) => { try { (window.__bootLog ||= []).push('analyzer_import_err:' + (e?.message||e)); } catch {} });
+          } catch (e) { try { (window.__bootLog ||= []).push('analyzer_import_throw:' + (e?.message||e)); } catch {} }
+        };
+      }
+    })();
+  </script>
+
+  <!-- MediaPipe Pose Model -->
+  <script type="module">
+    import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
+    window.FilesetResolver = FilesetResolver;
+    window.PoseLandmarker = PoseLandmarker;
+  </script>
+
+  <!-- Styles -->
+  <link rel="stylesheet" href="/static/style.css" />
+  <!-- Boxicons -->
+  <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
+
+</head>
+
+<body>
+
+  <!-- Overlay Prompt Message -->
+  <div id="overlayPrompt" class="prompt-message" style="display:none;">Tap the hoop to begin setup</div>
+  <div id="promptBar"></div>
+
+  <!-- ✅ Main Video + Overlay -->
+  <div class="session-container">
+    <div class="video-frame">
+      <video id="videoPlayer" muted playsinline></video>
+      <canvas id="overlay"></canvas>
+      <div class="session-status">SESSION IN PROGRESS...</div>
+      <!-- Top-left demo controls removed; use bottom HUD controls instead -->
+    </div>
+  </div>
+
+  <!-- ✅ Coach Feedback + Shot Summary -->
+  <div id="coachNotes" style="
+    position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
+    max-width: 520px; background: rgba(0,0,0,0.7); color: #fff;
+    padding: 10px 14px; border-radius: 8px; text-align: center;
+    font-size: 14px; line-height: 1.4; z-index: 900; pointer-events: none;">
+    <strong>🤖 Coach Feedback</strong><br>
+    <span style="color:gray;">(No shot yet)</span>
+  </div>
+
+  <div id="shotOverlaySummary" style="
+    position: absolute;
+    bottom: 80px;
+    right: 20px;
+    padding: 10px 16px;
+    background: rgba(0,0,0,0.75);
+    color: white;
+    border-radius: 10px;
+    font-size: 14px;
+    line-height: 1.4;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    z-index: 20;
+    pointer-events: none;
+    display: none;"></div>
+
+  <!-- Hidden upload control the new “Content” menu will click -->
+  <input type="file" id="videoInput" accept="video/*" hidden />
+
+  <!-- Mount the new Hamburger menu + Feedback widget -->
+  <script type="module">
+    import { installFeedbackWidget } from '/static/js/feedback_widget.js';
+    window.addEventListener('DOMContentLoaded', () => installFeedbackWidget());
+  </script>
+
+
+  <!-- (Keep) lightweight helpers already on the page -->
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const promptOverlay = document.getElementById("overlayPrompt");
+
+      window.showPrompt = (message) => {
+        promptOverlay.textContent = message;
+        promptOverlay.style.display = "block";
+      };
+      window.hidePrompt = () => { promptOverlay.style.display = "none"; };
+
+      window.lockHoop = function () {
+        hidePrompt();
+        console.log("✅ Hoop lock UI confirmed");
+      };
+
+      window.endSession = () => {
+        alert("✅ Session ended. Scroll down for summary.");
+      };
+    });
+  </script>
+
+  <script>
+    function startNativeVoice() {
+      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'startVoice' });
+    }
+    function stopNativeVoice() {
+      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'stopVoice' });
+    }
+    </script>
+
+    
+
+<!-- ui menu (classic, auto-mounts) -->
+<script src="/static/js/ui_menu.js?v=2"></script>
+
+  <!-- Early bootstrap: expose overlay helpers + analyzer global before app.js -->
+  <script type="module">
+    // Import overlay helpers first; the module binds window.ensureOverlayCss/lockOverlayToVideo
+    try {
+      await import('/static/js/fix_overlay_display.js');
+      // default to coach: show pose + hoop only
+      try { window.setOverlayMode?.('coach'); } catch {}
+    } catch (e) {
+      console.warn('[boot] overlay helpers failed to import early', e);
+    }
+    // Import analyzer and bind legacy global expected by tests
+    try {
+      const mod = await import('/static/js/analyzer.js');
+      if (mod?.analyzeVideoFrameByFrame) {
+        window.analyzeVideoFrameByFrame = mod.analyzeVideoFrameByFrame;
+      }
+    } catch (e) {
+      console.warn('[boot] analyzer failed to import early', e);
+    }
+
+    // Dev/CI: auto‑start background FBF plane when running automation or ?__bg=1
+    try {
+      const isBG = /[?&]__bg=1/.test(location.search) || (window.__TEST_MODE === true);
+      if (isBG) {
+        window.__BG_ONLY = true;
+        window.__PREROLL_FPS = window.__PREROLL_FPS || 10;
+        window.__forceServerDetect = true;      // prefer backend YOLO for accuracy
+        window.DETECT_ROI_ONLY = true;
+        window.__ROI_DETECT_ALWAYS = true;
+        // Load development HUD for BG plane
+        try { await import('/static/js/bg_hud.js'); } catch {}
+        const bootBG = () => {
+          const v = document.getElementById('videoPlayer');
+          const ov = document.getElementById('overlay');
+          if (!v || !ov) return;
+          const syncWH = () => { try { ov.width = v.videoWidth || ov.width || 1280; ov.height = v.videoHeight || ov.height || 720; } catch {} };
+          if (v.readyState >= 2) { syncWH(); }
+          else {
+            v.addEventListener('loadedmetadata', syncWH, { once: true });
+            v.addEventListener('canplay', syncWH, { once: true });
+          }
+          try { window.analyzeVideoFrameByFrame?.(v, ov); } catch {}
+          try { v.pause(); } catch {}
+        };
+        if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', bootBG); else bootBG();
+      }
+    } catch {}
+  </script>
+
+  <!-- app entry (ESM) imports the rest of your modules -->
+  <script type="module" src="/static/js/app.js?v=20250820"></script>
+  <script type="module" src="/static/js/session_manager.js?v=1"></script>
+
+<!-- local detector enable (ESM) -->
+<script type="module">
+  (async () => {
+    if (!window.localDetector) {
+      console.warn('[LocalDetector] not loaded; using server detector.');
+      return;
+    }
+    try {
+      const ok = await window.localDetector.enable(
+        '/static/models/best.onnx',
+        ['basketball','hoop','net','backboard','player']
+      );
+      console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
+    } catch (e) {
+      console.warn('[LocalDetector] init failed; using server detector.', e);
+    }
+  })();
+</script>
+
+
+</body>
+</html>
+

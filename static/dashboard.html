@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DOACH Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d0d0d;
+            color: #e5e5e5;
+        }
+        .sidebar {
+            background-color: #1a1a1a;
+            width: 250px;
+            min-height: 100vh;
+            position: fixed;
+            top: 0;
+            left: 0;
+            padding: 1rem;
+            border-right: 1px solid #333;
+        }
+        .main-content {
+            margin-left: 250px;
+            padding: 2rem;
+        }
+        .card {
+            background-color: #1a1a1a;
+            border-radius: 12px;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: 1px solid #333;
+        }
+        .stat-card {
+            background-color: #1a1a1a;
+            border-radius: 12px;
+            padding: 1rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border: 1px solid #333;
+            flex-grow: 1;
+        }
+        .scrollable-row {
+            overflow-x: auto;
+            white-space: nowrap;
+            -webkit-overflow-scrolling: touch;
+        }
+        .scrollable-card {
+            display: inline-block;
+            width: 220px;
+            margin-right: 1rem;
+        }
+        .video-thumbnail {
+            background-color: #333;
+            height: 120px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #888;
+        }
+        .orange-text {
+            color: #ff8c00; /* A distinct orange color for accents */
+        }
+        .orange-bg {
+            background-color: #ff8c00;
+        }
+    </style>
+</head>
+<body class="bg-gray-900 text-gray-200">
+
+    <!-- Sidebar Menu -->
+    <div class="sidebar flex flex-col items-start space-y-4">
+        <div class="text-2xl font-bold orange-text mb-4">DOACH</div>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg bg-gray-800 text-white">Dashboard</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">Unleash a Session</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">My Account</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">DOACH Events</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">Community</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">My DOACH</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">Challenge/Awards</a>
+        <a href="#" class="w-full text-left font-medium text-lg px-4 py-2 rounded-lg text-gray-400 hover:bg-gray-800 hover:text-white">Download App</a>
+
+        <!-- Footer for Sidebar -->
+        <div class="mt-auto pt-8 w-full text-center text-gray-500 text-sm">
+            <span>© 2024 DOACH</span>
+        </div>
+    </div>
+
+    <!-- Main Content Area -->
+    <div class="main-content">
+        <!-- Top Bar with User Info -->
+        <div class="flex justify-between items-center mb-8">
+            <h1 class="text-2xl font-semibold">Dashboard</h1>
+            <div class="flex items-center space-x-4">
+                <a href="#" class="text-gray-400 hover:text-white">help</a>
+                <div class="relative group">
+                    <a href="#" class="flex items-center space-x-2 text-gray-400 hover:text-white">
+                        <span class="text-sm">Login Icon</span>
+                        <div class="w-8 h-8 bg-gray-600 rounded-full flex items-center justify-center">
+                            <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5 text-white" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd" />
+                            </svg>
+                        </div>
+                    </a>
+                    <div class="absolute right-0 mt-2 w-48 bg-gray-800 border border-gray-700 rounded-md shadow-lg py-1 z-50 invisible group-hover:visible">
+                        <a href="#" class="block px-4 py-2 text-sm text-gray-300 hover:bg-gray-700">Log Out</a>
+                        <a href="#" class="block px-4 py-2 text-sm text-gray-300 hover:bg-gray-700">Preferences</a>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Dashboard Content -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <!-- Player Stats Section -->
+            <div class="card md:col-span-2">
+                <h2 class="text-xl font-bold mb-4">Player Stats</h2>
+                <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 text-center">
+                    <div>
+                        <p class="text-sm text-gray-400 uppercase">Sessions</p>
+                        <p class="text-3xl font-bold mt-1 orange-text">24</p>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-400 uppercase">Total Shots</p>
+                        <p class="text-3xl font-bold mt-1 orange-text">1,450</p>
+                    </div>
+                    <div>
+                        <p class="text-sm text-gray-400 uppercase">Status</p>
+                        <p class="text-3xl font-bold mt-1 orange-text">Beginner</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- My Training Section -->
+            <div class="card">
+                <h2 class="text-xl font-bold mb-4">My Training</h2>
+                <div class="space-y-4">
+                    <div class="stat-card">
+                        <p class="text-sm text-gray-400 uppercase">Session</p>
+                        <p class="text-xl font-semibold mt-1">Footwork Fundamentals</p>
+                    </div>
+                    <div class="stat-card">
+                        <p class="text-sm text-gray-400 uppercase">Drill</p>
+                        <p class="text-xl font-semibold mt-1">Crossover Drill</p>
+                    </div>
+                    <div class="stat-card">
+                        <p class="text-sm text-gray-400 uppercase">Training</p>
+                        <p class="text-xl font-semibold mt-1">Agility & Speed</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Sessions Overview Section -->
+        <div class="mb-8">
+            <h2 class="text-2xl font-semibold mb-4">Sessions Overview</h2>
+            <div class="scrollable-row flex space-x-6">
+                <!-- Session Card 1 -->
+                <div class="scrollable-card card flex-none">
+                    <div class="video-thumbnail">Video Thumbnail</div>
+                    <div class="mt-4">
+                        <p class="font-semibold text-lg">Shooting Drill</p>
+                        <p class="text-sm text-gray-400">Date: 10/26/2024</p>
+                        <p class="text-sm mt-2"><span class="font-semibold orange-text">Shots:</span> 30/50</p>
+                        <p class="text-sm"><span class="font-semibold orange-text">Rating:</span> 4.5/5</p>
+                    </div>
+                </div>
+                <!-- Session Card 2 -->
+                <div class="scrollable-card card flex-none">
+                    <div class="video-thumbnail">Video Thumbnail</div>
+                    <div class="mt-4">
+                        <p class="font-semibold text-lg">Dribbling Session</p>
+                        <p class="text-sm text-gray-400">Date: 10/25/2024</p>
+                        <p class="text-sm mt-2"><span class="font-semibold orange-text">Rating:</span> 4.8/5</p>
+                    </div>
+                </div>
+                <!-- Session Card 3 -->
+                <div class="scrollable-card card flex-none">
+                    <div class="video-thumbnail">Video Thumbnail</div>
+                    <div class="mt-4">
+                        <p class="font-semibold text-lg">Conditioning Workout</p>
+                        <p class="text-sm text-gray-400">Date: 10/24/2024</p>
+                        <p class="text-sm mt-2"><span class="font-semibold orange-text">Rating:</span> 4.2/5</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- My Channel Section -->
+        <div>
+            <h2 class="text-2xl font-semibold mb-4">My Channel</h2>
+            <div class="scrollable-row flex space-x-6">
+                <!-- Video Card 1 -->
+                <div class="scrollable-card card flex-none">
+                    <div class="video-thumbnail">Video 1</div>
+                    <p class="mt-2 text-sm text-gray-400">From people you follow...</p>
+                </div>
+                <!-- Video Card 2 -->
+                <div class="scrollable-card card flex-none">
+                    <div class="video-thumbnail">Video 2</div>
+                    <p class="mt-2 text-sm text-gray-400">From liked groups...</p>
+                </div>
+                <!-- Video Card 3 -->
+                <div class="scrollable-card card flex-none">
+                    <div class="video-thumbnail">Video 3</div>
+                    <p class="mt-2 text-sm text-gray-400">From DOACH Events...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

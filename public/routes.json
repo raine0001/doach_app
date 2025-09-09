@@ -1,0 +1,22 @@
+{
+  "home": {
+    "path": "/",
+    "component": "HomePage",
+    "label": "\ud83c\udfe0 Home"
+  },
+  "session": {
+    "path": "/session",
+    "component": "CoachSession",
+    "label": "\ud83c\udfaf Coach"
+  },
+  "community": {
+    "path": "/community",
+    "component": "CommunityFeed",
+    "label": "\ud83c\udf0d Community"
+  },
+  "settings": {
+    "path": "/settings",
+    "component": "SettingsPage",
+    "label": "\u2699\ufe0f Settings"
+  }
+}
