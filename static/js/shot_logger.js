@@ -372,18 +372,22 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
      if (ballStateRef?.proxExitFrame != null) ballStateRef.proxExitFrame = null;
 
      if (!s.releaseSignaled) {
-       try { markRelease?.(frameIndex); } catch {}
-       s.releaseSignaled = true;
-       // De-dupe global release event so TTS/handlers fire once
-       try {
-         if (!window.__releaseEventSent) {
-           window.__releaseEventSent = true;
-           window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: frameIndex, via: 'shot_logger' } }));
-         }
-       } catch {}
-      // 🔊 Start FBF strictly at release
-      try { window.dispatchEvent(new CustomEvent('fbf:start', { detail: { frame: frameIndex } })); } catch {}
-      startFBFAt(frameIndex);
+       if (window.POSE_FIRST_ONLY === true) {
+         // Pose-first mode: do not auto-mark release from proximity entry.
+       } else {
+         try { markRelease?.(frameIndex); } catch {}
+         s.releaseSignaled = true;
+         // De-dupe global release event so TTS/handlers fire once
+         try {
+           if (!window.__releaseEventSent) {
+             window.__releaseEventSent = true;
+             window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: frameIndex, via: 'shot_logger' } }));
+           }
+         } catch {}
+        // 🔊 Start FBF strictly at release
+        try { window.dispatchEvent(new CustomEvent('fbf:start', { detail: { frame: frameIndex } })); } catch {}
+        startFBFAt(frameIndex);
+       }
      }
    }
 
@@ -426,6 +430,8 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
       s._postExitFrames   = 0;
 
       if (ballStateRef.state !== 'FROZEN') { try { freezeShot?.(null); } catch {} }
+      // Re-arm for next attempt: clear releaseFrame once summary is computed
+      try { ballStateRef.releaseFrame = null; ballStateRef.state = 'IDLE'; } catch {}
 
       let shotRecord = null;
       const frozen = ballStateRef.shots?.at?.(-1);
@@ -433,12 +439,14 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
         (frozen?.trail?.length >= 3) ? frozen.trail :
         (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
 
-      if (trailForLog) {
-        try {
-          shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null;
-        } catch {}
+      if (!window.DEFER_FE_SUMMARY) {
+        if (trailForLog) {
+          try {
+            shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null;
+          } catch {}
+        }
+        if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
       }
-      if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
 
       try { window.dispatchEvent(new CustomEvent('shot:end', { detail: { frame: frameIndex } })); } catch {}
       try { window.dispatchEvent(new CustomEvent('fbf:stop', { detail: { frame: frameIndex } })); } catch {}
@@ -458,7 +466,9 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
             shotRecord.clip = { start, end };
           }
         } catch {}
-        try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+        if (!window.DEFER_FE_SUMMARY) {
+          try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+        }
         // Only stop analyzer for non-live uploads or test flows.
         // In live camera sessions, keep analyzer running so pose/hoop stay visible
         // and subsequent shots are detected without manual restart.
@@ -494,14 +504,18 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
         s._postExitFrames = 0;
 
         if (ballStateRef.state !== 'FROZEN') { try { freezeShot?.(null); } catch {} }
+        // Re-arm for next attempt: clear releaseFrame when auto-finalizing
+        try { ballStateRef.releaseFrame = null; ballStateRef.state = 'IDLE'; } catch {}
 
         let shotRecord = null;
         const frozen = ballStateRef.shots?.at?.(-1);
         const trailForLog =
           (frozen?.trail?.length >= 3) ? frozen.trail :
           (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
-        if (trailForLog) { try { shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null; } catch {} }
-        if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
+        if (!window.DEFER_FE_SUMMARY) {
+          if (trailForLog) { try { shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null; } catch {} }
+          if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
+        }
 
         try { window.dispatchEvent(new CustomEvent('shot:end', { detail: { frame: frameIndex, via: 'auto-gap' } })); } catch {}
         try { window.dispatchEvent(new CustomEvent('fbf:stop', { detail: { frame: frameIndex } })); } catch {}
@@ -520,7 +534,9 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
               shotRecord.clip = { start, end };
             }
           } catch {}
-          try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+          if (!window.DEFER_FE_SUMMARY) {
+            try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+          }
           try { if (!window.__SESSION_ACTIVE) window.stopFrameAnalysis?.(); } catch {}
           const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
           setTimeout(() => { __awaitingReset = false; s._postExitFrames = 0; }, unlockMs);
@@ -1240,10 +1256,12 @@ export function scoringTick(__frameIdx) {
   if (!hoopBox) return;
   const s = BS();
 
-  // fire release once when tracking begins
+  // fire release once when tracking begins (disabled in pose-first mode)
   if (s?.state === 'TRACKING' && s?.releaseFrame != null && !__releaseEventSent) {
-    __releaseEventSent = true;
-    try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: s.releaseFrame } })); } catch {}
+    if (window.POSE_FIRST_ONLY !== true) {
+      __releaseEventSent = true;
+      try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: s.releaseFrame, via: 'shot_logger:mirror' } })); } catch {}
+    }
   }
 
   // score newly frozen shot

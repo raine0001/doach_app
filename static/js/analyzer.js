@@ -691,26 +691,31 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
           try {
             const s = (window.ballState ||= {});
             if (st.released && !(Number.isFinite(s.releaseFrame))) {
-              const fn = (window.__markReleasePose || window.markRelease);
-              fn?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)), via: 'analyzer-backstop' });
-              try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'analyzer-backstop' } })); } } catch {}
+              if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
+                const fn = (window.__markReleasePose || window.markRelease);
+                fn?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)), via: 'analyzer-backstop' });
+                try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'analyzer-backstop' } })); } } catch {}
+              }
             }
           } catch {}
         } else if (hoopLocked) {
-          // Pose-only latch when ball point missing
+          // Pose-only latch when ball point missing (unified gate)
           try {
             const s = (window.ballState ||= {});
             const kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length >= 33) ? playerState.keypoints : null;
             if (!Number.isFinite(s.releaseFrame) && kps) {
-              const hist = (window.playerState?.frameHistory || []).slice(-3);
-              if (window.DOACH_RELEASE_TRACE === true || window.debugFrameMode === true) { try { console.log('[release:score]', { frame: frameIdx, score: rel.score, th: TH, tests: rel.tests }); } catch {} }
-              const rel = (typeof window.poseReleaseScore === 'function') ? window.poseReleaseScore({ keypoints: kps }, hist) : { score: 0 };
-              const TH = Number(window.REL_SCORE_THRESH || 0.60);
-              if (rel.score >= TH) {
-                const fn = (window.__markReleasePose || window.markRelease);
-                fn?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)), via: 'analyzer-pose-only', score: rel.score });
-                try { if (window.DOACH_RELEASE_TRACE) console.log('[release:pose]', { frame: frameIdx, score: rel.score, tests: rel.tests }); } catch {}
-                try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'analyzer-pose-only', score: rel.score } })); } } catch {}
+              const hist = (window.playerState?.frameHistory || []).slice(-5);
+              const gate = (typeof window.releaseGate === 'function') ? window.releaseGate(hist) : { released:false, tests:{} };
+              const TH = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+              const allScore = Number(gate?.tests?.score || 0);
+              const allGreen = allScore >= TH - 1e-6;
+              if (gate.released && allGreen) {
+                if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
+                  const fn = (window.__markReleasePose || window.markRelease);
+                  fn?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)), via: 'analyzer-pose-only', score: allScore });
+                  try { if (window.DOACH_RELEASE_TRACE) console.log('[release:pose]', { frame: frameIdx, score: allScore, tests: gate.tests }); } catch {}
+                  try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'analyzer-pose-only', score: allScore } })); } } catch {}
+                }
               }
             }
           } catch {}
@@ -747,7 +752,29 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
         }
       } catch {}
       try { if (__lastIdxSeen !== frameIdx) { __lastIdxSeen = frameIdx; __lastProgressAt = performance.now(); } } catch {}
-      try { window.tickReadiness?.(objects, poses); } catch {}; try { updateDebugOverlay?.(poses, objects, frameIdx); } catch {}; try { drawLiveOverlay?.(objects, playerState); } catch {}
+      // Update readiness + overlay
+      try { window.tickReadiness?.(objects, poses); } catch {};
+      // Compute unified release gate for HUD and pulse (uploads path)
+      try {
+        if (typeof window.releaseGate === 'function') {
+          const hist = (window.playerState?.frameHistory || []).slice(-5);
+          const gate = window.releaseGate(hist) || { released:false, tests:{}, passed:0, reason:'nogate' };
+          const rec = { t: Date.now(), type:'gate', detail: { frame: frameIdx, tests: gate.tests, passed: gate.passed, reason: gate.reason }, latched: false };
+          window.__LAST_GATE = rec;
+          const sc = Number(gate?.tests?.score || 0);
+          const th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+          const lastF = Number(window.__SCORE_LAST_FRAME || -1);
+          if (window.__shotTrackingArmed === true && sc >= th - 1e-6 && frameIdx !== lastF) {
+            window.__SCORE_LAST_FRAME = frameIdx;
+            window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1;
+            window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));
+            try { window.dispatchEvent(new CustomEvent('hud:score-trip', { detail: { frame: frameIdx, score: sc } })); } catch {}
+            if (window.DOACH_RELEASE_TRACE === true) console.log('[score:pulse:an]', { frame: frameIdx, score: sc, th });
+          }
+        }
+      } catch {}
+      try { updateDebugOverlay?.(poses, objects, frameIdx); } catch {};
+      try { drawLiveOverlay?.(objects, playerState); } catch {}
       frameIdx++;
       try { window.dispatchEvent(new CustomEvent('analyzer:frame-done', { detail: { __frameIdx: frameIdx, t } })); } catch {}
     } catch (err) { console.error('[analyze] tick error:', err); } finally { tickBusy = false; }

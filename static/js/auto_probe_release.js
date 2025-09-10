@@ -55,17 +55,28 @@
       try { window.__coachMuted = true; } catch {}
       try { window.__RELEASE_ONLY = true; } catch {}
     }
+    // Consolidated: do not override gate knobs here. If needed, use setReleaseKnobs().
+    // Allow URL overrides e.g., ?ext=140&strict=160&shy=8
     try {
-      window.REL_SCORE_THRESH = 0.44;
-      window.REL_ELBOW_EXT_MIN = 150;
-      window.REL_Y_TOL = 8;
-      window.REL_DX_MAX = 130;
-      window.REL_DY_MIN = 10;
-      window.__POSE_HOLD_MS = 1000;
-      window.HEUR_STREAK_NEED = 1;
+      const patch = {};
+      if (typeof URLSearchParams !== 'undefined') {
+        const q2 = new URLSearchParams(location.search||'');
+        if (q2.has('ext'))    patch.elbowExtMin    = Number(q2.get('ext'));
+        if (q2.has('strict')) patch.elbowStrictMin = Number(q2.get('strict'));
+        if (q2.has('shy'))    patch.shYTol         = Number(q2.get('shy'));
+        if (q2.has('ytol'))   patch.yTol           = Number(q2.get('ytol'));
+        if (q2.has('dx'))     patch.dxMax          = Number(q2.get('dx'));
+        if (q2.has('dy'))     patch.dyMin          = Number(q2.get('dy'));
+        if (q2.has('up'))     patch.upDy           = Number(q2.get('up'));
+        if (q2.has('score'))  patch.scoreThresh    = Number(q2.get('score'));
+        if (q2.has('streak')) patch.streakNeed     = Number(q2.get('streak'));
+      }
+      if (Object.keys(patch).length && typeof window.setReleaseKnobs === 'function') {
+        window.setReleaseKnobs(patch);
+      }
+      window.__POSE_HOLD_MS = 1000; // harmless visual hold for HUD
       if (releaseOnly) window.COACH_POSE_MS = 120; // give CPU headroom in live capture
     } catch {}
-    try { window.REL_SCORE_THRESH = 0.48; } catch {}
     try { window.COACH_POSE_MS = 60; } catch {}
     try { window.__SESSION_ACTIVE = false; } catch {}
     try { window.USE_FBF_DURING_SHOT = true; } catch {}
@@ -124,10 +135,7 @@
       } catch {}
     }
 
-    // In probe mode allow multiple pose-only releases even if no end/summary arrives
-    window.addEventListener('shot:release', () => {
-      try { setTimeout(() => { window.__releaseEventSent = false; }, 1500); } catch {}
-    });
+    // Do not auto-reset release event latch here; cooldown is enforced centrally.
 
     // Release-only: show a small on-screen pose assessment at each release (no arc scoring)
     if (releaseOnly) {

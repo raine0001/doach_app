@@ -62,7 +62,11 @@ window.addEventListener('shot:summary', (e) => {
   if (!s) return;
 
   // de-dupe key
-  const key = `${+s.made}|${Math.round(s.arcHeight||0)}|${s.entryAngle}|${s.releaseAngle}|${s.frameEnd||''}`;
+  // Include a per-shot counter when available to avoid cross-shot suppression
+  const shotNo = (typeof window.__HUD_SHOT_COUNT !== 'undefined')
+    ? Number(window.__HUD_SHOT_COUNT)
+    : (Array.isArray(window.shotLog) ? window.shotLog.length : 0);
+  const key = `${shotNo}|${+s.made}|${Math.round(s.arcHeight||0)}|${s.entryAngle}|${s.releaseAngle}|${s.frameEnd||''}`;
   if (key === __lastSpokenKey) return;
   __lastSpokenKey = key;
 
@@ -96,23 +100,270 @@ window.addEventListener('shot:summary', (e) => {
   const SPEAK_DEDUP_MS = 1200;
   let __lastSpeak = { text: '', at: 0 };
 
+  // Default: enable live tips unless explicitly disabled elsewhere
+  try { if (typeof window.PREF_LIVE_TIPS === 'undefined') window.PREF_LIVE_TIPS = true; } catch {}
+  // Default tip probability (~50%) when cadence not explicitly set
+  try { if (typeof window.COACH_TIP_PROB === 'undefined') window.COACH_TIP_PROB = 0.5; } catch {}
+
   // Wire quick pose tips on release — gated off by default. Enable with window.PREF_LIVE_TIPS=true
+  function __getPoseSnapshot(){
+    try {
+      // Prefer extractPoseSnapshot(keypoints, hoopBox)
+      if (typeof window.extractPoseSnapshot === 'function') {
+        return window.extractPoseSnapshot(window.playerState?.keypoints, window.getLockedHoopBox?.());
+      }
+      // Fallback to any older capture API
+      if (typeof window.capturePoseSnapshot === 'function') {
+        return window.capturePoseSnapshot(window.playerState, window.getLockedHoopBox?.());
+      }
+    } catch {}
+    // Construct a minimal snapshot from current keypoints or gate tests
+    try {
+      const kp = window.playerState?.keypoints;
+      const gate = window.__LAST_GATE?.detail?.tests || {};
+      if (Array.isArray(kp) && kp.length >= 33) {
+        const wr = kp[16], el = kp[14], sh = kp[12];
+        if (wr && el && sh && Number.isFinite(wr.x) && Number.isFinite(wr.y) && Number.isFinite(sh.x) && Number.isFinite(sh.y)) {
+          const dx = Math.abs((wr.x||0) - (sh.x||0));
+          const dy = Math.abs((sh.y||0) - (wr.y||0));
+          const angle = Math.atan2(dy, dx) * 180 / Math.PI; // shoulder->wrist
+          return {
+            wristY: wr.y, elbowY: el.y, shoulderY: sh.y,
+            releaseAboveShoulder: (wr.y < sh.y),
+            shoulderToWristAngle: angle,
+            torsoLeanAngle: null,
+          };
+        }
+      }
+      if (gate && (gate.wristAboveShoulder != null)) {
+        // Approximate from gate tests and dx/dy
+        const dx = Number(gate.dx || 0), dy = Number(gate.dy || 0);
+        const angle = (dx||dy) ? (Math.atan2(Math.abs(dy), Math.abs(dx)) * 180 / Math.PI) : null;
+        return {
+          releaseAboveShoulder: !!gate.wristAboveShoulder,
+          shoulderToWristAngle: angle,
+          torsoLeanAngle: null,
+        };
+      }
+    } catch {}
+    return null;
+  }
+
+  function __ensureSummarizer(){
+    try {
+      if (typeof window.summarizePoseIssues === 'function') return;
+      // Lightweight, sensible defaults when no model-based summarizer is available
+      window.summarizePoseIssues = ({ poseSnapshot, golden }) => {
+        const out = [];
+        if (!poseSnapshot) return out;
+        const g = golden || {};
+        const val = (v, d) => (Number.isFinite(v) ? v : d);
+        // Knee flex (power)
+        const kneeFlex = val(poseSnapshot.kneeFlex, null);
+        const gFlex    = val(g.kneeFlex, 28);
+        if (Number.isFinite(kneeFlex) && kneeFlex < gFlex * 0.75) out.push('Add a bit more knee bend.');
+        // Arm verticality
+        const armAng = val(poseSnapshot.shoulderToWristAngle, null);
+        const gArm   = val(g.shoulderToWristAngle, 55);
+        if (Number.isFinite(armAng) && armAng < gArm - 6) out.push('Get the shooting arm more vertical on release.');
+        // Release height
+        const relHigh = (poseSnapshot.releaseAboveShoulder != null)
+          ? !!poseSnapshot.releaseAboveShoulder
+          : (Number.isFinite(poseSnapshot.wristY) && Number.isFinite(poseSnapshot.shoulderY) ? (poseSnapshot.wristY < poseSnapshot.shoulderY) : null);
+        if (relHigh === false) out.push('Release above your shoulder line.');
+        // Torso lean
+        const lean = val(poseSnapshot.torsoLeanAngle, null);
+        if (Number.isFinite(lean) && Math.abs(lean) > 20) out.push('Stay taller through the lift.');
+        return out.slice(0, 2);
+      };
+    } catch {}
+  }
+
+  function assessPoseAndSpeak(via) {
+    try {
+      if (!window.PREF_LIVE_TIPS) return;  // default: no live tips, only summary
+      // simple cooldown on our side (coachSpeak also dedups)
+      const now = performance.now();
+      const last = Number(window.__COACH_TIP_LAST_AT || 0);
+      const gap = Number(window.COACH_TIP_MIN_MS || 900);
+      if (now - last < gap) return;
+      // Frequency gating: speak on some shots, not all
+      try {
+        const cnt = Number(window.__HUD_SHOT_COUNT || window.shotTaken || 0);
+        const everyN = Number(window.COACH_TIP_EVERY_N || 0);  // e.g., 2 → every other shot
+        const prob   = Number(window.COACH_TIP_PROB || 0);     // e.g., 0.4 → 40% chance
+        let allow = true;
+        if (everyN > 1) allow = (cnt % everyN) === 1;          // speak on 1, 1+N, ...
+        if (!allow && prob > 0) allow = Math.random() < prob;  // random backstop
+        if (!allow) return;
+      } catch {}
+      window.__COACH_TIP_LAST_AT = now;
+
+      // allow a small delay after release to stabilize pose if asked
+      const delay = (via === 'hud:score-trip' || via === 'hud:shot-taken') ? Number(window.COACH_TIP_DELAY_MS || 900) : 0;
+      if (delay > 0) {
+        setTimeout(() => { try { assessPoseAndSpeakCore(via); } catch {} }, delay);
+      } else {
+        assessPoseAndSpeakCore(via);
+      }
+    } catch {}
+  }
+
+  function assessPoseAndSpeakCore(via){
+    try {
+      const snap = __getPoseSnapshot();
+      if (!snap) return;
+      __ensureSummarizer();
+      const golden = window.DOACH_MEM?.get?.()?.golden;
+      const issues = (typeof window.summarizePoseIssues === 'function')
+        ? (window.summarizePoseIssues({ poseSnapshot: snap }, golden) || [])
+        : [];
+
+      // Categorize and vary the coaching line so it doesn't repeat
+      const cat = pickIssueCategory(issues, snap, golden);
+      const line = craftVariedCoachLine(cat, snap, golden);
+      if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:tip]', { via, cat, line });
+      window.doachSpeak?.(line);
+    } catch {}
+  }
+
+  // --- Category selection + variation -------------------------------------------------
+  function pickIssueCategory(issues, snap, golden){
+    const text = String(issues?.[0] || '')
+      .toLowerCase();
+    let cat = null;
+    if (/knee|bend/.test(text)) cat = 'power';
+    else if (/arm more vertical|taller arm|shoulder to wrist/i.test(text)) cat = 'releaseArm';
+    else if (/above your shoulder|release above/i.test(text)) cat = 'releaseHeight';
+    else if (/upright|taller|torso/i.test(text)) cat = 'torso';
+    // Fallback by snapshot values if text didn't map
+    if (!cat) {
+      try {
+        if (Number.isFinite(snap?.kneeFlex)) {
+          const gFlex = Number(golden?.kneeFlex ?? 28);
+          if (snap.kneeFlex < gFlex * 0.75) cat = 'power';
+        }
+        if (!cat && Number.isFinite(snap?.shoulderToWristAngle)) {
+          const gArm = Number(golden?.shoulderToWristAngle ?? 55);
+          if (snap.shoulderToWristAngle < gArm - 6) cat = 'releaseArm';
+        }
+        if (!cat && (snap?.releaseAboveShoulder === false)) cat = 'releaseHeight';
+        if (!cat && Number.isFinite(snap?.torsoLeanAngle) && Math.abs(snap.torsoLeanAngle) > 20) cat = 'torso';
+      } catch {}
+    }
+    return cat || 'general';
+  }
+
+  function craftVariedCoachLine(category, snap, golden){
+    // Maintain per-category stage to rotate: actionable -> why -> how/praise
+    const state = (window.__coachLineState ||= { counts:{} });
+    const c = category || 'general';
+    const n = (state.counts[c] ||= 0);
+    state.counts[c] = n + 1; state.lastCat = c;
+    const stage = n % 3; // 0,1,2 rotation
+
+    const T = {
+      power: {
+        do:  'Add a bit more knee bend on your lift.',
+        why: 'More knee bend gives you power and a smoother arc.',
+        how: 'Sink an extra inch in your knees, then drive up through the ball.'
+      },
+      releaseArm: {
+        do:  'Get your shooting arm more vertical on release.',
+        why: 'A taller arm helps your entry angle and keeps the ball on line.',
+        how: 'Think “reach to the ceiling” and finish with a high wrist snap.'
+      },
+      releaseHeight: {
+        do:  'Release above your shoulder line.',
+        why: 'Higher release improves arc and reduces flat misses.',
+        how: 'Keep the wrist above the shoulder as you snap through the ball.'
+      },
+      torso: {
+        do:  'Stay taller through the lift.',
+        why: 'Staying upright keeps energy going up, not forward.',
+        how: 'Stack your chest over hips and keep your head level as you rise.'
+      },
+      general: {
+        do:  'Solid base. Keep your finish high.',
+        why: 'High, balanced finishes produce repeatable makes.',
+        how: 'Plant, rise, and snap the wrist to the rim.'
+      }
+    };
+    const pack = T[c] || T.general;
+    const variants = [pack.do, pack.why, pack.how];
+    // Encourage occasionally
+    if (stage === 2 && Math.random() < 0.3) {
+      return 'That looked better — keep that feel on the next one.';
+    }
+    return variants[stage] || pack.do;
+  }
+
   try {
     if (!window.__coachReleaseWired) {
       window.__coachReleaseWired = true;
-      window.addEventListener('shot:release', () => {
+      // Fire on strict shot release events
+      window.addEventListener('shot:release', () => assessPoseAndSpeak('shot:release'));
+      // Also fire when the HUD/score trip increments (our unified gate for visuals)
+      window.addEventListener('hud:score-trip', () => assessPoseAndSpeak('hud:score-trip'));
+      window.addEventListener('hud:shot-taken', () => assessPoseAndSpeak('hud:shot-taken'));
+      // Immediate quick tip on raw pose release as a backstop
+      window.addEventListener('pose:release', (e) => {
         try {
-          if (!window.PREF_LIVE_TIPS) return;  // default: no live tips, only summary
-          // cooldown handled by coachSpeak
-          const snap = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
+          const snap = e?.detail?.poseSnapshot || window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
           if (!snap) return;
           const golden = window.DOACH_MEM?.get?.()?.golden;
           const issues = window.summarizePoseIssues?.({ poseSnapshot: snap }, golden) || [];
-          const line = issues[0] || 'Good base. Tall arm, finish high.';
+          const line = issues[0] || 'Solid base. Tall arm, finish high.';
           window.doachSpeak?.(line);
         } catch {}
       });
+      // Per-shot reset so the next summary/tip is not suppressed
+      window.addEventListener('shot:release', () => { try { __lastSpokenKey = null; window.__COACH_TIP_LAST_AT = 0; } catch {} });
+      window.addEventListener('hud:shot-taken', () => { try { __lastSpokenKey = null; window.__COACH_TIP_LAST_AT = 0; } catch {} });
     }
+  } catch {}
+
+  // ---- Session end summary (aggregate pose notes) ----
+  function summarizeSessionPose() {
+    try {
+      const list = Array.isArray(window.__shotList) ? window.__shotList : [];
+      if (!list.length) return;
+      const golden = window.DOACH_MEM?.get?.()?.golden;
+      const issuesMap = new Map(); // text -> { shots:[] }
+      list.forEach((s, idx) => {
+        const snap = s.poseSnapshot || null;
+        if (!snap) return;
+        const issues = window.summarizePoseIssues?.({ poseSnapshot: snap }, golden) || [];
+        issues.slice(0,2).forEach(txt => {
+          const key = String(txt);
+          const rec = issuesMap.get(key) || { shots: [] };
+          rec.shots.push(idx+1);
+          issuesMap.set(key, rec);
+        });
+      });
+      const top = Array.from(issuesMap.entries()).sort((a,b)=> b[1].shots.length - a[1].shots.length).slice(0,3);
+      if (!top.length) return;
+      const lines = top.map(([txt, rec]) => {
+        const ids = rec.shots.join(', ');
+        return `${txt} (shots ${ids}).`;
+      });
+      const speakLine = `Session summary. ${lines.join(' ')}`;
+      coachSpeak(speakLine);
+    } catch {}
+  }
+
+  // Auto speak summary when HUD ends a session
+  try {
+    window.addEventListener('hud:end-session', () => {
+      try { summarizeSessionPose(); } catch {}
+    });
+    // Enable live tips when armed (force on)
+    window.addEventListener('hud:armed', () => { try { window.PREF_LIVE_TIPS = true; } catch {} });
+    // Reset tip cooldown per shot so every shot can speak
+    window.addEventListener('hud:shot-taken', () => { try { window.__COACH_TIP_LAST_AT = 0; } catch {} });
+    window.addEventListener('shot:summary', () => { try { window.__COACH_TIP_LAST_AT = 0; } catch {} });
+    // Announce kickoff on countdown
+    window.addEventListener('hud:arm-countdown', () => { try { coachSpeak("Let's get started. Get into position and shoot when ready."); } catch {} });
   } catch {}
 
   // ---- Pref bridges (new) ----
@@ -213,6 +464,16 @@ window.addEventListener('shot:summary', (e) => {
   window.handleVoiceTranscript = async (text) => {
     const lower = (text || '').toLowerCase();
     // Reuse your wake-word/capture logic, or just route to your Q&A:
+    try {
+      if (/\b(end (the )?session|i'?m done|finish session)\b/.test(lower)) {
+        window.dispatchEvent(new CustomEvent('hud:end-session'));
+        return;
+      }
+      if (/\b(start (a )?new session|new session|begin session|start session)\b/.test(lower)) {
+        window.dispatchEvent(new CustomEvent('hud:start-session'));
+        return;
+      }
+    } catch {}
     if (window.doachSpeak) window.doachSpeak(`You said: ${text}`);
     // window.webkit?.messageHandlers?.doach?.postMessage({action: 'startVoice'})
   };
@@ -1250,19 +1511,3 @@ window.addEventListener('shot:summary', (e) => {
 })();
 
   })();
-// Quick pose tip on immediate release (foreground)
-try {
-  if (!window.__coachReleaseWired) {
-    window.__coachReleaseWired = true;
-    window.addEventListener('pose:release', (e) => {
-      try {
-        const snap = e?.detail?.poseSnapshot || window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
-        if (!snap) return;
-        const golden = window.DOACH_MEM?.get?.()?.golden;
-        const issues = window.summarizePoseIssues?.({ poseSnapshot: snap }, golden) || [];
-        const line = issues[0] || 'Solid base. Tall arm, finish high.';
-        window.doachSpeak?.(line);
-      } catch {}
-    });
-  }
-} catch {}

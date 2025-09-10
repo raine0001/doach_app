@@ -39,6 +39,16 @@ runs/
 weights/
 logs/
 videos/
+data/
+node_modules/
+artifacts/
+__pycache__/
+*.log
+.venv
+.vscode/
+sessions/
+tests/
+tools/
 
 # ── Big binaries (block by default; use LFS if you need them)
 *.zip
@@ -53,7 +63,24 @@ videos/
 # ── Project-specific (optional)
  playwright.config.js
  playwright.config.ts
+ prepare_gpt_yolo_dataset.py
+ train.py
+ skipped_frames.txt
+ PA_app.py
+ ACCEPTANCE_CRITERIA.md
+ skipped_frames.json
+
+
+# ── Secrets
+.env
+.env.*.local
+
 
 .env
 .env.*.local
+playwright-report/
+test-results/
+
+
+NUL
 

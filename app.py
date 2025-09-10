@@ -816,19 +816,6 @@ def save_yolo_label():
         f.write(content.strip())
     return '', 200
 
-
-#------------- bug assistant - dontcrash testdummy -------------#
-@app.route("/__health")
-def __health():
-    import time
-    return {
-        "ok": True,
-        "ts": time.time(),
-        "build": "dev",
-    }, 200
-#------------- end bug assistant ------------------------------#
-
-
 # ---------- Extractor Rotation helper ----------
 def _probe_video_rotation(video_path: str) -> int:
     """

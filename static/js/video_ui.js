@@ -30,7 +30,7 @@ window.handleHoopSelection = handleHoopSelection;
     // console.log('[Slow]', why, '→', r);
   }
 
-  window.addEventListener('shot:release', () => {
+  window.addEventListener('shot:release', (e) => {
     // In live sessions or when FBF disabled, never alter playback rate
     if (window.__SESSION_ACTIVE || window.USE_FBF_DURING_SHOT === false) return;
     if (window.__fbfActive) return;
@@ -43,10 +43,34 @@ window.handleHoopSelection = handleHoopSelection;
   try {
     if (!window.__hudReleaseWired) {
       window.__hudReleaseWired = true;
-      window.addEventListener('shot:release', () => {
+  window.addEventListener('shot:release', (e) => {
         try {
-          const list = (window.__shotList || window.shotLog || []);
-          const taken = list.length + 1;
+          // Ignore any release before hoop is confirmed/locked
+          if (window.__hoopConfirmed !== true) return;
+          if (!window.getLockedHoopBox?.()) return;
+          if (window.__shotTrackingArmed !== true) return;
+          // UI cooldown only; trust the upstream release latch
+          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
+          const now = performance.now();
+          const lastUiMs = Number(window.__UI_LAST_RELEASE_MS || 0);
+          if (now - lastUiMs < unlockMs) return; // UI cooldown: ignore rapid repeats
+
+          // Trust upstream latch; UI enforces only armed + hoop + cooldown
+
+          // Ensure a pending shot record exists immediately on pose release
+          const list = (window.__shotList ||= []);
+          const rf = Number(e?.detail?.frame || 0);
+          const lastEntry = list.at?.(-1) || null;
+          const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
+          if (!same) {
+            const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+              ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+              : null;
+            list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
+            try { console.log('[HUD:add-pending]', { frame: rf, len: list.length }); } catch {}
+          }
+          window.__UI_LAST_RELEASE_MS = now;
+          const taken = list.length;
           const made = (window.shotLog?.filter?.(s => s.made).length || 0);
           const acc = taken ? Math.round((made / taken) * 100) : 0;
           window.mountSessionHUD?.();
@@ -265,9 +289,14 @@ export function createPlaybackControls(video) {
     return;
   }
 
+  // Always mount the camera switcher for live sessions
+  try { mountCameraSwitcher(); } catch {}
+
   // Skip transport controls for live camera feeds (srcObject present)
+  // but still mount the session HUD so the bottom bar is always visible.
   try {
     if (video && video.srcObject) {
+      try { mountSessionHUD(); setSessionStatus('SESSION IN PROGRESS'); } catch {}
       return;
     }
   } catch {}
@@ -396,12 +425,16 @@ function isValidHoopBox(h) {
 function isHoopReady() {
   const h = window.getLockedHoopBox?.();  // 👈 use window.*
   const ready = !!window.__hoopConfirmed && isValidHoopBox(h);
-  console.log('[gate:isHoopReady]', {
-    confirmed: window.__hoopConfirmed,
-    hasCenter: hasCenter(h),
-    hasSize: hasSize(h),
-    ready
-  });
+  try {
+    if (window.DOACH_HOOP_GATE_LOG === true) {
+      console.log('[gate:isHoopReady]', {
+        confirmed: window.__hoopConfirmed,
+        hasCenter: hasCenter(h),
+        hasSize: hasSize(h),
+        ready
+      });
+    }
+  } catch {}
   return ready;
 }
 
@@ -486,6 +519,105 @@ export function ensureHudRoot() {
   return root;
 }
 
+// -----------------------------------------------------------------//
+// Camera switcher (front/back toggle + device picker)
+// -----------------------------------------------------------------//
+function currentFacingLabel() {
+  try {
+    const f = (localStorage.getItem('doach_camera_facing') || '').toLowerCase();
+    if (f === 'user' || f === 'front') return 'Front';
+    if (f === 'environment' || f === 'back' || f === 'rear') return 'Back';
+  } catch {}
+  return 'Back';
+}
+
+export async function mountCameraSwitcher() {
+  const root = ensureHudRoot();
+  let btn = document.getElementById('camToggleBtn');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'camToggleBtn';
+    btn.className = 'hud-card';
+    Object.assign(btn.style, {
+      position: 'absolute', top: '10px', right: '10px',
+      padding: '8px 10px', font: '600 12px system-ui',
+      pointerEvents: 'auto', zIndex: 10020, cursor: 'pointer'
+    });
+    btn.textContent = 'Back  🔁';
+    root.appendChild(btn);
+  }
+
+  const refresh = () => {
+    try {
+      const lab = currentFacingLabel();
+      btn.textContent = (lab === 'Back' ? 'Back' : 'Front') + '  🔁';
+    } catch {}
+  };
+  refresh();
+
+  let pressTimer = null, pop = null;
+
+  async function flip() {
+    try {
+      await (window.flipCamera?.() || Promise.resolve());
+      refresh();
+      try { (window.showPromptMessage||window.showPrompt)?.('Switched camera'); } catch {}
+    } catch (e) { console.warn('[cam] flip failed', e); }
+  }
+
+  async function showPicker() {
+    try {
+      if (pop) { try { pop.remove(); } catch {}; pop = null; }
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+      pop = document.createElement('div');
+      pop.id = 'camDevicePopover';
+      Object.assign(pop.style, {
+        position:'absolute', top: '46px', right: '10px',
+        background:'rgba(0,0,0,0.85)', color:'#fff', padding:'8px',
+        borderRadius:'8px', zIndex:10025, pointerEvents:'auto', minWidth:'180px',
+        border:'1px solid rgba(255,255,255,.15)'
+      });
+      const makeItem = (label, on) => {
+        const a = document.createElement('div');
+        a.textContent = label;
+        Object.assign(a.style, { padding:'6px 8px', cursor:'pointer', font:'600 12px system-ui', borderRadius:'6px' });
+        a.onmouseenter = () => a.style.background = 'rgba(255,255,255,.08)';
+        a.onmouseleave = () => a.style.background = 'transparent';
+        a.onclick = async () => { try { await on?.(); } finally { try { pop.remove(); } catch {}; pop = null; } };
+        return a;
+      };
+      if (!devs.length) pop.appendChild(makeItem('No cameras found', null));
+      devs.forEach((d,i) => pop.appendChild(makeItem(d.label || `Camera ${i+1}`, async () => {
+        try {
+          localStorage.setItem('doach_camera_id', String(d.deviceId||''));
+          // Infer facing from label when possible to improve mobile reliability
+          const lab = (d.label||'').toLowerCase();
+          if (/front|user/.test(lab)) {
+            localStorage.setItem('doach_camera_facing', 'user');
+          } else if (/back|rear|environment/.test(lab)) {
+            localStorage.setItem('doach_camera_facing', 'environment');
+          }
+        } catch {}
+        try { await window.setPreferredCamera?.(d.deviceId); } catch {}
+        refresh();
+      })));
+      // quick front/back preset
+      pop.appendChild(makeItem('Use Back Camera', async () => { try { await window.setPreferredFacing?.('environment'); } catch {} refresh(); }));
+      pop.appendChild(makeItem('Use Front Camera', async () => { try { await window.setPreferredFacing?.('user'); } catch {} refresh(); }));
+      root.appendChild(pop);
+      // auto-hide after 5s
+      setTimeout(() => { try { pop.remove(); } catch {}; pop = null; }, 5000);
+    } catch (e) { console.warn('[cam] picker failed', e); }
+  }
+
+  const clearTimer = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
+  btn.onmousedown = () => { clearTimer(); pressTimer = setTimeout(showPicker, 550); };
+  btn.onmouseup = () => { if (pressTimer) { clearTimer(); flip(); } };
+  btn.ontouchstart = () => { clearTimer(); pressTimer = setTimeout(showPicker, 550); };
+  btn.ontouchend = () => { if (pressTimer) { clearTimer(); flip(); } };
+}
+try { if (!window.mountCameraSwitcher) window.mountCameraSwitcher = mountCameraSwitcher; } catch {}
+
 /** Top-center session status line (“SESSION IN PROGRESS…”) */
 /** Bottom HUD bar (metrics + End Session) */
 export function mountSessionHUD() {
@@ -504,16 +636,16 @@ export function mountSessionHUD() {
       <button id="hudMute" class="vc-btn" title="Mute/Unmute">🔇</button>
 
       <div class="hud-metric" id="mShots"><div class="num">0/10</div><div class="label">Shots Taken</div></div>
-      <div class="hud-metric" id="mMakes"><div class="num">0</div><div class="label">Makes</div></div>
-      <div class="hud-metric" id="mAcc"><div class="num">0%</div><div class="label">Accuracy</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
 
       <button id="openSummaryBtn" class="hud-btn">Summary</button>
       <button id="startSessionHUD" class="hud-btn">Start Session</button>
       <button id="endSessionBtn" class="hud-btn">End Session</button>
-      <button id="mySessionsHUD" class="hud-btn">My Sessions</button>
     `;
     root.appendChild(bar);
+
+    // Do not auto-enable live tips by default; respect HUD mute and explicit user toggle elsewhere
+    try { if (typeof window.PREF_LIVE_TIPS === 'undefined') window.PREF_LIVE_TIPS = false; } catch {}
 
     const muteBtn = bar.querySelector('#hudMute');
 
@@ -564,14 +696,11 @@ export function mountSessionHUD() {
     const startBtn = bar.querySelector('#startSessionHUD');
     startBtn && startBtn.addEventListener('click', (e) => {
       e.stopPropagation();
+      try { if (!window.__sessionStart) window.__sessionStart = Date.now(); } catch {}
       window.dispatchEvent(new CustomEvent('hud:start-session'));
     });
 
-    const myBtn = bar.querySelector('#mySessionsHUD');
-    myBtn && myBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      try { window.open('/static/my_sessions.html','_blank'); } catch {}
-    });
+    // removed My Sessions from HUD (available in main menu)
 
     const summaryBtn = bar.querySelector('#openSummaryBtn');
     if (summaryBtn && !summaryBtn.__wired) {
@@ -584,6 +713,14 @@ export function mountSessionHUD() {
     }
   }
   return bar;
+}
+
+function resetSessionClockAndCount(){
+  try { window.__sessionStart = Date.now(); } catch {}
+  try { window.__HUD_SHOT_COUNT = 0; window.shotTaken = 0; } catch {}
+  try { window.__shotList = []; } catch {}
+  try { if (Array.isArray(window.shotLog)) window.shotLog.length = 0; } catch {}
+  try { updateSessionHUD({ taken: 0, elapsedSec: 0 }); } catch {}
 }
 
 
@@ -602,11 +739,56 @@ try { if (typeof window.updateSessionHUD !== "function") window.updateSessionHUD
   const elAcc   = $('mAcc');
   const elTime  = $('mTime');
 
+  // Prefer HUD-local running shot count when available
+  try {
+    const hudTaken = Number(window.shotTaken || window.__HUD_SHOT_COUNT || 0);
+    if (!taken || taken < hudTaken) taken = hudTaken;
+  } catch {}
   if (elShots) elShots.textContent = `${taken}/${SESSION_SIZE}`;
+  // Makes/Accuracy hidden in simplified HUD; keep code paths no-op for future use
   if (elMakes) elMakes.textContent = `${made}`;
   if (elAcc)   elAcc.textContent   = `${Math.round(accuracy)}%`;
   if (elTime)  elTime.textContent  = `${mm}:${ss}`;
 }
+
+// -------- Global voice cue helpers ---------
+try {
+  if (!window.speakShotNumber) {
+    window.speakShotNumber = function speakShotNumber(){
+      try {
+        const cap = Number(window.SESSION_SIZE || 10);
+        const cnt = Number(window.__HUD_SHOT_COUNT || window.shotTaken || 0);
+        speak(`You are on shot ${Math.max(0,cnt)} of ${cap}.`);
+      } catch {}
+    };
+  }
+  window.addEventListener('hud:start-session', () => {
+    try { resetSessionClockAndCount(); window.__sessionCapPrompted = false; } catch {}
+    try { speak('Start session. Shoot when ready.'); } catch {}
+  });
+  window.addEventListener('hud:end-session', () => {
+    try { window.__sessionCapPrompted = false; } catch {}
+    try { speak('Session ended.'); } catch {}
+  });
+  window.addEventListener('hud:pause-session', () => { try { speak('Session paused.'); } catch {} });
+  window.addEventListener('hud:continue-session', () => { try { speak('Continuing session.'); } catch {} });
+  window.addEventListener('hud:what-shot', () => { try { window.speakShotNumber?.(); } catch {} });
+} catch {}
+
+// Debug helper: inspect HUD + list quickly from console
+try {
+  if (typeof window.printHUDState !== 'function') {
+    window.printHUDState = function printHUDState(){
+      try {
+        const list = window.__shotList || [];
+        const last = list.at?.(-1) || null;
+        const el = document.querySelector('#sessionHUD #mShots .num');
+        console.log('[HUD]', { shotsInList: list.length, last, mShotsText: el?.textContent || null });
+        return { len: list.length, last, text: el?.textContent || null };
+      } catch (e) { console.warn('printHUDState failed', e); return null; }
+    };
+  }
+} catch {}
 
 // end session shot summary table
 function getShotList(){ return (window.__shotList ||= []); }
@@ -680,6 +862,17 @@ function renderFullShotTable() {
         </div>
       </td>`;
 
+    try {
+      if (s && s.pending === true) {
+        const setTxt = (cls, val) => { try { const el = tr.querySelector('.' + cls); if (el) el.textContent = val; } catch {} };
+        setTxt('result',  'pending');
+        setTxt('arc',     'pending');
+        setTxt('entry',   'pending');
+        setTxt('release', 'pending');
+        const coachEl = tr.querySelector('.coach');
+        if (coachEl && (!coachEl.textContent || coachEl.textContent === 'â€”')) coachEl.textContent = 'pending';
+      }
+    } catch {}
     tb.appendChild(tr);
   });
 
@@ -729,8 +922,17 @@ window.recordShotSummary = function recordShotSummary(summary) {
   if (!summary.doach && window.__lastCoachText) summary.doach = window.__lastCoachText;
 
   const list = (window.__shotList ||= []);
-  const idx  = list.push(summary);      // 1-based index
-  summary.__idx = idx;                  // keep the index on the object for later
+  let idx;
+  // If the last record is a pending release placeholder, finalize it
+  const last = list.at?.(-1) || null;
+  if (last && last.pending) {
+    Object.assign(last, summary, { pending: false });
+    idx = list.length;
+    summary.__idx = idx;
+  } else {
+    idx  = list.push(summary);      // 1-based index
+    summary.__idx = idx;            // keep the index on the object for later
+  }
 
   // If the full table is open, append this row now (properly marked up)
   const modal = document.getElementById('fullShotModal');
@@ -764,10 +966,47 @@ window.recordShotSummary = function recordShotSummary(summary) {
   const elapsedSec = Math.floor((Date.now() - start) / 1000);
   updateSessionHUD({ taken, made, accuracy: acc, elapsedSec });
 
-  // End-of-session
-  if (taken === SESSION_SIZE) {
-    renderFullShotTable(); 
-    wireFullShotModalActions(); 
+  // End-of-session prompt at 10 shots; allow end/new/continue
+  if (taken === SESSION_SIZE && !window.__sessionContinue && !window.__sessionCapPrompted) {
+    window.__sessionCapPrompted = true;
+    const root = ensureHudRoot();
+    let prompt = document.getElementById('endOrContinuePrompt');
+    if (!prompt) {
+      prompt = document.createElement('div');
+      prompt.id = 'endOrContinuePrompt';
+      prompt.className = 'hud-card';
+      Object.assign(prompt.style, {
+        position:'absolute', left:'50%', transform:'translateX(-50%)', bottom:'110px',
+        padding:'10px 12px', pointerEvents:'auto', zIndex:10020
+      });
+      prompt.innerHTML = `
+        <div style="margin-bottom:6px;font-weight:600">That was ${SESSION_SIZE} shots. End session, start new, or continue?</div>
+        <div style="display:flex;gap:8px;justify-content:center">
+          <button id="btnEndNow" class="vc-btn">End</button>
+          <button id="btnStartNew" class="vc-btn">Start New</button>
+          <button id="btnContinue" class="vc-btn">Continue</button>
+        </div>`;
+      root.appendChild(prompt);
+      prompt.querySelector('#btnEndNow').onclick = () => {
+        try { prompt.remove(); } catch {}
+        try { speak('Ending session.'); } catch {}
+        try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
+        try { renderFullShotTable(); wireFullShotModalActions(); } catch {}
+      };
+      const onStartNew = () => {
+        try { prompt.remove(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
+        try { resetSessionClockAndCount(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch {}
+        try { speak('Starting a new session. Shoot when ready.'); } catch {}
+      };
+      prompt.querySelector('#btnStartNew').onclick = onStartNew;
+      prompt.querySelector('#btnContinue').onclick = () => {
+        window.__sessionContinue = true;   // keep going; user will end manually
+        try { prompt.remove(); } catch {}
+        try { speak("Let's continue, keep shooting."); } catch {}
+      };
+    }
   }
 };
 
@@ -907,13 +1146,48 @@ export function initHUDForVideo(videoEl) {
   // keep HUD on top when playback state toggles
   videoEl?.addEventListener('play',  ensureHudRoot);
   videoEl?.addEventListener('pause', ensureHudRoot);
+  // Always ensure the bottom HUD is present for both uploads and live camera
+  try { mountSessionHUD(); } catch {}
+  try { setSessionStatus('SESSION IN PROGRESS…'); } catch {}
+
+  // Keep elapsed time ticking during session while HUD is mounted
+  try {
+    if (window.__hudTimeTimer) clearInterval(window.__hudTimeTimer);
+    window.__hudTimeTimer = setInterval(() => {
+      try {
+        const start = window.__sessionStart;
+        if (!start) return; // session not started yet
+        const list = (window.__shotList || window.shotLog || []);
+        const taken = Array.isArray(list) ? list.length : 0;
+        const elapsedSec = Math.floor((Date.now() - start) / 1000);
+        updateSessionHUD({ taken, elapsedSec });
+      } catch {}
+    }, 1000);
+  } catch {}
+
+  // Clear HUD time ticker when session ends
+  try {
+    window.addEventListener('hud:end-session', () => {
+      try { if (window.__hudTimeTimer) { clearInterval(window.__hudTimeTimer); window.__hudTimeTimer = null; } } catch {}
+    }, { once: false });
+  } catch {}
 
   // confirm hoop locker fires
-  window.addEventListener('hoop:locked', () => {
+window.addEventListener('hoop:locked', () => {
   window.__hoopConfirmed = true;      // <-- user has confirmed
   hidePromptMessage();
   clearInterval(window.__hoopPromptTimer);
   try { const v = document.getElementById('videoPlayer') || document.querySelector('video'); if (v) v.playbackRate = 1; } catch {}
+  // Only start countdown if not already armed and no countdown is active
+  try {
+    if (window.__shotTrackingArmed === true) return;
+    if (window.__armCountdownActive) return;
+    // Reset armed and announce countdown
+    window.__shotTrackingArmed = false;
+    try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec: 5 } })); } catch {}
+    try { speak(`Let's get started. Get into position and shoot when ready.`); } catch {}
+    startShotTrackingCountdown?.(5);
+  } catch {}
 });
 }
 
@@ -1012,6 +1286,30 @@ async function showCenterCountdownAndPrompt(sec = 5) {
   } catch {}
 }
 
+// After hoop lock: 5s countdown to arm shot tracking
+function startShotTrackingCountdown(sec = 5) {
+  try {
+    // Avoid double countdowns
+    if (window.__armCountdownActive) return; window.__armCountdownActive = true;
+    const el = showCenterPrompt('Get into position…');
+    const run = async () => {
+      for (let i = sec; i >= 1; i--) {
+        el.textContent = `Starting in ${i}…`;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      el.textContent = 'Shoot when ready';
+      setTimeout(hideCenterPrompt, 650);
+      window.__shotTrackingArmed = true;
+      try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
+      // try { speak('Shoot when ready.'); } catch {}
+      try { window.__releaseEventSent = false; } catch {}
+      window.__armCountdownActive = false;
+    };
+    run();
+  } catch {}
+}
+try { if (typeof window.startShotTrackingCountdown !== 'function') window.startShotTrackingCountdown = startShotTrackingCountdown; } catch {}
+
 (function installSlowFailsafe(){
   const v = document.querySelector('#videoPlayer') || document.querySelector('video');
   if (!v) return;
@@ -1052,6 +1350,106 @@ window.addEventListener('shot:summary', () => {
 });
 
 
+// --- Global HUD wiring for shot counters (independent of slow-mo arbiter) ---
+(function wireHudShotCounters(){
+  if (window.__HudShotCountersWired) return; window.__HudShotCountersWired = true;
+
+  const onRelease = (e) => {
+    try {
+      // Require hoop locked/confirmed and armed (post-countdown)
+      if (window.__hoopConfirmed !== true) return;
+      if (!window.getLockedHoopBox?.()) return;
+      if (window.__shotTrackingArmed !== true) return;
+
+      // UI cooldown to avoid duplicate counts from multiple emitters
+      const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
+      const now = performance.now();
+      const lastUiMs = Number(window.__UI_LAST_RELEASE_MS || 0);
+      if (now - lastUiMs < unlockMs) return;
+
+      // Trust upstream latch; UI enforces only armed + hoop + cooldown
+
+      const list = (window.__shotList ||= []);
+      const rf = Number(e?.detail?.frame || 0);
+      const last = list.at?.(-1) || null;
+      const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
+      if (!same) {
+        const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+          ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+          : null;
+        list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
+      }
+      window.__UI_LAST_RELEASE_MS = now;
+      const taken = list.length;
+      const start = (window.__sessionStart ||= Date.now());
+      const elapsedSec = Math.floor((Date.now() - start) / 1000);
+      window.mountSessionHUD?.();
+      window.updateSessionHUD?.({ taken, elapsedSec });
+      window.setSessionStatus?.('Shot ' + taken + ' in progress');
+    } catch {}
+  };
+  window.addEventListener('shot:release', onRelease);
+
+  // Also increment HUD on gate score trips (from overlay/app sampler),
+  // so Shots Taken reflects pose releases even if a release event was swallowed.
+  // This is visual/log-only; summaries still come from the scorer.
+  window.addEventListener('hud:score-trip', (e) => {
+    try {
+      const list = (window.__shotList ||= []);
+      // Prefer frame from event; fallback to latest sampler index or RELEASE_SCORE
+      let rf = Number(e?.detail?.frame);
+      if (!Number.isFinite(rf)) rf = Number(window.__AN_IDX);
+      if (!Number.isFinite(rf)) rf = Number(window.RELEASE_SCORE?.frame);
+      if (!Number.isFinite(rf)) rf = 0;
+
+      const last = list.at?.(-1) || null;
+      const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
+      if (same) return;
+
+      const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+        ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+        : null;
+      list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap, via: 'score-trip' });
+
+      const taken = list.length;
+      const start = (window.__sessionStart ||= Date.now());
+      const elapsedSec = Math.floor((Date.now() - start) / 1000);
+      window.mountSessionHUD?.();
+      window.updateSessionHUD?.({ taken, elapsedSec });
+      window.setSessionStatus?.('Shot ' + taken + ' in progress');
+      if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:add-pending:score-trip]', { frame: rf, len: taken });
+
+      // If the full table is open, refresh so the new row appears as "pending"
+      try {
+        const modal = document.getElementById('fullShotModal');
+        if (modal && modal.style.display === 'block') { renderFullShotTable(); wireFullShotModalActions(); }
+      } catch {}
+    } catch (err) { if (window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:score-trip:error]', err); }
+  });
+
+  // Live update the bottom HUD when HUD shot counter changes
+  window.addEventListener('hud:shot-taken', (e) => {
+    try {
+      const cnt = Number(e?.detail?.count || window.shotTaken || window.__HUD_SHOT_COUNT || 0);
+      const start = (window.__sessionStart ||= Date.now());
+      const elapsedSec = Math.floor((Date.now() - start) / 1000);
+      window.updateSessionHUD?.({ taken: cnt, elapsedSec });
+      if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:update:mShots]', { taken: cnt });
+      // Show the cap prompt as soon as the counter reaches the session size (summary may lag)
+      try {
+        const cap = Number(window.SESSION_SIZE || 10);
+        if (cnt >= cap && !window.__sessionCapPrompted) {
+          window.__sessionCapPrompted = true;
+          // Reuse the same prompt renderer as the summary path
+          const evt = new Event('doach:show-cap-prompt');
+          window.dispatchEvent(evt);
+        }
+      } catch {}
+    } catch {}
+  });
+})();
+
+
 
 window.showCenterPrompt = showCenterPrompt;
 
@@ -1070,7 +1468,7 @@ window.showCenterPrompt = showCenterPrompt;
       const people = res?.landmarks || [];
       const ls = (Array.isArray(people) && Array.isArray(people[0]) && people[0].length >= 33) ? people[0] : null;
       if (!ls) return;
-      const looksNorm = ls.every(k=>k && k.x <= 1.01 && k.y <= 1.01);
+      const looksNorm = ls.every(k=>k && k.x <= 1.00 && k.y <= 1.00);
       const sx = looksNorm ? (v.videoWidth  || 1) : 1;
       const sy = looksNorm ? (v.videoHeight || 1) : 1;
       const scaled = ls.map(k=>({ ...k, x: k.x * sx, y: k.y * sy }));

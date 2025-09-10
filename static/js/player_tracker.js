@@ -242,58 +242,67 @@ export function isPoseInReleasePosition(pose) {
   return passed >= 2;
 }
 
-// Robust pose release scorer (0..1). Combines posture + short-term trend.
-export function poseReleaseScore(pose, hist = []) {
-  const k = pose?.keypoints || pose; if (!Array.isArray(k) || k.length < 33) return { score: 0, tests: {} };
-  const sh = k[LANDMARKS.RIGHT_SHOULDER], el = k[LANDMARKS.RIGHT_ELBOW], wr = k[LANDMARKS.RIGHT_WRIST];
-  if (!isVisible(sh) || !isVisible(el) || !isVisible(wr)) return { score: 0, tests: { visible: false } };
+// // Robust pose release scorer (0..1). Combines posture + short-term trend.
+// export function poseReleaseScore(pose, hist = []) {
+//   const k = pose?.keypoints || pose; if (!Array.isArray(k) || k.length < 33) return { score: 0, tests: {} };
 
-  const yTol = Number(window.REL_Y_TOL || 12);
-  const wristAboveElbow = wr.y < (el.y - yTol);
+//   function scoreSide(side) {
+//     const isRight = (side === 'R');
+//     const S = isRight ? LANDMARKS.RIGHT_SHOULDER : LANDMARKS.LEFT_SHOULDER;
+//     const E = isRight ? LANDMARKS.RIGHT_ELBOW    : LANDMARKS.LEFT_ELBOW;
+//     const W = isRight ? LANDMARKS.RIGHT_WRIST    : LANDMARKS.LEFT_WRIST;
+//     const sh = k[S], el = k[E], wr = k[W];
+//     if (!isVisible(sh) || !isVisible(el) || !isVisible(wr)) return { score: 0, tests: { visible: false, side } };
 
-  // Elbow extension ~180 deg indicates near-straight arm
-  const elbowAngleDeg = (() => {
-    const v1x = sh.x - el.x, v1y = sh.y - el.y;
-    const v2x = wr.x - el.x, v2y = wr.y - el.y;
-    const dot = (v1x*v2x + v1y*v2y);
-    const den = (Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y) + 1e-6);
-    const a = Math.acos(Math.max(-1, Math.min(1, dot/den))) * 180 / Math.PI;
-    return 180 - a; // 180 => straight
-  })();
-  const elbowExtended = elbowAngleDeg >= Number(window.REL_ELBOW_EXT_MIN || 155);
+//     const yTol = Number(window.REL_Y_TOL);
+//     const wristAboveElbow = wr.y < (el.y - yTol);
 
-  const dx = Math.abs(wr.x - sh.x), dy = Math.abs(sh.y - wr.y);
-  const nearlyVertical = (dx < Number(window.REL_DX_MAX || 90)) && (dy > Number(window.REL_DY_MIN || 18));
-  const dSE = Math.hypot(el.x - sh.x, el.y - sh.y);
-  const dSW = Math.hypot(wr.x - sh.x, wr.y - sh.y);
-  const armExtended = dSW > (dSE + Number(window.REL_EXT_MARGIN || 10));
+//     const elbowAngleDeg = (() => {
+//       const v1x = sh.x - el.x, v1y = sh.y - el.y;
+//       const v2x = wr.x - el.x, v2y = wr.y - el.y;
+//       const dot = (v1x*v2x + v1y*v2y);
+//       const den = (Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y) + 1e-6);
+//       const a = Math.acos(Math.max(-1, Math.min(1, dot/den))) * 180 / Math.PI;
+//       return a;
+//     })();
+//     const elbowExtended = elbowAngleDeg >= Number(window.REL_ELBOW_EXT_MIN);
 
-  // Upward wrist trend from the short history
-  const h = Array.isArray(hist) ? hist.slice(-3) : [];
-  let wristUp = false;
-  try {
-    if (h.length >= 2) {
-      const w0 = h[h.length-2]?.keypoints?.[LANDMARKS.RIGHT_WRIST]?.y;
-      const w1 = h[h.length-1]?.keypoints?.[LANDMARKS.RIGHT_WRIST]?.y;
-      if (Number.isFinite(w0) && Number.isFinite(w1)) wristUp = (w1 < (w0 - Number(window.REL_UP_DY || 6)));
-    }
-  } catch {}
+//     const dx = Math.abs(wr.x - sh.x), dy = Math.abs(sh.y - wr.y);
+//     const nearlyVertical = (dx < Number(window.REL_DX_MAX)) && (dy > Number(window.REL_DY_MIN));
+//     const dSE = Math.hypot(el.x - sh.x, el.y - sh.y);
+//     const dSW = Math.hypot(wr.x - sh.x, wr.y - sh.y);
+//     const armExtended = dSW > (dSE + Number(window.REL_EXT_MARGIN));
 
-  const wA = Number(window.REL_W_WRIST || 0.30);
-  const wB = Number(window.REL_W_ELBOW || 0.30);
-  const wC = Number(window.REL_W_ALIGN || 0.20);
-  const wD = Number(window.REL_W_UPTREND || 0.20);
-  let s = 0;
-  s += wristAboveElbow ? wA : 0;
-  s += elbowExtended   ? wB : 0;
-  s += (nearlyVertical || armExtended) ? wC : 0;
-  s += wristUp ? wD : 0;
+//     // Upward wrist trend from the short history (matching wrist index)
+//     const h = Array.isArray(hist) ? hist.slice(-3) : [];
+//     let wristUp = false;
+//     try {
+//       if (h.length >= 2) {
+//         const w0 = h[h.length-2]?.keypoints?.[W]?.y;
+//         const w1 = h[h.length-1]?.keypoints?.[W]?.y;
+//         if (Number.isFinite(w0) && Number.isFinite(w1)) wristUp = (w1 < (w0 - Number(window.REL_UP_DY)));
+//       }
+//     } catch {}
 
-  const tests = { wristAboveElbow, elbowExtended, nearlyVertical, armExtended, wristUp, elbowAngleDeg, dx, dy, dSW, dSE };
-  return { score: Math.max(0, Math.min(1, s)), tests };
-}
+//     const wA = Number(window.REL_W_WRIST || 0.30);
+//     const wB = Number(window.REL_W_ELBOW || 0.30);
+//     const wC = Number(window.REL_W_ALIGN || 0.20);
+//     const wD = Number(window.REL_W_UPTREND || 0.20);
+//     let s = 0;
+//     s += wristAboveElbow ? wA : 0;
+//     s += elbowExtended   ? wB : 0;
+//     s += (nearlyVertical || armExtended) ? wC : 0;
+//     s += wristUp ? wD : 0;
 
-try { window.poseReleaseScore = window.poseReleaseScore || poseReleaseScore; } catch {}
+//     const tests = { side, wristAboveElbow, elbowExtended, nearlyVertical, armExtended, wristUp, elbowAngleDeg, dx, dy, dSW, dSE };
+//     return { score: Math.max(0, Math.min(1, s)), tests };
+//   }
+
+//   const r = scoreSide('R');
+//   const l = scoreSide('L');
+//   const best = (l.score > r.score) ? l : r;
+//   return best;
+// }
 
 try {
   window.isPoseReleaseLikely = window.isPoseReleaseLikely || isPoseReleaseLikely;

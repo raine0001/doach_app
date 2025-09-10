@@ -89,6 +89,22 @@ import { ensureHudRoot } from '/static/js/video_ui.js';
         // Live session: keep user playback at 1x; analyze in background (analyzer.js)
         try { const v = document.getElementById('videoPlayer'); if (v) v.playbackRate = 1; } catch {}
         if (!rec) startRecorder();
+        // Ignore before hoop lock in demo mode
+        try { if (window.__hoopConfirmed !== true || !window.getLockedHoopBox?.()) return; } catch {}
+        // Gate demo HUD attempt increments to "all four" pose checks + cooldown
+        try {
+          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
+          const now = performance.now();
+          const last = Number(window.__UI_LAST_RELEASE_MS || 0);
+          if (now - last < unlockMs) return; // cooldown: ignore rapid repeats
+          const hist = (window.playerState?.frameHistory || []).slice(-5);
+          let ok = false;
+          if (typeof window.releaseGate === 'function') {
+            try { ok = !!window.releaseGate(hist)?.released; } catch {}
+          }
+          if (!ok) return; // don't increment HUD attempts unless gate says released
+          window.__UI_LAST_RELEASE_MS = now;
+        } catch {}
         // Report to backend immediately (authoritative release anchor)
         try {
           const d = (e && e.detail) || {};
@@ -111,6 +127,7 @@ import { ensureHudRoot } from '/static/js/video_ui.js';
           const start = (window.__sessionStart ||= Date.now());
           const elapsedSec = Math.floor((Date.now() - start) / 1000);
           window.updateSessionHUD?.({ taken: list.length + 1, made, accuracy: acc, elapsedSec });
+          try { console.log('[HUD:demo-increment]', { len: list.length + 1 }); } catch {}
         } catch {}
         try { window.setSessionStatus?.(`Shot ${shotIdx+1} in progress…`); } catch {}
       };

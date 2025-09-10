@@ -16,7 +16,25 @@
   window.DEBUG_FORCE_SESSION_ACTIVE = true
   window.POSE_DEBUG = true; window.DOACH_RELEASE_TRACE = true
   window.REL_SCORE_THRESH = 0.55
+  PREF_LIVE_TIPS = true
   </script>  <!-- end debug flags -->
+
+  <!-- Early global guard: swallow pre-hoop or unstable pose releases -->
+  <script>
+    (function installEarlyReleaseGuard(){
+      try {
+        if (window.__earlyRelGuard) return; window.__earlyRelGuard = true;
+        window.addEventListener('shot:release', (e) => {
+          try {
+            const hoopLocked = !!(window.getLockedHoopBox && window.getLockedHoopBox());
+            const confirmed  = (window.__hoopConfirmed === true);
+            const armed      = (window.__shotTrackingArmed === true);
+            if (!hoopLocked || !confirmed || !armed) { e.stopImmediatePropagation(); return; }
+          } catch {}
+        }, true);
+      } catch {}
+    })();
+  </script>
 
   <!-- Core app/scripts (load each ONCE) -->
   <script src="/static/js/coachAssistant.js"></script>
@@ -297,4 +315,3 @@
 
 </body>
 </html>
-
