@@ -338,6 +338,177 @@ window.setOverlayClickable = setOverlayClickable;
 // ------------------------------------------------------//
 // Core function for rendering overlays — single pixel space (video pixels), no jitter
 // Core function for rendering overlays — single pixel space (VIDEO pixels)
+
+// Draw release-gate math HUD (shoulder/elbow/wrist, thresholds, and test values)
+function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
+  try {
+    const show = (window.SHOW_POSE_MATH === true) || (window.DOACH_RELEASE_TRACE === true);
+    if (!show) return;
+    // Resolve latest keypoints (prefer current, fall back to last)
+    let kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length) ? playerState.keypoints : null;
+    if (!kps) {
+      const lastTS = Number(window.__lastPoseTS || 0);
+      const holdMs = Number.isFinite(window.POSE_HOLD_MS) ? Number(window.POSE_HOLD_MS) : (window.__SESSION_ACTIVE ? 12000 : 2000);
+      if (window.__lastPoseKP && (!lastTS || (performance.now() - lastTS) < holdMs)) kps = window.__lastPoseKP;
+    }
+    if (!Array.isArray(kps) || kps.length < 33) return;
+
+    // Pick side from last gate if available
+    const side = (window.__LAST_GATE?.detail?.tests?.side === 'L') ? 'L' : 'R';
+    const S = (side === 'L') ? 11 : 12;
+    const E = (side === 'L') ? 13 : 14;
+    const W = (side === 'L') ? 15 : 16;
+    const sh = kps[S], el = kps[E], wr = kps[W];
+    const yTol = Number(window.REL_Y_TOL || 12);
+    const ySh  = Number(window.REL_SH_Y_TOL || 8);
+
+    const wristAboveElbow    = (wr && el) ? (wr.y < (el.y - yTol)) : false;
+    const wristAboveShoulder = (wr && sh) ? (wr.y < (sh.y - ySh)) : false;
+    let elbowAngleDeg = 0, elbowExtended = false;
+    if (sh && el && wr) {
+      const v1x = sh.x - el.x, v1y = sh.y - el.y;
+      const v2x = wr.x - el.x, v2y = wr.y - el.y;
+      const dot = (v1x*v2x + v1y*v2y);
+      const den = (Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y) + 1e-6);
+      const a = Math.acos(Math.max(-1, Math.min(1, dot/den))) * 180 / Math.PI;
+      // 180° = fully straight
+      elbowAngleDeg = a;
+      elbowExtended = elbowAngleDeg >= Number(window.REL_ELBOW_EXT_MIN || 155);
+    }
+    const dx = Math.abs((wr?.x ?? 0) - (sh?.x ?? 0));
+    const dy = Math.abs((sh?.y ?? 0) - (wr?.y ?? 0));
+    const nearlyVertical = (dx < Number(window.REL_DX_MAX || 90)) && (dy > Number(window.REL_DY_MIN || 18));
+    const dSE = Math.hypot((el?.x ?? 0) - (sh?.x ?? 0), (el?.y ?? 0) - (sh?.y ?? 0));
+    const dSW = Math.hypot((wr?.x ?? 0) - (sh?.x ?? 0), (wr?.y ?? 0) - (sh?.y ?? 0));
+    const armExtended = dSW > (dSE + Number(window.REL_EXT_MARGIN || 10));
+    const alignOK = nearlyVertical || armExtended;
+    const strictOK = (elbowAngleDeg >= (window.REL_ELBOW_STRICT_MIN || 165)) && wristAboveShoulder;
+
+    // Draw
+    const hair = 1 / Math.min(sx, sy);
+    ctx.save();
+    ctx.lineWidth = Math.max(2 * hair, 1.5);
+    if (sh && el) { ctx.strokeStyle = '#00C8FF'; ctx.beginPath(); ctx.moveTo(sh.x, sh.y); ctx.lineTo(el.x, el.y); ctx.stroke(); }
+    if (el && wr) { ctx.strokeStyle = '#FFA500'; ctx.beginPath(); ctx.moveTo(el.x, el.y); ctx.lineTo(wr.x, wr.y); ctx.stroke(); }
+    if (Number.isFinite(el?.y)) {
+      ctx.strokeStyle = wristAboveElbow ? 'rgba(0,200,0,0.9)' : 'rgba(255,0,0,0.9)';
+      const yLineEl = (el.y - yTol);
+      ctx.beginPath(); ctx.moveTo(0, yLineEl); ctx.lineTo(vw, yLineEl); ctx.stroke();
+    }
+    if (Number.isFinite(sh?.y)) {
+      ctx.strokeStyle = 'rgba(0,150,255,0.9)';
+      const yLineSh = (sh.y - ySh);
+      ctx.beginPath(); ctx.moveTo(0, yLineSh); ctx.lineTo(vw, yLineSh); ctx.stroke();
+    }
+    const r = Math.max(4 * hair, 3);
+    const dot = (p, color) => { if (!p) return; ctx.beginPath(); ctx.fillStyle = color; ctx.arc(p.x, p.y, r, 0, Math.PI*2); ctx.fill(); };
+    dot(sh, '#00C8FF'); dot(el, elbowExtended ? '#00FF88' : '#FF0066'); dot(wr, wristAboveElbow ? '#00FF88' : '#FF0066');
+    ctx.restore();
+
+    // HUD panel
+    ctx.save();
+    const x0 = vw - Math.max(260, 220) * hair;
+    const y0 = 10 / hair;
+    ctx.font = `${Math.max(11*hair, 10)}px system-ui`;
+    ctx.textBaseline = 'top';
+    ctx.fillStyle = 'rgba(0,0,0,0.55)';
+    ctx.fillRect(x0 - 6*hair, y0 - 4*hair, 260*hair, 128*hair);
+    const line = (txt, ok) => { ctx.fillStyle = ok===true ? '#7CFC00' : ok===false ? '#FF6347' : '#FFFFFF'; ctx.fillText(txt, x0, (drawPoseMathHUD._i++ * 14*hair) + y0); };
+    drawPoseMathHUD._i = 0;
+    ctx.fillStyle = '#FFFFFF'; ctx.fillText('Release Gate', x0, (drawPoseMathHUD._i++ * 14*hair) + y0);
+    line(`side: ${side==='L'?'Left':'Right'}`, true);
+    line(`wristAboveShoulder: ${wristAboveShoulder?'✓':'✗'}  wr.y < sh.y - ${ySh}`, wristAboveShoulder);
+    line(`wristAboveElbow: ${wristAboveElbow?'✓':'✗'}  wr.y < el.y - ${yTol}`, wristAboveElbow);
+    line(`elbowExtended: ${elbowExtended?'✓':'✗'}  ${Math.round(elbowAngleDeg)}° ≥ ${window.REL_ELBOW_EXT_MIN}°`, elbowExtended);
+    line(`strict: angle≥${window.REL_ELBOW_STRICT_MIN}° & wr>sh ${strictOK?'✓':'✗'}`, strictOK);
+    line(`align: ${(alignOK?'✓':'✗')}  dx=${dx|0} dy=${dy|0}`, alignOK);
+    // Compute live gate/score for HUD. Prefer __LAST_GATE (set each tick by the sampler) to avoid drift.
+    let score = 0, th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH);
+    try {
+      const last = (window.__LAST_GATE && window.__LAST_GATE.detail && window.__LAST_GATE.detail.tests) ? window.__LAST_GATE.detail.tests : null;
+      if (last && typeof last.score !== 'undefined') {
+        score = Number(last.score || 0);
+        if (window.DOACH_RELEASE_TRACE === true) {
+          try { console.log('[HUD:gate:last]', { frame: window.__LAST_GATE?.detail?.frame, score, th, tests: last }); } catch {}
+        }
+      } else {
+        const base = (window.playerState?.frameHistory || []).slice(-5);
+        const hist = base.length ? base : (Array.isArray(kps) && kps.length >= 33 ? [{ keypoints: kps }] : []);
+        if (typeof window.releaseGate === 'function') {
+          const g = window.releaseGate(hist) || { tests:{} };
+          score = Number(g?.tests?.score || 0);
+          if (window.DOACH_RELEASE_TRACE === true) {
+            try {
+              const lastF = hist.at?.(-1)?.frame ?? null;
+              console.log('[HUD:gate]', { frame:lastF, score, th, tests: g.tests||{}, reason: g.reason, released: g.released, histLen: hist.length });
+            } catch {}
+          }
+        }
+      }
+    } catch (e) {
+      try { if (window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:gate:error]', e); } catch {}
+    }
+
+    // As a final fallback for display only, compute score directly from current booleans
+    try {
+      if (!(score > 0)) {
+        const useUp = (window.REL_SCORE_USE_UPTREND === true);
+        const norm = (x,d)=>{ const n=Number(x); return (Number.isFinite(n)&&n>=0)?n:d; };
+        const cfgW = (window.REL_CFG && window.REL_CFG.weights) || {};
+        const wA = norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A), 0.26);
+        const wB = norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B), 0.26);
+        const wC = norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C), 0.26);
+        const wDsrc = useUp
+          ? (cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D)
+          : (cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D);
+        const wD = norm(wDsrc, 0.26);
+        const sLocal =
+          (wristAboveElbow ? wA : 0) +
+          (elbowExtended   ? wB : 0) +
+          (alignOK         ? wC : 0) +
+          ((useUp ? wristUpTrend : wristAboveShoulder) ? wD : 0);
+        if (Number.isFinite(sLocal)) {
+          score = Math.max(score, sLocal);
+          if (window.DOACH_RELEASE_TRACE === true) {
+            try { console.log('[HUD:score-local]', { score: +sLocal.toFixed?.(3), useUp, wA, wB, wC, wD }); } catch {}
+          }
+        }
+      }
+    } catch {}
+    line(`score: ${(score||0).toFixed(2)} (≥${th})`, (score||0) >= th);
+
+    // Shot count (HUD-local): increment on score trip with a simple cooldown
+    try {
+      const tripTh = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+      const cdMs   = Number(window.HUD_SHOT_COOLDOWN_MS ?? 3000);  // cooldown between releases to avoid double-count
+      const nowMs  = performance.now();
+      const lastMs = Number(window.__HUD_LAST_SHOT_MS || 0);
+      if (Number(score) >= tripTh - 1e-6 && (nowMs - lastMs >= cdMs)) {
+        window.__HUD_SHOT_COUNT = (window.__HUD_SHOT_COUNT || 0) + 1;
+        window.__HUD_LAST_SHOT_MS = nowMs;
+        try { window.shotTaken = Number(window.__HUD_SHOT_COUNT); } catch {}
+        try { window.dispatchEvent(new CustomEvent('hud:shot-taken', { detail: { count: Number(window.__HUD_SHOT_COUNT) } })); } catch {}
+        // Optional center prompt for this tally
+        try {
+          const msg = `Shot ${window.__HUD_SHOT_COUNT}`;
+          if (typeof window.showCenterPrompt === 'function') {
+            window.showCenterPrompt(msg);
+            setTimeout(() => { try { const el = document.getElementById('overlayPrompt'); if (el) el.style.display = 'none'; } catch {} }, 900);
+          }
+        } catch {}
+        if (window.DOACH_RELEASE_TRACE === true) {
+          try { console.log('[HUD:shot-count]', { count: window.__HUD_SHOT_COUNT, th: tripTh, score: Number(score).toFixed?.(3) }); } catch {}
+        }
+      }
+    } catch {}
+    const shotsTaken = Number(window.__HUD_SHOT_COUNT || 0);
+    line(`shot made: ${shotsTaken}`, shotsTaken > 0);
+    // keep HUD minimal to the core indicators (no extra trend line)
+    if (window.__LAST_GATE?.latched) { ctx.fillStyle = '#00FF88'; ctx.fillText('LATCHED', x0, (drawPoseMathHUD._i++ * 14*hair) + y0); }
+    ctx.restore();
+  } catch {}
+}
+
 export function drawLiveOverlay(objects = [], playerState) {
   const video   = document.getElementById('videoPlayer');
   const overlay = document.getElementById('overlay');
@@ -424,100 +595,8 @@ export function drawLiveOverlay(objects = [], playerState) {
     }
   } catch {}
 
-  // ---- Pose math HUD (release gate) ----
-  try {
-    const showMath = (window.SHOW_POSE_MATH === true) || (window.DOACH_RELEASE_TRACE === true);
-    if (showMath) {
-      // Resolve latest keypoints (prefer current, fall back to last)
-      let kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length) ? playerState.keypoints : null;
-      if (!kps) {
-        const lastTS = Number(window.__lastPoseTS || 0);
-        const holdMs = Number.isFinite(window.POSE_HOLD_MS) ? Number(window.POSE_HOLD_MS) : (window.__SESSION_ACTIVE ? 12000 : 2000);
-        if (window.__lastPoseKP && (!lastTS || (performance.now() - lastTS) < holdMs)) {
-          kps = window.__lastPoseKP;
-        }
-      }
-      if (Array.isArray(kps) && kps.length >= 33) {
-        const S=12, E=14, W=16;
-        const sh = kps[S], el = kps[E], wr = kps[W];
-        const yTol = Number(window.REL_Y_TOL || 12);
-        // Calculate metrics
-        const wristAboveElbow = (wr && el) ? (wr.y < (el.y - yTol)) : false;
-        let elbowAngleDeg = 0; let elbowExtended = false;
-        if (sh && el && wr) {
-          const v1x = sh.x - el.x, v1y = sh.y - el.y;
-          const v2x = wr.x - el.x, v2y = wr.y - el.y;
-          const dot = (v1x*v2x + v1y*v2y);
-          const den = (Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y)+1e-6);
-          const a = Math.acos(Math.max(-1,Math.min(1,dot/den))) * 180/Math.PI;
-          elbowAngleDeg = 180 - a;
-          elbowExtended = elbowAngleDeg >= Number(window.REL_ELBOW_EXT_MIN || 155);
-        }
-        const dx = Math.abs((wr?.x ?? 0) - (sh?.x ?? 0));
-        const dy = Math.abs((sh?.y ?? 0) - (wr?.y ?? 0));
-        const nearlyVertical = (dx < Number(window.REL_DX_MAX || 90)) && (dy > Number(window.REL_DY_MIN || 18));
-        const dSE = Math.hypot((el?.x ?? 0) - (sh?.x ?? 0), (el?.y ?? 0) - (sh?.y ?? 0));
-        const dSW = Math.hypot((wr?.x ?? 0) - (sh?.x ?? 0), (wr?.y ?? 0) - (sh?.y ?? 0));
-        const armExtended = dSW > (dSE + Number(window.REL_EXT_MARGIN || 10));
-        const alignOK = nearlyVertical || armExtended;
-        // Uptrend from recent frames
-        let up = false;
-        try {
-          const hist = (window.playerState?.frameHistory || []).slice(-3);
-          if (hist.length >= 2) {
-            const w0 = hist[hist.length-2]?.keypoints?.[W]?.y;
-            const w1 = hist[hist.length-1]?.keypoints?.[W]?.y;
-            if (Number.isFinite(w0) && Number.isFinite(w1)) up = (w1 < (w0 - Number(window.REL_UP_DY || 6)));
-          }
-        } catch {}
-
-        // Pull latest gate record if present (for score and decision)
-        const G = window.__LAST_GATE || null;
-        const latched = !!G?.latched;
-        const score = Number(G?.detail?.tests?.score ?? 0);
-
-        // Draw visuals: joints and elbow threshold line
-        ctx.save();
-        const lineW = Math.max(2 * hair, 1.5);
-        ctx.lineWidth = lineW;
-        // Shoulder→Elbow and Elbow→Wrist
-        if (sh && el) { ctx.strokeStyle = '#00C8FF'; ctx.beginPath(); ctx.moveTo(sh.x, sh.y); ctx.lineTo(el.x, el.y); ctx.stroke(); }
-        if (el && wr) { ctx.strokeStyle = '#FFA500'; ctx.beginPath(); ctx.moveTo(el.x, el.y); ctx.lineTo(wr.x, wr.y); ctx.stroke(); }
-        // Threshold line: y = el.y - yTol (wrist must be above)
-        if (Number.isFinite(el?.y)) {
-          ctx.strokeStyle = wristAboveElbow ? 'rgba(0,200,0,0.9)' : 'rgba(255,0,0,0.9)';
-          const yLine = (el.y - yTol);
-          ctx.beginPath(); ctx.moveTo(0, yLine); ctx.lineTo(vw, yLine); ctx.stroke();
-        }
-        // Mark joints
-        const r = Math.max(4 * hair, 3);
-        function dot(p, color){ if (!p) return; ctx.beginPath(); ctx.fillStyle=color; ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.fill(); }
-        dot(sh, '#00C8FF'); dot(el, elbowExtended ? '#00FF88' : '#FF0066'); dot(wr, wristAboveElbow ? '#00FF88' : '#FF0066');
-        ctx.restore();
-
-        // Text HUD (top-right)
-        ctx.save();
-        const pad = 6 * hair;
-        const x0 = vw - Math.max(260, 220) * hair;
-        const y0 = 10 / hair;
-        const font = `${Math.max(11*hair, 10)}px system-ui`;
-        ctx.font = font; ctx.textBaseline = 'top';
-        const bg = 'rgba(0,0,0,0.55)';
-        ctx.fillStyle = bg;
-        ctx.fillRect(x0 - 6*hair, y0 - 4*hair, 250*hair, 110*hair);
-        function line(txt, ok){ ctx.fillStyle = ok===true ? '#7CFC00' : ok===false ? '#FF6347' : '#FFFFFF'; ctx.fillText(txt, x0, y0 + (line.i++)*14*hair); }
-        line.i = 0;
-        ctx.fillStyle = '#FFFFFF'; ctx.fillText('Release Gate', x0, y0 + (line.i++)*14*hair);
-        line(`wristAboveElbow: ${wristAboveElbow? '✓':'✗'}  wr.y < el.y - ${yTol}`, wristAboveElbow);
-        line(`elbowExtended:  ${elbowExtended? '✓':'✗'}  ${Math.round(elbowAngleDeg)}° ≥ ${window.REL_ELBOW_EXT_MIN||155}°`, elbowExtended);
-        line(`align vert/extended: ${(alignOK?'✓':'✗')}  dx=${dx|0} dy=${dy|0}`, alignOK);
-        line(`wristUpTrend:   ${up?'✓':'✗'}`, up);
-        line(`score: ${(score||0).toFixed(2)} (≥${(window.REL_SCORE_THRESH||0.42)})`, (score||0) >= (window.REL_SCORE_THRESH||0.42));
-        if (latched) { ctx.fillStyle = '#00FF88'; ctx.fillText('LATCHED', x0, y0 + (line.i++)*14*hair); }
-        ctx.restore();
-      }
-    }
-  } catch {}
+  // Pose math HUD (release gate)
+  drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy);
 
   // Coach mode: show only hoop marker and pose skeleton (no ball arcs/trails/objects)
   try { window.__lastOverlayPaintAt = performance.now(); } catch {}
@@ -568,6 +647,8 @@ export function drawLiveOverlay(objects = [], playerState) {
         }
       }
     } catch {}
+    // Re-draw HUD after coach clear
+    drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy);
     return;
   }
 
@@ -703,6 +784,112 @@ export function drawLiveOverlay(objects = [], playerState) {
   try { drawShotTubeDebug?.(ctx); } catch {}
   try { drawBallArc?.(ctx); } catch {}          // draw the arc dots + line
   try { if ((window.PREF_SHOW?.trails) !== false) drawBallTrails?.(ctx); } catch {}
+
+  // ——— Score trigger HUD pulse (diagnostic): show "Shot N" when score trips ———
+  try {
+    const th = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+    // Prefer the sampler-computed gate snapshot (__LAST_GATE), then fall back to a fresh call
+    let scoreNow = null, frameNow = null, testsNow = null;
+    try {
+      const lg = window.__LAST_GATE;
+      if (lg && lg.detail && lg.detail.tests) {
+        scoreNow = Number(lg.detail.tests.score || 0);
+        frameNow = Number(lg.detail.frame || 0);
+        testsNow = lg.detail.tests || null;
+      }
+    } catch {}
+    if (scoreNow == null || !Number.isFinite(scoreNow)) {
+      if (typeof window.releaseGate === 'function') {
+        const hist = (window.playerState?.frameHistory || []).slice(-5);
+        const g = window.releaseGate(hist) || { tests:{} };
+        scoreNow = Number(g.tests?.score || 0);
+        frameNow = Number(hist.at?.(-1)?.frame || 0);
+        testsNow = g.tests || null;
+      }
+    }
+    // Publish a single global snapshot for any consumers (HUD, table, etc.)
+    try { window.RELEASE_SCORE = { t: performance.now(), frame: frameNow, score: scoreNow, tests: testsNow }; } catch {}
+    // Rising-edge detection by frame; do not require armed/hoop for the visual pulse
+    if (Number.isFinite(scoreNow)) {
+      const ok = (scoreNow >= th - 1e-6);
+      const lastF = Number(window.__SCORE_LAST_FRAME || -1);
+      const nowMs = performance.now();
+      const lastMs = Number(window.__SCORE_LAST_MS || 0);
+      const timeEdge = (nowMs - lastMs) > Math.max(280, Number(window.SCORE_PULSE_MIN_GAP_MS || 350));
+      if (ok && (frameNow !== lastF || timeEdge)) {
+        window.__SCORE_LAST_FRAME = frameNow;
+        window.__SCORE_LAST_MS = nowMs;
+        const n = (window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1);
+        const msg = `Shot ${n}`;
+        try { window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200)); } catch {}
+        try {
+          if (typeof window.showCenterPrompt === 'function') {
+            window.showCenterPrompt(msg);
+            setTimeout(() => { try { const el = document.getElementById('overlayPrompt'); if (el) el.style.display = 'none'; } catch {} }, 800);
+          }
+          if (window.DOACH_RELEASE_TRACE === true) console.log('[SCORE:trigger]', { count: n, score: +scoreNow.toFixed?.(3), th, frame: frameNow, via:'hud' });
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // Draw canvas-based pulse so it's visible even if DOM HUD isn't ready
+  try {
+    const until = Number(window.__SCORE_FLASH_UNTIL || 0);
+    if (until && performance.now() < until) {
+      const n = Number(window.__SCORE_SHOT_COUNT || 0);
+      if (n > 0) {
+        const V = window.__VIEW || { vw: overlay.width, vh: overlay.height, sx:1, sy:1 };
+        const vw = V.vw || overlay.width, vh = V.vh || overlay.height;
+        const hair = 1 / Math.min(V.sx || 1, V.sy || 1);
+        const text = `Shot ${n}`;
+        ctx.save();
+        ctx.font = `${Math.max(36*hair, 30)}px system-ui, -apple-system, Segoe UI, Arial`;
+        ctx.textBaseline = 'middle';
+        ctx.textAlign = 'center';
+        const x = vw/2, y = vh/2;
+        // backdrop
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
+        const pad = 20*hair; const w = ctx.measureText(text).width + pad*2; const h = 52*hair;
+        ctx.fillRect(x - w/2, y - h/2, w, h);
+        // text
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillText(text, x, y + 2*hair);
+        ctx.restore();
+      }
+    }
+  } catch {}
+  // Fallback pose-gate latch: if upstream emitters miss a valid all-green pose release,
+  // dispatch a guarded release here so the HUD can log a shot. Uses the same releaseGate math.
+  try {
+    const armed = (window.__shotTrackingArmed === true);
+    const H = window.getLockedHoopBox?.();
+    if (armed && H) {
+      const hist = (window.playerState?.frameHistory || []).slice(-5);
+      if (hist.length >= 2 && typeof window.releaseGate === 'function') {
+        const g = window.releaseGate(hist) || { released:false, tests:{} };
+        const th = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+        const allGreen = Number(g?.tests?.score || 0) >= th - 1e-6;
+        if (g.released && allGreen) {
+          const now = performance.now();
+          const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 2000);
+          const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+          if (since >= cd && !window.__releaseEventSent) {
+            const f = (() => {
+              if (Number.isFinite(window.__AN_IDX)) return Number(window.__AN_IDX);
+              const k = hist.at(-1); return Number(k?.frame || 0);
+            })();
+            const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
+                          ? window.proxFromHoop(window.canonHoop(H)) : null;
+            (window.__markReleasePose || window.markRelease)?.(f, { prox, via: 'hud-fallback', requirePose: true });
+            try { window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame: f, via: 'hud-fallback' } })); } catch {}
+            try { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: f, via: 'hud-fallback' } })); } catch {}
+            try { window.__REL_LAST_FIRE_MS = now; } catch {}
+          }
+        }
+      }
+    }
+  } catch {}
   // Release marker (debug): draw a distinct circle around the release point briefly
   try {
     const bs = (window.ballState || {});
