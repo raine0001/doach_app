@@ -1,13 +1,13 @@
 // session_manager.js — Demo Mode FBF sessions (clean arcs + stable accuracy)
 
 async function postJSON(url, body) {
-  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
+  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}), credentials:'include' });
   if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
 }
 
 async function uploadBlob(url, blob, filename='clip.webm', field='file') {
   const fd = new FormData(); fd.append(field, blob, filename);
-  const r = await fetch(url, { method:'POST', body: fd }); if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
+  const r = await fetch(url, { method:'POST', body: fd, credentials:'include' }); if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
 }
 
 import { speak, listenForEndSession } from '/static/js/coach_voice.js';
@@ -167,62 +167,11 @@ import { ensureHudRoot } from '/static/js/video_ui.js';
   }
 
   async function endSession() {
-    // Centered loading/progress overlay
-    const showProgress = (() => {
-      let box = document.getElementById('sessionLoadingOverlay');
-      if (!box) {
-        const root = ensureHudRoot();
-        box = document.createElement('div');
-        box.id = 'sessionLoadingOverlay';
-        Object.assign(box.style, {
-          position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
-          background:'rgba(0,0,0,0.82)', color:'#fff', padding:'18px 20px', borderRadius:'12px',
-          font:'600 18px system-ui, -apple-system, Segoe UI, Arial', zIndex:10040, minWidth:'300px', textAlign:'center',
-          pointerEvents:'auto'
-        });
-        box.innerHTML = `
-          <div style="font-size:20px; font-weight:700; margin-bottom:10px;">Session loading…</div>
-          <div id="sessLoadMsg" style="opacity:.9;margin-bottom:12px;">Finalizing your session</div>
-          <div style="height:12px; background:rgba(255,255,255,0.12); border-radius:8px; overflow:hidden;">
-            <div id="sessLoadBar" style="height:100%; width:0%; background:#22c55e; transition:width .25s ease;"></div>
-          </div>`;
-        root.appendChild(box);
-      }
-      const set = (p, msg) => {
-        try { box.querySelector('#sessLoadBar').style.width = `${Math.max(0, Math.min(100, Math.round(p)))}%`; } catch {}
-        if (msg) try { box.querySelector('#sessLoadMsg').textContent = msg; } catch {}
-      };
-      const hide = () => { try { box.remove(); } catch {} };
-      return { set, hide };
-    })();
-
-    try {
-      await stopRecorderAndUpload();
-      const list = (window.__shotList || window.shotLog || []);
-      const total = Array.isArray(list) ? list.length : 0;
-      showProgress.set(15, total ? `Posting ${total} shot${total===1?'':'s'}…` : 'Finalizing your session…');
-
-      // Animate to 90% while waiting for the server to finalize
-      let p = 15; const t0 = performance.now();
-      const timer = setInterval(() => { p = Math.min(90, 15 + (performance.now() - t0)/12); showProgress.set(p); }, 120);
-      try { if (sessId) await postJSON(`/api/sessions/${sessId}/end`, {}); } finally { try { clearInterval(timer); } catch {} }
-      showProgress.set(100, 'Done');
-      setTimeout(() => showProgress.hide(), 400);
-    } catch {}
-    try { window.__demoStopVoice?.(); } catch {}
-    try { const v = document.getElementById('videoPlayer'); if (v) v.playbackRate = 1; } catch {}
-    window.__SESSION_ACTIVE = false;
-    btnStart.disabled = false; btnEnd.disabled = true;
-
-    // Voice short summary and open the summary table
-    try {
-      const taken = (window.__shotList?.length || window.shotLog?.length || 0);
-      const made  = (window.shotLog?.filter?.(s => s.made).length || 0);
-      const acc   = taken ? Math.round((made / taken) * 100) : 0;
-      if (taken > 0) speak(`Session complete. You took ${taken} shots, made ${made}, for ${acc} percent accuracy.`);
-      const summaryBtn = document.querySelector('#openSummaryBtn');
-      if (summaryBtn) setTimeout(() => summaryBtn.click(), 350);
-    } catch {}
+    // Delegate: use the canonical UI end routine
+    try { await window.autoEndSessionAndSummarize?.(); } catch {}
+    try { await stopRecorderAndUpload(); } catch {}
+    try { window.__SESSION_ACTIVE = false; } catch {}
+    try { btnStart.disabled = false; btnEnd.disabled = true; } catch {}
   }
 
   btnStart.addEventListener('click', startSession);

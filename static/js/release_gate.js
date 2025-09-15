@@ -13,17 +13,19 @@ export function initReleaseConfig() {
   const cfg = Object.assign({
     yTol:            IN_PROBE ? 10  : 14,   // px (wrist above elbow)
     shYTol:          IN_PROBE ? 8   : 10,   // px (wrist above shoulder)
-    elbowExtMin:     IN_PROBE ? 110 : 145,  // deg (counts in posture)
-    elbowStrictMin:  IN_PROBE ? 130 : 150,  // deg (strict latch rule)
+    elbowExtMin:     IN_PROBE ? 110 : 135,  // deg (counts in posture)
+    elbowStrictMin:  IN_PROBE ? 130 : 145,  // deg (strict latch rule)
     dxMax:           IN_PROBE ? 105 : 60,   // px (vertical-ish)
     dyMin:           IN_PROBE ? 12  : 18,   // px (vertical-ish)
     extMargin:       10,                    // px (extension margin)
     upDy:            IN_PROBE ? 4   : 6,    // px (uptrend per sample)
-    scoreThresh:     .99,                  // (overall score threshold)
-    hudScoreTrip:    0.78,                 // HUD pulse/log threshold (e.g., 3 of 4 at 0.26)
+    // Using 0.26 per-component weights yields ~1.04 when all four are satisfied
+    scoreThresh:     1.0,                 // require all-four by default
+    hudScoreTrip:    0.78,                 // HUD pulse/log threshold (diagnostic/UI only)
     streakNeed:      IN_PROBE ? 1   : 2,
-    cooldownMs:      IN_PROBE ? 3000: 1500,
+    cooldownMs:      1400,
   }, (window.REL_CFG || {}));
+  // Leave HUD trip independent; callers may set equal at runtime via setReleaseKnobs
 
   // persist on window for consumers that read globals
   window.REL_CFG = cfg;
@@ -73,11 +75,30 @@ export function setReleaseKnobs(patch){
 
 // Pure evaluator: returns { released, passed, tests, reason }
 export function releaseGate(lastFrames) {
+  // Pose warmup: require a few stable frames before allowing any release
+  try {
+    const hist = Array.isArray(lastFrames) ? lastFrames.slice(-8) : [];
+    // If caller passed too few frames, fall back to playerState history
+    const frames = (hist.length >= 3) ? hist : ((window.playerState?.frameHistory || []).slice(-8));
+    let okCount = 0;
+    if (Array.isArray(frames) && frames.length) {
+      for (const f of frames) {
+        const kps = f?.keypoints || [];
+        if (Array.isArray(kps) && kps.length >= 33) okCount++;
+      }
+    }
+    // Warmup deemed OK if ≥5 of the last 8 frames have 33 keypoints
+    const warmOK = okCount >= 5;
+    if (warmOK) { try { window.__POSE_WARMUP_OK = true; } catch {} }
+    const armed = (window.__shotTrackingArmed === true);
+    // Gate: do not allow any release until warmup is satisfied AND session is armed
+    if (!(warmOK && armed)) return { released:false, passed:0, tests:{}, reason: (armed ? 'pose-warmup' : 'not-armed') };
+  } catch {}
   function evalSide(side, hist) {
     const right = (side === 'R');
-    const S = right ? 12 : 11; // SHOULDER
-    const E = right ? 14 : 13; // ELBOW
-    const W = right ? 16 : 15; // WRIST
+    const S = right ? 12 : 11; // SHOULDER (R=12, L=11)
+    const E = right ? 14 : 13; // ELBOW    (R=14, L=13)
+    const W = right ? 16 : 15; // WRIST    (R=16, L=15)
     let cur = hist.at(-1)?.keypoints || [];
     let sh = cur[S], el = cur[E], wr = cur[W];
     // Fallback to current playerState keypoints when history frame is sparse
@@ -137,28 +158,46 @@ export function releaseGate(lastFrames) {
       const useUp = (window.REL_SCORE_USE_UPTREND === true); // default false → use shoulder for stability
       const norm = (x, d) => { const n = Number(x); return (Number.isFinite(n) && n >= 0) ? n : d; };
       const cfgW = (window.REL_CFG && window.REL_CFG.weights) || {};
-      const wA = norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A), 0.25);
-      const wB = norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B), 0.25);
-      const wC = norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C), 0.25);
+      // Align weights with HUD-local math (0.26 each by default)
+      const wA = norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A), 0.26);
+      const wB = norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B), 0.26);
+      const wC = norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C), 0.26);
       const wDsrc = useUp
         ? (cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D)
         : (cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D);
-      const wD = norm(wDsrc, 0.25);
+      const wD = norm(wDsrc, 0.26);
       if (wristAboveElbow) score += wA;                    // A: wrist > elbow
       if (elbowExtended)   score += wB;                    // B: elbow straight
       if (alignOK)         score += wC;                    // C: vertical-ish/extended
       if (useUp ? wristUpTrend : wristAboveShoulder) score += wD; // D: default shoulder above (stable)
       if (!Number.isFinite(score)) score = 0; // guard against NaN from bad weights
     } catch { score = 0; }
+    // All-four parity with HUD: sum of weights when all booleans are true
+    const tot = (() => {
+      try {
+        const useUp = (window.REL_SCORE_USE_UPTREND === true);
+        const cfgW = (window.REL_CFG && window.REL_CFG.weights) || {};
+        const norm = (x, d) => { const n = Number(x); return (Number.isFinite(n) && n >= 0) ? n : d; };
+        const wA = norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A), 0.26);
+        const wB = norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B), 0.26);
+        const wC = norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C), 0.26);
+        const wDsrc = useUp
+          ? (cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D)
+          : (cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D);
+        const wD = norm(wDsrc, 0.26);
+        return wA + wB + wC + wD;
+      } catch { return 1.04; }
+    })();
     const posturePassed = [wristAboveShoulder, elbowExtended, alignOK].filter(Boolean).length;
-    const postureOK = posturePassed >= 1;
-    // Single source of truth: use cfg only (mirrored to window for HUD/back-compat)
-    const scoreOK   = score >= Number(c.scoreThresh);
+    // Single source of truth: require "all four" by default (score within epsilon of sum of weights)
+    const allFour = score >= (tot - 1e-6);
+    const scoreOK = allFour || (score >= Number(c.scoreThresh));
     const strictOK  = (elbowAngleDeg >= Number(c.elbowStrictMin)) && wristAboveShoulder;
     const inProbe   = (window.__RELEASE_ONLY === true);
-    const okNow     = inProbe ? (strictOK || postureOK || scoreOK) : (strictOK || ((postureOK && wristUpTrend) || scoreOK));
-    const tests = { side, wristAboveElbow, wristAboveShoulder, elbowAtOrAboveShoulder, elbowExtended, alignOK, wristUpTrend, elbowAngleDeg: Math.round(elbowAngleDeg), dx: Math.round(dx), dy: Math.round(dy), dSW: Math.round(dSW), dSE: Math.round(dSE), score: Number(score.toFixed?.(3) || score), strictOK };
-    const reason = okNow ? (scoreOK ? 'score>=TH' : (inProbe ? '2of3/strict' : 'strict or 2of3+up')) : 'not-enough';
+    // In normal mode, require all-four; in probe, allow strict or all-four
+    const okNow     = inProbe ? (allFour || strictOK) : allFour;
+    const tests = { side, wristAboveElbow, wristAboveShoulder, elbowAtOrAboveShoulder, elbowExtended, alignOK, wristUpTrend, elbowAngleDeg: Math.round(elbowAngleDeg), dx: Math.round(dx), dy: Math.round(dy), dSW: Math.round(dSW), dSE: Math.round(dSE), score: Number(score.toFixed?.(3) || score), tot: Number(tot.toFixed?.(3) || tot), strictOK };
+    const reason = okNow ? (allFour ? 'all-four' : 'strict') : 'not-enough';
     return { released: okNow, passed: posturePassed, tests, reason };
   }
   try {
@@ -208,4 +247,10 @@ try {
   if (!window.setReleaseKnobs) window.setReleaseKnobs = setReleaseKnobs;
   if (!window.printPoseGate)   window.printPoseGate   = printPoseGate;
   if (!window.printLastRelease)window.printLastRelease= printLastRelease;
+  // Make evaluator + init available to non-ESM callers
+  if (typeof window.releaseGate !== 'function') window.releaseGate = releaseGate;
+  if (typeof window.initReleaseConfig !== 'function') window.initReleaseConfig = initReleaseConfig;
 } catch {}
+
+setReleaseKnobs({ hudScoreTrip: getReleaseKnobs().scoreThresh });  // e.g., both ~1.0
+

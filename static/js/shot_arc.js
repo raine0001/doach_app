@@ -140,14 +140,8 @@ export function updateRelease(frame, pose, ballPt, hoopBox) {
     }
     _state.relDelay++;
     if (_state.relDelay >= CFG.RELEASE_DELAY_FRAMES()) {
-      // Canonical latch
-      try {
-        if (typeof window.__markReleasePose === 'function') window.__markReleasePose(frame, { prox: proxFromHoop(H) });
-        else if (typeof window.markRelease === 'function') window.markRelease(frame, { prox: proxFromHoop(H) });
-      try { const snap = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.()); window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, tMs: performance.now(), poseSnapshot: snap } })); } catch {}
-      } catch {}
-      // Also dispatch event for listeners
-      try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via: 'shot_arc' } })); } catch {}
+      // Canonical latch via central helper
+      try { if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(frame, 'shot_arc'); } catch {}
       if (window.DOACH_SHOT_DEBUG) {
         console.log('[shot_arc] RELEASE LATCHED', { frame, via: 'shot_arc' });
       }
@@ -162,17 +156,14 @@ export function updateRelease(frame, pose, ballPt, hoopBox) {
       const inProx = insideProx(ballPt, prox);
       const enter = (window.ballState?.proxEnterFrame ?? null);
       if (!poseOK && inProx && Number.isFinite(enter) && (frame - enter) <= 2) {
-        if (typeof window.__markReleasePose === 'function') window.__markReleasePose(frame, { prox });
-        else if (typeof window.markRelease === 'function') window.markRelease(frame, { prox });
-        try { const snap = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.()); window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, tMs: performance.now(), poseSnapshot: snap } })); } catch {}
-        try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via: 'prox-fallback' } })); } catch {}
+        try { if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(frame, 'prox-fallback'); } catch {}
         if (window.DOACH_SHOT_DEBUG) console.log('[shot_arc] RELEASE LATCHED (prox-fallback)', { frame });
         _state.relLatched = true;
         return true;
       }
     } catch {}
 
-    // Fallback 2: slope-based latch — if ball has been trending upward for the last ~3
+    // Fallback 2: slope-based latch ï¿½ if ball has been trending upward for the last ~3
     // frames inside the lane near rim height, assume release even without pose.
     try {
       const t = Array.isArray(window.ballState?.trail) ? window.ballState.trail : [];
@@ -182,11 +173,7 @@ export function updateRelease(frame, pose, ballPt, hoopBox) {
         const laneX = Math.abs(c.x - H.cx) <= Math.max(45, H.w * 0.5);
         const nearRimBand = c.y <= (H.rimTop + Math.max(36, H.h * 0.6));
         if (!poseOK && up && laneX && nearRimBand) {
-          const prox = proxFromHoop(H);
-          if (typeof window.__markReleasePose === 'function') window.__markReleasePose(frame, { prox });
-          else if (typeof window.markRelease === 'function') window.markRelease(frame, { prox });
-        try { const snap = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.()); window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, tMs: performance.now(), poseSnapshot: snap } })); } catch {}
-          try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via: 'slope-fallback' } })); } catch {}
+          try { if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(frame, 'slope-fallback'); } catch {}
           if (window.DOACH_SHOT_DEBUG) console.log('[shot_arc] RELEASE LATCHED (slope-fallback)', { frame });
           _state.relLatched = true;
           return true;
@@ -258,11 +245,203 @@ export function updateArc(frame, ballPt, hoopBox) {
     try { stepFBFArc?.(ballPt, prox, frame); } catch {}
   }
   try { fillArcGaps?.(); } catch {}
+  
+  // NEW: Refine trajectory after collecting points
+  try { refineBallTrajectory(); } catch {}
+  
   return true;
 }
 
+// ---- NEW: Ball trajectory refinement functions ----
+export function refineBallTrajectory() {
+  const arc = window.ballArc;
+  if (!arc || !Array.isArray(arc.trail) || arc.trail.length < 3) return;
+  
+  // Apply smoothing and generate clean arc
+  const smoothedTrail = smoothTrajectory(arc.trail);
+  const cleanArc = generateCleanArc(smoothedTrail);
+  
+  // Store refined arc
+  arc.refinedTrail = cleanArc.trail;
+  arc.releasePoint = cleanArc.releasePoint;
+  arc.apexPoint = cleanArc.apexPoint;
+  arc.rimCrossingPoint = cleanArc.rimCrossingPoint;
+  
+  if (window.DOACH_SHOT_DEBUG) {
+    console.log('[trajectory] refined', {
+      originalPoints: arc.trail.length,
+      refinedPoints: cleanArc.trail.length,
+      release: cleanArc.releasePoint,
+      apex: cleanArc.apexPoint
+    });
+  }
+}
+
+function smoothTrajectory(rawTrail) {
+  if (!Array.isArray(rawTrail) || rawTrail.length < 3) return rawTrail;
+  
+  // Simple moving average smoothing
+  const smoothed = [];
+  const windowSize = Math.min(3, Math.floor(rawTrail.length / 3));
+  
+  for (let i = 0; i < rawTrail.length; i++) {
+    const start = Math.max(0, i - windowSize);
+    const end = Math.min(rawTrail.length - 1, i + windowSize);
+    
+    let sumX = 0, sumY = 0, count = 0;
+    for (let j = start; j <= end; j++) {
+      sumX += rawTrail[j].x;
+      sumY += rawTrail[j].y;
+      count++;
+    }
+    
+    smoothed.push({
+      x: sumX / count,
+      y: sumY / count,
+      frame: rawTrail[i].frame
+    });
+  }
+  
+  return smoothed;
+}
+
+function generateCleanArc(smoothedTrail) {
+  if (!Array.isArray(smoothedTrail) || smoothedTrail.length < 3) {
+    return { trail: smoothedTrail, releasePoint: null, apexPoint: null, rimCrossingPoint: null };
+  }
+  
+  // Find release point (first point after release)
+  const releasePoint = smoothedTrail[0];
+  
+  // Find apex (highest point - lowest Y value)
+  let apexIdx = 0;
+  let minY = smoothedTrail[0].y;
+  for (let i = 1; i < smoothedTrail.length; i++) {
+    if (smoothedTrail[i].y < minY) {
+      minY = smoothedTrail[i].y;
+      apexIdx = i;
+    }
+  }
+  const apexPoint = smoothedTrail[apexIdx];
+  
+  // Find rim crossing point (where ball crosses rim level)
+  const hoop = window.getLockedHoopBox?.();
+  let rimCrossingPoint = null;
+  if (hoop) {
+    const rimY = hoop.cy; // Use hoop center Y as rim level
+    for (let i = 1; i < smoothedTrail.length; i++) {
+      const prev = smoothedTrail[i-1];
+      const curr = smoothedTrail[i];
+      if (prev.y <= rimY && curr.y > rimY) {
+        // Interpolate exact crossing point
+        const t = (rimY - prev.y) / (curr.y - prev.y);
+        rimCrossingPoint = {
+          x: prev.x + (curr.x - prev.x) * t,
+          y: rimY,
+          frame: prev.frame + (curr.frame - prev.frame) * t
+        };
+        break;
+      }
+    }
+  }
+  
+  // Generate clean arc with key points
+  const cleanTrail = [];
+  
+  // Add release point
+  cleanTrail.push(releasePoint);
+  
+  // Add intermediate points (simplified)
+  const step = Math.max(1, Math.floor(smoothedTrail.length / 8));
+  for (let i = step; i < smoothedTrail.length - step; i += step) {
+    cleanTrail.push(smoothedTrail[i]);
+  }
+  
+  // Add apex point if not already included
+  if (apexIdx > 0 && apexIdx < smoothedTrail.length - 1) {
+    const apexIncluded = cleanTrail.some(p => 
+      Math.abs(p.x - apexPoint.x) < 5 && Math.abs(p.y - apexPoint.y) < 5
+    );
+    if (!apexIncluded) {
+      cleanTrail.push(apexPoint);
+    }
+  }
+  
+  // Add rim crossing point if found
+  if (rimCrossingPoint) {
+    cleanTrail.push(rimCrossingPoint);
+  }
+  
+  // Add final point
+  cleanTrail.push(smoothedTrail[smoothedTrail.length - 1]);
+  
+  // Sort by frame to maintain chronological order
+  cleanTrail.sort((a, b) => (a.frame || 0) - (b.frame || 0));
+  
+  return {
+    trail: cleanTrail,
+    releasePoint,
+    apexPoint,
+    rimCrossingPoint
+  };
+}
+
+// ---- TESTING: Simple test function ----
+export function testTrajectoryRefinement() {
+  console.log('[TEST] Testing trajectory refinement...');
+  
+  // Create mock raw trail data (simulating noisy ball positions)
+  const mockRawTrail = [
+    { x: 100, y: 200, frame: 0 },
+    { x: 105, y: 195, frame: 1 },
+    { x: 110, y: 190, frame: 2 },
+    { x: 115, y: 185, frame: 3 },
+    { x: 120, y: 180, frame: 4 },
+    { x: 125, y: 175, frame: 5 },
+    { x: 130, y: 170, frame: 6 },
+    { x: 135, y: 165, frame: 7 },
+    { x: 140, y: 160, frame: 8 },
+    { x: 145, y: 155, frame: 9 },
+    { x: 150, y: 150, frame: 10 }, // apex
+    { x: 155, y: 155, frame: 11 },
+    { x: 160, y: 160, frame: 12 },
+    { x: 165, y: 165, frame: 13 },
+    { x: 170, y: 170, frame: 14 },
+    { x: 175, y: 175, frame: 15 },
+    { x: 180, y: 180, frame: 16 },
+    { x: 185, y: 185, frame: 17 },
+    { x: 190, y: 190, frame: 18 },
+    { x: 195, y: 195, frame: 19 },
+    { x: 200, y: 200, frame: 20 }
+  ];
+  
+  // Set up mock ballArc
+  window.ballArc = { trail: mockRawTrail };
+  
+  // Test refinement
+  refineBallTrajectory();
+  
+  // Check results
+  const arc = window.ballArc;
+  console.log('[TEST] Results:', {
+    originalPoints: arc.trail.length,
+    refinedPoints: arc.refinedTrail?.length || 0,
+    releasePoint: arc.releasePoint,
+    apexPoint: arc.apexPoint,
+    rimCrossingPoint: arc.rimCrossingPoint
+  });
+  
+  return arc;
+}
+
+
+
+
 // Attach helpers for optional non-ESM callers (safe no-ops if not used)
 try {
-  window.shotArc = window.shotArc || { resetShotFSM, updateRelease, updateExit, updateShotArcTick, updateArc, proxFromHoop };
+  window.shotArc = window.shotArc || { 
+    resetShotFSM, updateRelease, updateExit, updateShotArcTick, updateArc, proxFromHoop,
+    refineBallTrajectory, testTrajectoryRefinement
+  };
   if (!window.__shotArcLoadedOnce) { window.__shotArcLoadedOnce = true; try { console.log('[shot_arc] loaded'); } catch {} }
 } catch {}

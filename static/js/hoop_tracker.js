@@ -292,9 +292,10 @@ export function stabilizeLockedHoop(objects = []) {
 
   const frameIdx = (window.lastDetectedFrame && window.lastDetectedFrame.__frameIdx) || 0;
 
-  // Live sessions: hold the manual lock stable; do not recenter from detections.
+  // Live sessions: normally hold manual lock stable; optionally allow re-lock on drift
   try {
-    if (window.__SESSION_ACTIVE) {
+    const allowRelock = (window.RELOCK_HOOP_ON_DRIFT === true);
+    if (window.__SESSION_ACTIVE && !allowRelock) {
       _ensureHoopPresent(objects);
       lastHoopSeenFrame = frameIdx;
       return;

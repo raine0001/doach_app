@@ -105,7 +105,7 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
     }
     const df = playerState.lastFrame - frameNum;
     frameNum = playerState.lastFrame + 1; // monotonic forward
-    try { if (window.POSE_DEBUG === true) console.log('[pose:clamp-regress]', { was: __frameIdx, clampTo: frameNum, delta: df }); } catch {}
+    try { if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) console.log('[pose:clamp-regress]', { was: __frameIdx, clampTo: frameNum, delta: df }); } catch {}
   }
 
   playerState.keypoints = scaledKeypoints;
@@ -114,7 +114,7 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
   try { window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaledKeypoints[16] || null; } catch {}
   playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints });
   try {
-    if (window.POSE_DEBUG === true) {
+    if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) {
       const w = scaledKeypoints[16];
       console.log('[pose:update]', { frame: __frameIdx, n: scaledKeypoints.length, wrist: w ? { x: Math.round(w.x), y: Math.round(w.y), v: (w.visibility??w.score??1) } : null, norm: looksNormalized });
     }

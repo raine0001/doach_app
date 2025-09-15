@@ -68,12 +68,7 @@ try { window.updateBottomStats?.(); } catch {}
   }
 })();
 
-// Reset one-shot release event guard when a shot ends or is summarized
-try {
-  const _resetRel = () => { try { window.__releaseEventSent = false; } catch {} };
-  window.addEventListener('shot:end', _resetRel);
-  window.addEventListener('shot:summary', _resetRel);
-} catch {}
+// Let app.js handle when to re-arm release guards; avoid double resets here
 
 
 
@@ -349,6 +344,11 @@ let __lingerActive     = false;
 let __lingerStartFrame = -1;
 
 export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
+  // Hard arm guard: never start a shot unless user armed + hoop confirmed
+  try {
+    if (window.__shotTrackingArmed !== true) return false;
+    if (window.__hoopConfirmed !== true) return false;
+  } catch {}
   const H = normLockedHoop(hoopBox);
   const last = ballStateRef?.trail?.at?.(-1);
   if (!H || !last) return false;
@@ -362,7 +362,7 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
 
 
   // Arm on *fresh* entry OR if pose already fired release (belt & suspenders)
-  const freshEntry = nowInProx && !s._lastInProx && !__shotInProgress && !__awaitingReset;
+  const freshEntry = nowInProx && !s._lastInProx && !__shotInProgress && !__awaitingReset && (window.__RESET_SEEN_BELOW !== false);
   if (freshEntry || s.releaseSignaled) {
      __shotInProgress  = true;
      __awaitingReset   = false;       // allow the new attempt to proceed
@@ -467,7 +467,10 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
           }
         } catch {}
         if (!window.DEFER_FE_SUMMARY) {
-          try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+          try {
+            if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'exit-finalize', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
+            window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));
+          } catch {}
         }
         // Only stop analyzer for non-live uploads or test flows.
         // In live camera sessions, keep analyzer running so pose/hoop stay visible
@@ -535,7 +538,10 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
             }
           } catch {}
           if (!window.DEFER_FE_SUMMARY) {
-            try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null })); } catch {}
+            try {
+              if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'auto-gap', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
+              window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));
+            } catch {}
           }
           try { if (!window.__SESSION_ACTIVE) window.stopFrameAnalysis?.(); } catch {}
           const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
@@ -708,6 +714,24 @@ export function applyShotCorrection({ id = null, made, reason = 'User correction
   try { autoTuneFromCorrection?.(before, rec); } catch {}
 
   try { window.dispatchEvent(new CustomEvent('shot:corrected', { detail: { id: rec.id, made: rec.made } })); } catch {}
+
+  // Sync correction to backend session if available
+  (async () => {
+    try {
+      const sid = (window.__SESSION_ID || null);
+      if (!sid) return; // do not create a new session for a correction
+      const idx0 = Math.max(0, (Number(rec.id) || 1) - 1); // zero-based index
+      const payload = {
+        idx: idx0,
+        t: Date.now(),
+        made: rec.made,
+        missReason: rec.missReason || null,
+        corrected: true,
+        correctionConfidence: (rec.correctionConfidence != null) ? rec.correctionConfidence : null
+      };
+      await fetch(`/api/sessions/${sid}/shot`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+    } catch {}
+  })();
 
   return rec;
 }
@@ -1256,9 +1280,9 @@ export function scoringTick(__frameIdx) {
   if (!hoopBox) return;
   const s = BS();
 
-  // fire release once when tracking begins (disabled in pose-first mode)
+  // fire release once when tracking begins (explicitly enabled only when POSE_FIRST_ONLY === false)
   if (s?.state === 'TRACKING' && s?.releaseFrame != null && !__releaseEventSent) {
-    if (window.POSE_FIRST_ONLY !== true) {
+    if (window.POSE_FIRST_ONLY === false) {
       __releaseEventSent = true;
       try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: s.releaseFrame, via: 'shot_logger:mirror' } })); } catch {}
     }

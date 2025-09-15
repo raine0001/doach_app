@@ -190,7 +190,16 @@ export function drawBallTrails(ctx, opts={}) {
 
 export function drawBallArc(ctx, opts={}) {
   if (!ctx) return;
-  let full = (window.ballArc && Array.isArray(window.ballArc.trail)) ? window.ballArc.trail : [];
+  
+  // NEW: Use refined trail if available, fallback to original
+  let full = [];
+  if (window.ballArc && Array.isArray(window.ballArc.refinedTrail) && window.ballArc.refinedTrail.length >= 3) {
+    full = window.ballArc.refinedTrail;
+    if (window.DOACH_SHOT_DEBUG) console.log('[drawBallArc] using refined trail', full.length, 'points');
+  } else if (window.ballArc && Array.isArray(window.ballArc.trail)) {
+    full = window.ballArc.trail;
+  }
+  
   // In presentation modes we want only the post‑release arc. Allow fallback only if not strict.
   try {
     const strict = !!opts.strictArc;

@@ -20,14 +20,50 @@ import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.
 import { mountPrefs } from './ui_prefs.js';
 import { initReleaseConfig, releaseGate } from './release_gate.js';
 
-// ---- Unified Release Config ----
-try { initReleaseConfig(); } catch {}
+
+// pose detection global settings
+window.POSE_REQUIRE_PLAYER_BOX = true;   // must see a 'player'/'person' box
+window.POSE_MIN_IOU_PLAYER     = 0.18;   // overlap with player box
+window.POSE_MIN_H              = 110;    // min pose height (px)
+window.POSE_MIN_AREA_FRAC      = 0.006;  // min area vs frame (0.6%)
+window.POSE_BELOW_RIM_MIN      = 80;     // ankles must be ≥80px BELOW rim y
+window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to accept
 
 
-// ---- Guarded release marker (single source of truth) ----
-// Many modules call (window.__markReleasePose || window.markRelease).
-// Provide a guarded wrapper that only latches when the session is armed and hoop is confirmed.
-try {
+
+// =========================== Pose Release Pipeline ===========================
+// One function to install all release-related wiring exactly once.
+// It keeps release authority in release_gate.js, makes HUD purely visual,
+// prevents double-fires, and guarantees the guard resets between attempts.
+
+(function installPoseReleasePipeline(){
+  if (window.__poseReleasePipelineInstalled) return;
+  window.__poseReleasePipelineInstalled = true;
+
+  // ---- 0) Config + defaults -------------------------------------------------
+  try { initReleaseConfig?.(); } catch {}
+  // Keep HUD visual-only unless you explicitly enable the bridge
+  window.HUD_BRIDGE_ENABLE   ??= false;
+  window.HUD_LOCAL_PULSE     ??= false;   // no HUD-local shot counting
+  window.DISABLE_HUD_FALLBACK??= true;    // no HUD fallback emitter
+  window.POSE_FIRST_ONLY     ??= true;    // only pose-gate approved releases pass
+  // Tighter UX: shorter cooldown but require wrist-drop reset before next shot
+  window.REL_COOLDOWN_MS     ??= 1200;     // lower to reduce missed fast throws
+  window.NEXT_SHOT_UNLOCK_MS ??= 1200;     // keep UI cooldown aligned
+  // Keep HUD trip equal to gate trip so "green HUD == release ok"
+  try {
+    const k = (typeof getReleaseKnobs === 'function') ? getReleaseKnobs() : (window.REL_CFG||{});
+    if (k?.scoreThresh != null && (k?.hudScoreTrip == null || k.hudScoreTrip !== k.scoreThresh)) {
+      setReleaseKnobs?.({ hudScoreTrip: k.scoreThresh });
+    }
+  } catch {}
+
+  // ---- 1) Single point to ARM/DISARM the gate -------------------------------
+  window.setReleaseArmed = function setReleaseArmed(on){
+    window.__shotTrackingArmed = !!on;
+  };
+
+  // ---- 2) Guarded release marker (used by all producers) --------------------
   if (typeof window.__markReleasePose !== 'function') {
     window.__markReleasePose = function guardedMarkRelease(frame, opts) {
       try {
@@ -39,12 +75,277 @@ try {
       } catch { return false; }
     };
   }
-} catch {}
 
-// ---- Release debug logger (optional; always safe) ----
-(function installReleaseEventLogger(){
+  // ---- 3) Canonical counter (event-driven)
+  // Avoid double-binding if fix_overlay_display already installed the HUD pulse.
+  if (!window.__scoreCanonBound && !window.__hudPulseBound) {
+    window.__scoreCanonBound = true;
+    window.addEventListener('shot:release', () => {
+      window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1;
+      window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));
+    });
+  }
+
+  // ---- 4) Reset guard when an attempt ends + watchdog for stuck sessions ----
+  if (!window.__relGuardResetInstalled) {
+    window.__relGuardResetInstalled = true;
+    const reset = () => { window.__releaseEventSent = false; window.__REL_LAST_FIRE_MS = 0; };
+    window.addEventListener('shot:summary', reset);
+    window.addEventListener('shot:end',     reset);
+  }
+  if (!window.__relGuardWatchInstalled) {
+    window.__relGuardWatchInstalled = true;
+    window.REL_GUARD_MAX_MS ??= 7000; // auto-unstick after 7s if no summary/end
+    setInterval(() => {
+      try {
+        const now  = performance.now();
+        const last = Number(window.__REL_LAST_FIRE_MS || 0);
+        const stuck = (window.__releaseEventSent === true) && last && (now - last > Number(window.REL_GUARD_MAX_MS));
+        if (stuck) {
+          if (window.DOACH_RELEASE_TRACE) console.warn('[rel-guard:reset]', { since: (now - last)|0 });
+          window.__releaseEventSent = false; // keep last-fire timestamp to honor cooldown
+        }
+      } catch {}
+    }, 800);
+  }
+
+  // ---- 4b) Wrist-drop reset between attempts -------------------------------
+  // Require that the shooting wrist falls below the shoulder at least once after
+  // a release before a new release can be emitted. Prevents double-firing while
+  // the player keeps the wrist high.
   try {
-    if (window.__relLoggerInstalled) return; window.__relLoggerInstalled = true;
+    if (!window.__resetBelowInstalled) {
+      window.__resetBelowInstalled = true;
+      window.__RESET_SEEN_BELOW = true; // true at boot so first release allowed
+      window.addEventListener('shot:release', () => { try { window.__RESET_SEEN_BELOW = false; } catch {} });
+      window.addEventListener('analyzer:frame-done', () => {
+        try {
+          if (window.__RESET_SEEN_BELOW === true) return;
+          const kps = (window.playerState?.keypoints || []);
+          const wr = kps[16]; // right wrist
+          const sh = kps[12]; // right shoulder
+          if (wr && sh && Number.isFinite(wr.y) && Number.isFinite(sh.y)) {
+            const margin = Number(window.WRIST_BELOW_MARGIN || 6);
+            if (wr.y > (sh.y + margin)) window.__RESET_SEEN_BELOW = true;
+          }
+        } catch {}
+      });
+    }
+  } catch {}
+
+  // ---- 5) Single safe emitter you can call from anywhere --------------------
+  if (typeof window.safeEmitRelease !== 'function') {
+    window.safeEmitRelease = function safeEmitRelease(frame, via='unknown', opts={}) {
+      try {
+        // Hard stop at session cap/end
+        if (window.__sessionEnded === true || window.__sessionCapped === true) return false;
+        try {
+          const cap   = Number(window.SESSION_SIZE || 10);
+          const taken = Array.isArray(window.__shotList) ? window.__shotList.length : Number(window.__SCORE_SHOT_COUNT || 0);
+          // Block when we've already logged cap attempts; the current (cap-th) release occurs when taken == cap-1
+          if (Number.isFinite(cap) && taken >= cap) { try { window.autoEndSessionAndSummarize?.(); } catch {} return false; }
+        } catch {}
+
+        // Basic preconditions
+        const armed = (window.__shotTrackingArmed === true);
+        const confirmed = (window.__hoopConfirmed === true);
+        const H = window.getLockedHoopBox?.();
+        if (!armed || !confirmed || !H) return false;
+
+        // Cooldown + “already fired” guard
+        const now = performance.now();
+        const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+        const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+        if (since < cd || window.__releaseEventSent) return false;
+
+        // Require wrist-drop reset since the previous release
+        if (window.__RESET_SEEN_BELOW === false) return false;
+
+        // Canonical gate approval (pose-first authority lives in release_gate.js)
+        const hist = (window.playerState?.frameHistory || []).slice(-5);
+        let approved = false, t = {};
+        if (typeof window.releaseGate === 'function') {
+          const g = window.releaseGate(hist) || { released:false, tests:{} };
+          approved = !!g.released; t = g.tests || {};
+        }
+        if (!approved) return false;
+
+        // Optional: strict HUD parity (0.26 weights all-four) to match your HUD visuals
+        try {
+          const useUp = (window.REL_SCORE_USE_UPTREND === true);
+          const wA=0.26,wB=0.26,wC=0.26,wD=0.26, tot=wA+wB+wC+wD;
+          const sc = (t.wristAboveElbow?wA:0)+(t.elbowExtended?wB:0)+(t.alignOK?wC:0)+((useUp?t.wristUpTrend:t.wristAboveShoulder)?wD:0);
+          if (!(Number.isFinite(sc) && sc >= (tot - 1e-6))) return false;
+        } catch {}
+
+        // Proximity (compute if not provided)
+        let prox = opts?.prox || null;
+        try {
+          if (!prox && typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function') {
+            prox = window.proxFromHoop(window.canonHoop(H));
+          }
+        } catch {}
+
+        // Mark + dispatch (canonical)
+        (window.__markReleasePose || window.markRelease)?.(frame, { ...opts, prox, via, requirePose: true });
+        window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
+        window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
+        window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));
+        return true;
+      } catch { return false; }
+    };
+  }
+
+  // ---- 6) Capture-phase gate: swallow invalid releases globally -------------
+  if (!window.__captureGateBound) {
+    window.__captureGateBound = true;
+    window.addEventListener('shot:release', (e) => {
+      try {
+        // Startup anti-ghost: require readiness + pose warmup before any release can pass
+        if (window.__readyForScoring !== true) { e.stopImmediatePropagation(); return; }
+        if (window.__POSE_WARMUP_OK !== true) { e.stopImmediatePropagation(); return; }
+        // Hard-stop guard at session cap/end
+        if (window.__sessionEnded === true || window.__sessionCapped === true) { e.stopImmediatePropagation(); return; }
+        try {
+          const cap   = Number(window.SESSION_SIZE || 10);
+          const taken = Math.max(
+            Array.isArray(window.__shotList) ? window.__shotList.length : 0,
+            Number(window.__SCORE_SHOT_COUNT || 0)
+          );
+          if (Number.isFinite(cap) && taken >= cap) {
+            // Do NOT end immediately; wait for final summary with a grace timer
+            try { window.__sessionCapped = true; } catch {}
+            try { window.__capAwait = true; } catch {}
+            try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
+            try {
+              window.__capTimer = setTimeout(() => {
+                try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
+              }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
+            } catch {}
+            // swallow this event to avoid double counting while we await summary
+            e.stopImmediatePropagation();
+            return;
+          }
+        } catch {}
+
+        // Proximity sanity: reject releases not preceded by recent prox enter
+        try {
+          const f = Number(e?.detail?.frame);
+          const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
+          if (!Number.isFinite(f) || !Number.isFinite(enter) || (f - enter) > Number(window.REL_PROX_MAX_LAG_FRAMES || 90)) {
+            window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+          }
+        } catch {}
+
+        // Cooldown suppression
+        const now = performance.now();
+        const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+        const last= Number(window.__REL_LAST_FIRE_MS || 0);
+        if (last && (now - last) < cd) { e.stopImmediatePropagation(); return; }
+
+        // Require hoop + armed
+        const H = window.getLockedHoopBox?.();
+        if (!H || window.__hoopConfirmed !== true || window.__shotTrackingArmed !== true) {
+          window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+        }
+
+        // Pose-first: only keep releases approved by releaseGate (and 0.26 all-four)
+        if (window.POSE_FIRST_ONLY === true) {
+          const hist = (window.playerState?.frameHistory || []).slice(-5);
+          let ok = false, t = {};
+          if (typeof window.releaseGate === 'function') {
+            const g = window.releaseGate(hist) || { released:false, tests:{} };
+            ok = !!g.released; t = g.tests || {};
+          }
+          if (!ok) { window.__releaseEventSent = false; window.__poseGateStreak = 0; e.stopImmediatePropagation(); return; }
+          try {
+            const useUp = (window.REL_SCORE_USE_UPTREND === true);
+            const wA=0.26,wB=0.26,wC=0.26,wD=0.26, tot=wA+wB+wC+wD;
+            const sc = (t.wristAboveElbow?wA:0)+(t.elbowExtended?wB:0)+(t.alignOK?wC:0)+((useUp?t.wristUpTrend:t.wristAboveShoulder)?wD:0);
+            const all4 = (Number.isFinite(sc) && sc >= (tot - 1e-6));
+            const need = Number.isFinite(window.POSE_STREAK_NEED) ? Number(window.POSE_STREAK_NEED) : 2;
+            if (all4) { window.__poseGateStreak = (Number(window.__poseGateStreak)||0) + 1; }
+            else { window.__poseGateStreak = 0; window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
+            if (window.__poseGateStreak < need) { e.stopImmediatePropagation(); return; }
+          } catch {}
+        }
+      } catch {}
+    }, true); // capture
+  }
+
+  // ---- 7) Post-phase handlers (report, mini-score, re-arm, cleanup) ---------
+  if (!window.__postHandlersBound) {
+    window.__postHandlersBound = true;
+
+    window.addEventListener('shot:release', (e) => {
+      // Ensure session shot list and HUD reflect this release immediately
+      try {
+        const list = (window.__shotList ||= []);
+        const rf = Number(e?.detail?.frame || 0);
+        const lastEntry = list.at?.(-1) || null;
+        const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
+        if (!same) {
+          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+            : null;
+          list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
+          try { window.__SHOT_IDX = (list.length - 1); } catch {}
+        }
+        const taken = list.length;
+        const made = (window.shotLog?.filter?.(s => s.made).length || 0);
+        const acc  = taken ? Math.round((made / taken) * 100) : 0;
+        window.mountSessionHUD?.();
+        window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
+        window.setSessionStatus?.('Shot ' + taken + ' in progress');
+      } catch {}
+
+      // Track last via + optional reporting
+      try { window.__REL_LAST_VIA = String(e?.detail?.via || ''); } catch {}
+      try { __reportReleaseToServer?.(e?.detail || {}); } catch {}
+
+      // Keep mini-scoring alive during RELEASE_ONLY probes
+      try { if (window.__RELEASE_ONLY === true) window.__TEMP_SCORE_UNTIL = performance.now() + (Number(window.MINI_SCORE_MS || 1800)); } catch {}
+
+      // If no summary arrives by the end of the mini scoring window, finalize pending
+      try {
+        const dwell = Number(window.MINI_SCORE_MS || 1800) + 260;
+        setTimeout(() => {
+          try {
+            const list = window.__shotList || [];
+            const last = list.at?.(-1) || null;
+            if (last && last.pending) {
+              const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
+              window.recordShotSummary?.(summary);
+            }
+            if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
+          } catch {}
+        }, dwell);
+      } catch {}
+    });
+
+    window.addEventListener('shot:summary', (e) => {
+      try { __reportSummaryToServer?.(e?.detail || {}); } catch {}
+      try { if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; } } catch {}
+      try { window.__TEMP_SCORE_UNTIL = 0; } catch {}
+      try { window.__releaseEventSent = false; window.__gateStreak = 0; } catch {}
+    });
+
+    window.addEventListener('shot:end', () => {
+      try { if (window.__coachPoseInterval) { clearInterval(window.__coachPoseInterval); delete window.__coachPoseInterval; } } catch {}
+      try { if (window.__coachPaintRaf != null) { cancelAnimationFrame(window.__coachPaintRaf); window.__coachPaintRaf = null; } } catch {}
+      try { if (window.ballState) delete window.ballState.__poseLatchAt; } catch {}
+      try { if (window.__BG_STOP) window.__BG_STOP(); } catch {}
+    });
+
+    // Keep a unified analyzer frame index for debug/tools
+    window.addEventListener('analyzer:frame-done', (e) => {
+      try { const k = Number(e?.detail?.__frameIdx); if (Number.isFinite(k)) window.__AN_IDX = k; } catch {}
+    });
+  }
+
+  // ---- 8) Optional debug logger (toggle with window.DOACH_REL_LOG=true) -----
+  if (!window.__relLoggerInstalled) {
+    window.__relLoggerInstalled = true;
     function poseTests() {
       try {
         const hist = (window.playerState?.frameHistory || []).slice(-5);
@@ -75,11 +376,10 @@ try {
       } catch {}
     }
     window.addEventListener('shot:release', logRelease);
-    window.addEventListener('pose:release', (e)=>{ if (window.DOACH_REL_LOG === true) try { console.log('[POSE:release]', e?.detail || null); } catch {} });
-    window.addEventListener('shot:summary', (e)=>{ if (window.DOACH_REL_LOG === true) try { console.log('[REL:summary]', e?.detail || null); } catch {} });
-    window.addEventListener('shot:end', (e)=>{ if (window.DOACH_REL_LOG === true) try { console.log('[REL:end]', e?.detail || null); } catch {} });
-  } catch {}
-})();
+    window.addEventListener('shot:summary', (e)=>{ if (window.DOACH_REL_LOG) console.log('[REL:summary]', e?.detail||null); });
+    window.addEventListener('shot:end',     (e)=>{ if (window.DOACH_REL_LOG) console.log('[REL:end]', e?.detail||null); });
+  }
+})(); 
 
 // ---- Pre-Decoder / Pre-Detector (PD) pipeline ----
 // Decodes frames on a hidden <video> slightly ahead of UI playback, runs detection,
@@ -450,6 +750,7 @@ export async function startCamera() {
     if (v.readyState >= 1 && v.videoWidth) res();
     else v.addEventListener('loadedmetadata', res, { once: true });
   });
+  
 
   try { await v.play(); } catch (e) {
     console.warn('[camera] video.play() blocked — call from a user gesture.');
@@ -458,6 +759,8 @@ export async function startCamera() {
     return false;
   }
   try { window.hidePrompt?.(); } catch {}
+  // Reset counters/guards at the start of a live session as well
+  try { window.resetReleaseSessionCounters?.(); } catch {}
 
   // ✅ Arm overlay for picking BEFORE any sync so pointer-events stay 'auto'
 
@@ -623,50 +926,30 @@ export function enableHoopPickOnce() {
             const H = window.getLockedHoopBox?.();
             const bs = (window.ballState ||= {});
             if (H && !Number.isFinite(bs.releaseFrame) && Array.isArray(window.playerState?.keypoints) && window.playerState.keypoints.length >= 33) {
-              // Unified gate: use releaseGate for decision (matches HUD greens)
-              const hist = (window.playerState.frameHistory || []).slice(-5);
-              const gate = (typeof window.releaseGate === 'function') ? window.releaseGate(hist) : { released:false, tests:{}, passed:0, reason:'no-gate' };
-              // Keep a simple streak to avoid single-tick noise unless in releaseOnly
-              window.__gateStreak = gate.released ? ((window.__gateStreak || 0) + 1) : 0;
-              const need = Number(window.HEUR_STREAK_NEED || (window.__RELEASE_ONLY === true ? 1 : 2));
-              // Immediate latch if all-four score reached (e.g., 1.0 when all green)
-              const allScore = Number(gate?.tests?.score || 0);
-              const wantAll = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
-              const allGreen = allScore >= wantAll - 1e-6;
-              let latched = ((window.__gateStreak || 0) >= need) || allGreen;
+              // HUD-only evaluator (0.26 all-four). Expose tests and attempt canonical release via safe helper
               try {
-                const rec = { t: Date.now(), type:'gate', detail: { frame: fidx, tests: gate.tests, passed: gate.passed, reason: gate.reason }, latched };
-                (window.__REL_LOG ||= []).push(rec);
-                window.__LAST_GATE = rec; // expose for overlay debug HUD
-                if (window.DOACH_RELEASE_TRACE === true) {
-                  console.log('[gate]', { frame: fidx, ...gate.tests, passed: gate.passed, latched });
-                }
+                const useUp = (window.REL_SCORE_USE_UPTREND === true);
+                const kps = window.playerState.keypoints;
+                const side = (window.__LAST_GATE?.detail?.tests?.side === 'L') ? 'L' : 'R';
+                const S = (side === 'L') ? 11 : 12; const E = (side === 'L') ? 13 : 14; const W = (side === 'L') ? 15 : 16;
+                const sh=kps[S], el=kps[E], wr=kps[W];
+                const c = window.REL_CFG || {}; const yTol=Number(c.yTol ?? window.REL_Y_TOL ?? 12); const ySh=Number(c.shYTol ?? window.REL_SH_Y_TOL ?? 8);
+                const wristAboveElbow=(wr&&el)?(wr.y < (el.y - yTol)):false; const wristAboveShoulder=(wr&&sh)?(wr.y < (sh.y - ySh)):false;
+                let elbowAngleDeg=0, elbowExtended=false; try { const v1x=sh.x-el.x,v1y=sh.y-el.y,v2x=wr.x-el.x,v2y=wr.y-el.y; const dot=(v1x*v2x+v1y*v2y); const den=(Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y)+1e-6); const a=Math.acos(Math.max(-1,Math.min(1,dot/den)))*180/Math.PI; elbowAngleDeg=a; const th=Number(c.elbowExtMin ?? window.REL_ELBOW_EXT_MIN ?? 155); elbowExtended=(a>=th);} catch {}
+                const dx=Math.abs((wr?.x??0)-(sh?.x??0)); const dy=Math.abs((sh?.y??0)-(wr?.y??0)); const nearlyVertical=(dx<Number(c.dxMax ?? window.REL_DX_MAX ?? 90))&&(dy>Number(c.dyMin ?? window.REL_DY_MIN ?? 18)); const dSE=Math.hypot((el?.x??0)-(sh?.x??0),(el?.y??0)-(sh?.y??0)); const dSW=Math.hypot((wr?.x??0)-(sh?.x??0),(wr?.y??0)-(sh?.y??0)); const armExtended=dSW>(dSE+Number(c.extMargin ?? window.REL_EXT_MARGIN ?? 10)); const alignOK=nearlyVertical||armExtended;
+                let wristUpTrend=false; try { const h=(window.playerState.frameHistory||[]).slice(-3); if(h.length>=2){const wy1=h[h.length-2]?.keypoints?.[W]?.y; const wy2=h[h.length-1]?.keypoints?.[W]?.y; if(Number.isFinite(wy1)&&Number.isFinite(wy2)) wristUpTrend=(wy2<(wy1-Number(c.upDy ?? window.REL_UP_DY ?? 6))); if(!wristUpTrend && h.length>=3){ const wy0=h[h.length-3]?.keypoints?.[W]?.y; if(Number.isFinite(wy0)&&Number.isFinite(wy1)){ const d=Number(c.upDy ?? window.REL_UP_DY ?? 6); wristUpTrend=(wy2<(wy1-d))&&(wy1<(wy0-d)); } } } } catch {}
+                const norm=(x,d)=>{ const n=Number(x); return (Number.isFinite(n)&&n>=0)?n:d; }; const cfgW=(window.REL_CFG&&window.REL_CFG.weights)||{}; const wA=norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A),0.26); const wB=norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B),0.26); const wC=norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C),0.26); const wDsrc=useUp?(cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D):(cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D); const wD=norm(wDsrc,0.26);
+                const score=(wristAboveElbow?wA:0)+(elbowExtended?wB:0)+(alignOK?wC:0)+((useUp?wristUpTrend:wristAboveShoulder)?wD:0); const tot=wA+wB+wC+wD; const allFour=(Number.isFinite(score)&&score>=(tot-1e-6));
+                const rec = { t: Date.now(), type:'gate', detail: { frame: fidx, tests: { side, wristAboveElbow, wristAboveShoulder, elbowExtended, alignOK, wristUpTrend, elbowAngleDeg:Math.round(elbowAngleDeg), dx:Math.round(dx), dy:Math.round(dy), dSW:Math.round(dSW), dSE:Math.round(dSE), score:Number(score.toFixed?.(3)||score), tot:Number(tot.toFixed?.(3)||tot) }, passed: ['wristAboveShoulder','elbowExtended','alignOK'].map(k=>({wristAboveShoulder,elbowExtended,alignOK}[k])).filter(Boolean).length, reason: allFour ? 'all-four' : 'not-enough' }, latched: allFour };
+                (window.__REL_LOG ||= []).push(rec); window.__LAST_GATE = rec;
               } catch {}
 
-              if (latched) {
-                // Require arming and hoop lock before firing
-                try { if (window.__shotTrackingArmed !== true) latched = false; } catch {}
-                try { if (!H) latched = false; } catch {}
-              }
-              if (latched) {
-                try { window.__GATE_LATCH_FRAME = fidx; } catch {}
-                // Global cooldown to avoid double-trigger while follow-through holds
-                const now = performance.now();
-                const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 2000);
-                const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
-                const shouldFire = since >= cd;
-                // Compute proximity and dispatch unified release
+              // Attempt canonical release via safe helper; helper enforces cooldown/guards
+              try {
                 const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
                               ? window.proxFromHoop(window.canonHoop(H)) : null;
-                if (shouldFire && (!window.__releaseEventSent)) {
-                  (window.__markReleasePose || window.markRelease)?.(fidx, { prox, via: 'pose-heuristic', requirePose: true });
-                  try { window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame: fidx, via: 'pose-heuristic' } })); } catch {}
-                  try { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'pose-heuristic' } })); } catch {}
-                  try { window.__REL_LAST_FIRE_MS = now; } catch {}
-                } else {
-                  try { if (window.DOACH_RELEASE_TRACE) console.log('[gate:suppress]', { frame: fidx, reason:'cooldown', remaining: Math.ceil(cd - since) }); } catch {}
-                }
-              }
+                window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox });
+              } catch {}
             }
           } catch {}
         } catch {
@@ -790,6 +1073,88 @@ window.cancelHoopPick = () => {
   ov.parentNode.replaceChild(clone, ov);
 };
 
+// -----------------------------------------------------------------------//
+// ---- Pose believability gate (size + ROI + overlap + persistence) ---- //
+// -----------------------------------------------------------------------//
+function __poseBox(ls) {
+  const xs = ls.map(k=>k.x), ys = ls.map(k=>k.y);
+  const x1 = Math.min(...xs), y1 = Math.min(...ys);
+  const x2 = Math.max(...xs), y2 = Math.max(...ys);
+  return { x:x1, y:y1, w: x2-x1, h: y2-y1 };
+}
+function __iou(a,b){
+  const ax2=a.x+a.w, ay2=a.y+a.h, bx2=b.x+b.w, by2=b.y+b.h;
+  const x1=Math.max(a.x,b.x), y1=Math.max(a.y,b.y);
+  const x2=Math.min(ax2,bx2), y2=Math.min(ay2,by2);
+  const iw=Math.max(0,x2-x1), ih=Math.max(0,y2-y1);
+  const inter=iw*ih, uni=a.w*a.h + b.w*b.h - inter;
+  return uni>0 ? inter/uni : 0;
+}
+function __anklesY(ls) { // MediaPipe: 27=R ankle, 28=L ankle; fall back to hips if missing
+  const ra = ls[27], la = ls[28], rh=ls[24], lh=ls[23];
+  const ys = [ra?.y, la?.y].filter(Number.isFinite);
+  if (ys.length) return ys.reduce((a,b)=>a+b,0)/ys.length;
+  const ys2 = [rh?.y, lh?.y].filter(Number.isFinite);
+  return ys2.length ? ys2.reduce((a,b)=>a+b,0)/ys2.length : NaN;
+}
+function __rimTopY() { // use locked hoop box
+  try {
+    const H = window.getLockedHoopBox?.();
+    if (!H) return NaN;
+    const h = H.h || H.height || 0;
+    // H may be center-anchored; normalize
+    const cy = Number.isFinite(H.cy) ? H.cy : (H.anchor==='topleft' ? (H.y + h/2) : H.y);
+    return cy - h/2;
+  } catch { return NaN; }
+}
+function __courtRoiOK(ls) {
+  const ank = __anklesY(ls);
+  const rim = __rimTopY();
+  if (!Number.isFinite(ank) || !Number.isFinite(rim)) return false;
+  // y grows downward → "below rim" means ank > rim + margin
+  return (ank >= rim + Number(window.POSE_BELOW_RIM_MIN || 80));
+}
+function isPoseBelievable(ls, objects, canvasEl) {
+  if (!Array.isArray(ls) || ls.length < 33) return false;
+
+  // Size sanity
+  const W = canvasEl?.width  || (window.__VIEW?.vw) || 1280;
+  const H = canvasEl?.height || (window.__VIEW?.vh) || 720;
+  const b = __poseBox(ls);
+  const minH    = Number(window.POSE_MIN_H)           || 110;
+  const minArea = Number(window.POSE_MIN_AREA_FRAC)   || 0.006;
+  if (b.h < minH) return false;
+  if ((b.w * b.h) < (minArea * W * H)) return false;
+
+  // ROI: must be below the rim (reject balcony/railing ghosts)
+  if (!__courtRoiOK(ls)) return false;
+
+  // Overlap with detected player/person
+  const needBox = (window.POSE_REQUIRE_PLAYER_BOX !== false);
+  const players = (objects || [])
+    .filter(o => (o.label === 'player' || o.label === 'person') && Array.isArray(o.box) && o.box.length === 4)
+    .map(o => ({ x:o.box[0], y:o.box[1], w:o.box[2]-o.box[0], h:o.box[3]-o.box[1] }));
+  if (!players.length && needBox) return false;
+  if (players.length) {
+    const iouMin = Number(window.POSE_MIN_IOU_PLAYER) || 0.18;
+    let ok = false;
+    for (const pb of players) if (__iou(b, pb) >= iouMin) { ok = true; break; }
+    if (!ok) return false;
+  }
+  return true;
+}
+// Small persistence gate to avoid 1-frame ghosts
+function poseBeliefLatched(isOK) {
+  const need = Number(window.POSE_STREAK_NEED) || 2;
+  window.__poseBeliefStreak = isOK ? ((window.__poseBeliefStreak||0) + 1) : 0;
+  return window.__poseBeliefStreak >= need;
+}
+
+
+
+
+
+
 // --- Overlay CSS + pixel buffer lock ---
 // make the overlay sit over the video, scale with it via CSS,
 // but keep the canvas drawing buffer equal to the video *intrinsic* size
@@ -844,6 +1209,7 @@ export function tickReadiness(objects, poses) {
     if (!window.__readyForScoring && __warmFrames >= WARM_NEED) {
       window.__readyForScoring = true;
       window.__detectorsWarmed = true;
+      window.__shotTrackingArmed = true;
       console.log('[ready] ✅ armed (warm frames =', __warmFrames, ')');
     }
   } else {
@@ -859,6 +1225,7 @@ export function tickReadiness(objects, poses) {
     if (window.__readyForScoring && __coolFrames >= COOL_NEED) {
       window.__readyForScoring = false;
       console.log('[ready] ⛔ cooled (cool frames =', __coolFrames, ')');
+      window.__shotTrackingArmed = false;
     }
   }
 }
@@ -1010,12 +1377,20 @@ export function startPreDetection(videoEl) {
         })();
         const poses = poseRes?.landmarks || [];
 
-        // Update player state so pose skeleton can draw during warmup
+        // Update only if pose is believable (size + overlaps a detected player/person box)
         try {
           if (Array.isArray(poses) && poses.length) {
-            const fps = Number(window.__videoFPS) || 30;
+            const fps  = Number(window.__videoFPS) || 30;
             const fidx = Math.max(0, Math.round(((videoEl?.currentTime || 0) * fps)));
-            updatePlayerTracker?.(poses[0], fidx);
+            const chosen = (typeof pickPoseForActive === 'function')
+              ? pickPoseForActive(poses, buf, getLockedHoopBox?.())
+              : { scaled: poses[0] };
+            if (chosen && Array.isArray(chosen.scaled) && isPoseBelievable(chosen.scaled, objects, buf)) {
+              updatePlayerTracker?.(chosen.scaled, fidx);
+              try { window.playerState._believable = true; } catch {}
+            } else {
+              try { window.playerState._believable = false; } catch {}
+            }
           }
         } catch {}
 
@@ -1064,7 +1439,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const overlay     = document.getElementById('overlay');
   const frameEl     = document.querySelector('.video-frame');
   const ctx = overlay ? overlay.getContext('2d', { willReadFrequently: true }) : null;
-
 
   if (frameEl && getComputedStyle(frameEl).position === 'static') {
     frameEl.style.position = 'relative';
@@ -1116,20 +1490,71 @@ document.addEventListener('DOMContentLoaded', () => {
       } catch {}
       try { startPreDetection?.(videoPlayer); } catch {}
     }
+    try { window.resetReleaseSessionCounters?.(); } catch {}
   }, { once: true });
 
+  // ────────────────────────────────────────────────────────────────────────────
+  // Pose-release sampler: polls releaseGate() and emits via safeEmitRelease()
+  // Keeps the HUD visual-only; canonical events come from this producer.
+  // ────────────────────────────────────────────────────────────────────────────
+  (function installPoseReleaseSampler(){
+    if (window.__poseSamplerInstalled) return;
+    window.__poseSamplerInstalled = true;
+
+    function tick() {
+      try {
+        const hist = (window.playerState?.frameHistory || []).slice(-5);
+        if (typeof window.releaseGate === 'function' && hist.length) {
+          const g = window.releaseGate(hist);
+          if (g?.released) {
+            const f = window.playerState?.lastFrame ?? (hist.at ? hist.at(-1)?.frame : (hist[hist.length-1]?.frame)) ?? 0;
+            window.safeEmitRelease?.(f, 'pose-sampler', { gate: g });
+          }
+        }
+      } catch {}
+      finally {
+        window.__poseSamplerTimer = setTimeout(tick, Number(window.COACH_POSE_MS || 120));
+      }
+    }
+
+    window.startPoseReleaseSampler = function startPoseReleaseSampler(){
+      if (window.__poseSamplerTimer) return; // idempotent
+      window.__poseSamplerTimer = setTimeout(tick, 0);
+    };
+    window.stopPoseReleaseSampler = function stopPoseReleaseSampler(){
+      try { clearTimeout(window.__poseSamplerTimer); } catch {}
+      window.__poseSamplerTimer = null;
+    };
+
+    // Auto-stop at end of attempts
+    window.addEventListener('shot:summary', () => { try { window.stopPoseReleaseSampler?.(); } catch {} });
+    window.addEventListener('shot:end',     () => { try { window.stopPoseReleaseSampler?.(); } catch {} });
+  })();
+
+  // Reset canonical counters/guards on new video source
+  window.resetReleaseSessionCounters = function resetReleaseSessionCounters() {
+    try {
+      window.__SCORE_SHOT_COUNT = 0;     // HUD uses this canonical counter
+      window.__HUD_SHOT_COUNT   = 0;     // legacy HUD counter (kept for safety)
+      window.__releaseEventSent = false; // allow first release
+      window.__REL_LAST_FIRE_MS = 0;     // reset cooldown
+    } catch {}
+  };
+
+  // Call once for the current source as well
+  try { window.resetReleaseSessionCounters?.(); } catch {}
 
   // Keep overlay in sync on resize / layout
   const resync = () => (window.scheduleSyncOverlay?.() ?? syncOverlayToVideo());
   window.addEventListener('resize', resync, { passive: true });
-  new ResizeObserver(resync).observe(frameEl);
-  new ResizeObserver(resync).observe(videoPlayer);
+  try { new ResizeObserver(resync).observe(frameEl); } catch {}
+  try { new ResizeObserver(resync).observe(videoPlayer); } catch {}
   document.addEventListener('fullscreenchange', resync);
-
 
   // Pause → stop analysis + pre-detect, reset readiness a bit
   videoPlayer.addEventListener('pause', () => {
-    isTracking = false;
+    try { window.stopPoseReleaseSampler?.(); } catch {}
+    try { window.isTracking = false; } catch {}
     try { stopPreDetection?.(); } catch {}
     try { window.stopFrameAnalysis?.(); } catch {}
     try { window.onSeekOrPause?.(); } catch {}
@@ -1162,6 +1587,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (isLive) {
       console.log('▶️ Live camera streaming');
       // Let pre-warm or picker flow start analysis later; do NOT pause here.
+      try { window.startPoseReleaseSampler?.(); } catch {}
       return;
     }
 
@@ -1183,7 +1609,7 @@ document.addEventListener('DOMContentLoaded', () => {
         try { startPreDetection?.(videoPlayer); } catch {}
         // Wait for PD warmup (lead frames) or up to 5s (~10 fps => ~4s lead)
         const lead = Number(window.PD_PREFETCH_LEAD ?? 40);
-        const toMs = Number(window.PD_PREFETCH_TIMEOUT_MS ?? 5000);
+        const toMs = Number(window.PD_PREFETCH_TIMEOUT_MS ?? 3500);   
         try { await (waitForPDWarm?.(lead, toMs) || Promise.resolve()); } catch {}
         window.__preflightReady = true;
         try { await videoPlayer.play(); } catch {}
@@ -1192,143 +1618,104 @@ document.addEventListener('DOMContentLoaded', () => {
 
     console.log('▶️ Video playback started');
     window.startFrameAnalysis?.();
+    // NEW: begin polling the canonical gate for pose releases
+    try { window.startPoseReleaseSampler?.(); } catch {}
   });
 
-  // Shot lifecycle debug hooks (optional)
-  try {
-    // Report frontend release to backend (anchor for arc)
-    async function __reportReleaseToServer(detail){
-      try {
-        const payload = {
-          sessionId: (window.__SESSION_ID || null),
-          shotId: (window.__SHOT_IDX || null),
-          frame: Number(detail?.frame)||0,
-          tMs: Number(detail?.tMs||Date.now()),
-          via: detail?.via || 'frontend',
-          poseSnapshot: (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints) ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.()) : null,
-          hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
-        };
-        await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).catch(()=>{});
-      } catch {}
-    }
+  // ────────────────────────────────────────────────────────────────────────────
+  // Shot lifecycle helpers (kept; used by the unified pose-release pipeline)
+  // ────────────────────────────────────────────────────────────────────────────
 
-    // Global capture-phase guard: swallow early/invalid releases
-    window.addEventListener('shot:release', (e) => {
+  // Report frontend release to backend (anchor for arc)
+  window.__reportReleaseToServer = async function __reportReleaseToServer(detail){
+    try {
+      // Ensure a backend session exists; if not, create one on the fly
       try {
-        const H = window.getLockedHoopBox?.();
-        if (!H || window.__hoopConfirmed !== true) { e.stopImmediatePropagation(); return; }
-        if (window.__shotTrackingArmed !== true) { e.stopImmediatePropagation(); return; }
-      } catch {}
-    }, true);
-
-    window.addEventListener('shot:release', (e) => {
-      // Ignore any release before hoop is locked
-      try { if (!window.getLockedHoopBox?.()) return; } catch {}
-      // Require countdown-armed state
-      try { if (window.__shotTrackingArmed !== true) return; } catch {}
-      // Track last release source
-      try { window.__REL_LAST_VIA = String(e?.detail?.via || ''); } catch {}
-      // In pose-first mode, ignore non-pose releases unless unified gate says released
-      try {
-        if (window.POSE_FIRST_ONLY === true) {
-          const hist = (window.playerState?.frameHistory || []).slice(-5);
-          let ok = false;
-          if (typeof window.releaseGate === 'function') {
-            try { ok = !!window.releaseGate(hist)?.released; } catch {}
+        if (!window.__SESSION_ID) {
+          const rr = await fetch('/api/sessions/start', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ device: navigator.userAgent })
+          });
+          if (rr.ok) {
+            const jj = await rr.json();
+            window.__SESSION_ID = jj?.id || null;
+            window.__SHOT_IDX = 0;
           }
-          if (!ok) return; // suppress server report and local mini-score window
         }
       } catch {}
-      if (window.DOACH_SHOT_DEBUG && window.DOACH_REL_LOG === true) {
-        console.log('[shot:event] release', { frame: e?.detail?.frame, via: e?.detail?.via });
-      }
-      try { __reportReleaseToServer(e?.detail || {}); } catch {}
-      // In releaseOnly, keep the scorer ticking briefly so enter/exit is observed
-      try { if (window.__RELEASE_ONLY === true) window.__TEMP_SCORE_UNTIL = performance.now() + (Number(window.MINI_SCORE_MS || 3000)); } catch {}
-      // If no summary arrives by the end of the mini-scoring window, finalize the pending HUD shot
-      try {
-        const dwell = Number(window.MINI_SCORE_MS || 3000) + 260;
-        setTimeout(() => {
-          try {
-            // Finalize any pending HUD shot if scorer didn't emit a summary
-            const list = window.__shotList || [];
-            const last = list.at?.(-1) || null;
-            if (last && last.pending) {
-              const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
-              window.recordShotSummary?.(summary);
-            }
-            // Re-arm the gate for next attempt even without a summary
-            if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
-          } catch {}
-        }, dwell);
-      } catch {}
-      // Safety: if no summary arrives (e.g., no ball detections), re-arm release after cooldown
-      try {
-        const cd = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 2000);
-        setTimeout(() => { try { window.__releaseEventSent = false; } catch {} }, cd + 250);
-      } catch {}
-    });
-    window.addEventListener('shot:end', (e) => {
-      if (window.DOACH_SHOT_DEBUG) {
-        console.log('[shot:event] end', { frame: e?.detail?.frame });
-      }
-      // Re-arm release flag for subsequent attempts
-      try { window.__releaseEventSent = false; } catch {}
-      try { window.__REL_LAST_FIRE_MS = 0; } catch {}
-    });
-    window.addEventListener('shot:summary', (e) => {
-      if (window.DOACH_SHOT_DEBUG) {
-        console.log('[shot:event] summary', e?.detail || null);
-      }
-      // Re-arm pose latch for next attempt even if scorer finished late
-      try { if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; } } catch {}
-      // Clear the mini scoring window once summary arrives
-      try { window.__TEMP_SCORE_UNTIL = 0; } catch {}
-      // Also clear release suppression and streak so next release can fire
-      try { window.__releaseEventSent = false; } catch {}
-      try { window.__REL_LAST_FIRE_MS = 0; } catch {}
-      try { window.__gateStreak = 0; } catch {}
-    });
-    window.setShotDebug = (on=true) => { window.DOACH_SHOT_DEBUG = !!on; console.log('[shot:debug]', window.DOACH_SHOT_DEBUG); };
-    // Release tracing controls (lightweight, console-only)
-    window.setReleaseTrace = (on=true) => { window.DOACH_RELEASE_TRACE = !!on; console.log('[release:trace]', window.DOACH_RELEASE_TRACE); };
-    // Keep a unified analyzer frame index for all samplers
-    window.addEventListener('analyzer:frame-done', (e) => {
-      try { const k = Number(e?.detail?.__frameIdx); if (Number.isFinite(k)) window.__AN_IDX = k; } catch {}
-    });
-    // Expectation helpers: watch for a release near a specific frame or time
-    window.watchReleaseAtFrame = (frame) => {
-      const target = Math.max(0, Number(frame)||0);
-      const fps = Number(window.__videoFPS) || 30;
-      const tolerance = Number(window.REL_WATCH_TOL || 3);
-      const t0 = performance.now();
-      const onRel = (e) => {
-        const f = Number(e?.detail?.frame);
-        console.log('[watch:release]', { expect: target, got: f, dtMs: Math.round(performance.now()-t0), within: Math.abs((f||0)-target) <= tolerance });
-        window.removeEventListener('shot:release', onRel);
+      const payload = {
+        sessionId: (window.__SESSION_ID || null),
+        shotId: (window.__SHOT_IDX || null),
+        frame: Number(detail?.frame)||0,
+        tMs: Number(detail?.tMs||Date.now()),
+        via: detail?.via || 'frontend',
+        poseSnapshot: (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+                        ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+                        : null,
+        hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
+        gate: (window.__LAST_GATE || null),
       };
-      window.addEventListener('shot:release', onRel);
-      console.log('[watch:arm] release @ frame', target, `(±${tolerance} fr) ~ t=${(target/fps).toFixed(2)}s`);
-    };
-    window.watchReleaseAtTime = (hhmmss) => {
+      await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).catch(()=>{});
+    } catch {}
+  };
+
+  // Report per-shot summary (ball metrics) to backend for persistence
+  window.__reportSummaryToServer = async function __reportSummaryToServer(detail){
+    try {
+      const sid = (window.__SESSION_ID || null);
+      if (!sid) return;
+      const list = (window.__shotList || []);
+      let idx = null;
+      try { if (Number.isFinite(window.__SHOT_IDX)) idx = Number(window.__SHOT_IDX); } catch {}
+      if (idx == null && Array.isArray(list) && list.length) idx = list.length - 1;
+      const payload = {
+        idx,
+        t: Date.now(),
+        made: (detail?.made ?? null),
+        arcHeight: (detail?.arcHeight ?? null),
+        entryAngle: (detail?.entryAngle ?? null),
+        releaseAngle: (detail?.releaseAngle ?? null),
+        missReason: (detail?.missReason ?? null)
+      };
+      // Client-side idempotence: avoid double posts for same sid|idx
       try {
-        const fps = Number(window.__videoFPS) || 30;
-        const parts = String(hhmmss||'').trim().split(':').map(Number);
-        let h=0,m=0,s=0; if (parts.length===3){[h,m,s]=parts;} else if(parts.length===2){[m,s]=parts;} else { s = parts[0]||0; }
-        const sec = (h*3600)+(m*60)+s; const frame = Math.round(sec*fps);
-        window.watchReleaseAtFrame(frame);
-      } catch(e) { console.warn('[watch] bad time', hhmmss, e); }
+        const key = `${sid}|${idx==null? 'na' : idx}`;
+        window.__SUMMARY_POSTED ||= new Set();
+        if (window.__SUMMARY_POSTED.has(key)) return;
+        window.__SUMMARY_POSTED.add(key);
+      } catch {}
+      await fetch(`/api/sessions/${sid}/shot`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)}).catch(()=>{});
+    } catch {}
+  };
+
+  // Dev toggles (no listeners bound until you call them)
+  window.setShotDebug   = (on=true) => { window.DOACH_SHOT_DEBUG   = !!on; console.log('[shot:debug]',   window.DOACH_SHOT_DEBUG); };
+  window.setReleaseTrace= (on=true) => { window.DOACH_RELEASE_TRACE= !!on; console.log('[release:trace]', window.DOACH_RELEASE_TRACE); };
+
+  // Expectation helpers: watch for a release near a specific frame or time
+  window.watchReleaseAtFrame = (frame) => {
+    const target = Math.max(0, Number(frame)||0);
+    const fps = Number(window.__videoFPS) || 30;
+    const tolerance = Number(window.REL_WATCH_TOL || 3);
+    const t0 = performance.now();
+    const onRel = (e) => {
+      const f = Number(e?.detail?.frame);
+      console.log('[watch:release]', { expect: target, got: f, dtMs: Math.round(performance.now()-t0), within: Math.abs((f||0)-target) <= tolerance });
+      window.removeEventListener('shot:release', onRel);
     };
-    // Cleanup/guards at attempt end
-    const _onAttemptEnd = () => {
-      try { if (window.__coachPoseInterval) { clearInterval(window.__coachPoseInterval); delete window.__coachPoseInterval; } } catch {}
-      try { if (window.__coachPaintRaf != null) { cancelAnimationFrame(window.__coachPaintRaf); window.__coachPaintRaf = null; } } catch {}
-      try { if (window.ballState) delete window.ballState.__poseLatchAt; } catch {}
-      try { if (window.__BG_STOP) window.__BG_STOP(); } catch {}
-    };
-    window.addEventListener('shot:end', _onAttemptEnd);
-    window.addEventListener('shot:summary', _onAttemptEnd);
-  } catch {}
+    window.addEventListener('shot:release', onRel);
+    console.log('[watch:arm] release @ frame', target, `(±${tolerance} fr) ~ t=${(target/fps).toFixed(2)}s`);
+  };
+  window.watchReleaseAtTime = (hhmmss) => {
+    try {
+      const fps = Number(window.__videoFPS) || 30;
+      const parts = String(hhmmss||'').trim().split(':').map(Number);
+      let h=0,m=0,s=0; if (parts.length===3){[h,m,s]=parts;} else if(parts.length===2){[m,s]=parts;} else { s = parts[0]||0; }
+      const sec = (h*3600)+(m*60)+s; const frame = Math.round(sec*fps);
+      window.watchReleaseAtFrame(frame);
+    } catch(e) { console.warn('[watch] bad time', hhmmss, e); }
+  };
 
   // Seek → small readiness reset (useful for scrub/step)
   videoPlayer.addEventListener('seeked', () => {
@@ -1372,26 +1759,20 @@ document.getElementById('useCameraBtn')?.addEventListener('click', async () => {
       }
     }
   } catch {}
-
 });
 
-// ensure first release of a new play can fire FBF
-  document.getElementById('videoPlayer')?.addEventListener('play', () => {
-    window.__releaseEventSent = false;
-  });
+// Optional: re-arm latch on play only when explicitly enabled
+document.getElementById('videoPlayer')?.addEventListener('play', () => {
+  if (window.RESET_ON_PLAY === true) { try { window.__releaseEventSent = false; } catch {} }
+});
 
-  // Keep the arc overlay crisp between shots
-  try {
-    window.addEventListener('shot:release', () => {
+// Keep the arc overlay crisp between shots (noop here; handled elsewhere)
+try {
+  window.addEventListener('shot:release', () => {
     // Disabled: app-level FBF starter removed
     return;
-
-      try {
-        if (window.ballArc && Array.isArray(window.ballArc.trail)) window.ballArc.trail.length = 0;
-        else if (window.ballArc) window.ballArc.trail = [];
-      } catch {}
-    });
-  } catch {}
+  });
+} catch {}
 
 // test agent for auto devel
 (function loadArcContract(){
@@ -1402,6 +1783,7 @@ document.getElementById('useCameraBtn')?.addEventListener('click', async () => {
   s.onerror = () => console.warn('[arc] contract not found — metrics will be skipped');
   document.head.appendChild(s);
 })();
+
 
 
 //--------------------------------------------------------------//
@@ -1475,6 +1857,8 @@ window.handleVideoUpload = async function (event) {
     try { startPreDetection?.(video); } catch (e) {
       console.warn('predetect start failed:', e);
     }
+    // Reset canonical counters/guards for this new source
+    try { window.resetReleaseSessionCounters?.(); } catch {}
   } catch (e) {
     console.warn('initOverlay failed:', e);
   }
@@ -1884,7 +2268,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
     if (hoopLocked && (updatedThisTick || hasTrail)) {
       scoringTick?.(frameIdx);
       checkShotConditions?.(ballState, hoopLocked, frameIdx);
-      console.log('[score:fbf]', frameIdx, {
+      if (window.DOACH_VERBOSE === true) console.log('[score:fbf]', frameIdx, {
         rel:   ballState?.releaseFrame,
         enter: ballState?.proxEnterFrame,
         exit:  ballState?.proxExitFrame,
@@ -2002,10 +2386,9 @@ async function runShotFBF() {
     runShotFBF();
   });
 
-  // Reset release latch on summary/end so the next attempt can start FBF
+  // Reset release latch on summary so the next attempt can start FBF
   const _resetRel = () => { try { window.__releaseEventSent = false; } catch {} };
   window.addEventListener('shot:summary', _resetRel);
-  window.addEventListener('shot:end', _resetRel);
 
   window.addEventListener('shot:summary', () => {
     if (window.__cancelFBF) { try { window.__cancelFBF(); } catch {} }
@@ -2255,8 +2638,15 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
             const s = (window.ballState ||= {});
             if (st.released && !(Number.isFinite(s.releaseFrame))) {
               if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
-                markRelease?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)) });
-                try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: frameIdx, via: 'rvfc-backstop' } })); } } catch {}
+                const now = performance.now();
+                const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+                const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+                if (since >= cd && !window.__releaseEventSent) {
+                  const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-backstop') === true;
+                  if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
+                } else {
+                  if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-backstop:suppress]', { frame: frameIdx });
+                }
               }
             }
           } catch {}
@@ -2273,9 +2663,15 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
               const allGreen = allScore >= TH - 1e-6;
               if (gate.released && allGreen) {
                 if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
-                  markRelease?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)) });
-                  try { if (window.DOACH_RELEASE_TRACE) console.log('[release:pose]', { frame: frameIdx, score: allScore, tests: gate.tests }); } catch {}
-                  try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: frameIdx, via: 'rvfc-pose-only', score: allScore } })); } } catch {}
+                  const now = performance.now();
+                  const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+                  const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+                  if (since >= cd && !window.__releaseEventSent) {
+                    const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only') === true;
+                    if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
+                  } else {
+                    if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-pose-only:suppress]', { frame: frameIdx });
+                  }
                 }
               }
             }
@@ -2297,8 +2693,15 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                 const handOK = d <= (Number(window.REL_HAND_DIST_PX) || 140);
                 if (up && handOK) {
                   if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
-                    markRelease?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)) });
-                    try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: frameIdx, via: 'rvfc-near-hand' } })); } } catch {}
+                    const now = performance.now();
+                    const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+                    const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+                    if (since >= cd && !window.__releaseEventSent) {
+                      const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-near-hand') === true;
+                      if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
+                    } else {
+                      if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-near-hand:suppress]', { frame: frameIdx });
+                    }
                   }
                 }
               }
@@ -2316,8 +2719,15 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
               const allScore = Number(gate?.tests?.score || 0);
               const allGreen = allScore >= TH - 1e-6;
               if (gate.released && allGreen && window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
-                markRelease?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)) });
-                try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: frameIdx, via: 'rvfc-pose-only-noball', score: allScore } })); } } catch {}
+                const now = performance.now();
+                const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+                const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+                if (since >= cd && !window.__releaseEventSent) {
+                  const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only-noball') === true;
+                  if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
+                } else {
+                  if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-pose-only-noball:suppress]', { frame: frameIdx });
+                }
               }
             }
           } catch {}
@@ -2725,19 +3135,21 @@ if (typeof window.clientToVideoXY !== 'function') {
             if (window.DOACH_RELEASE_TRACE === true) {
               console.log('[gate]', { frame: fidx, ...gate.tests, passed: gate.passed, latched });
             }
-            // Visual HUD pulse when score crosses HUD threshold on this frame (only after arming)
-            try {
-              const sc = Number(gate?.tests?.score || 0);
-              const th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
-              const lastF = Number(window.__SCORE_LAST_FRAME || -1);
-              if (window.__shotTrackingArmed === true && sc >= th - 1e-6 && fidx !== lastF) {
-                window.__SCORE_LAST_FRAME = fidx;
-                window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1;
-                window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));
-                try { window.dispatchEvent(new CustomEvent('hud:score-trip', { detail: { frame: fidx, score: sc } })); } catch {}
-                if (window.DOACH_RELEASE_TRACE === true) console.log('[score:pulse]', { frame: fidx, score: sc, th });
-              }
-            } catch {}
+            // Visual HUD pulse when score crosses threshold (optional; disabled by default)
+            if (window.HUD_LOCAL_PULSE === true) {
+              try {
+                const sc = Number(gate?.tests?.score || 0);
+                const th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+                const lastF = Number(window.__SCORE_LAST_FRAME || -1);
+                if (window.__shotTrackingArmed === true && sc >= th - 1e-6 && fidx !== lastF) {
+                  window.__SCORE_LAST_FRAME = fidx;
+                  window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1;
+                  window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));
+                  try { window.dispatchEvent(new CustomEvent('hud:score-trip', { detail: { frame: fidx, score: sc } })); } catch {}
+                  if (window.DOACH_RELEASE_TRACE === true) console.log('[score:pulse]', { frame: fidx, score: sc, th });
+                }
+              } catch {}
+            }
           } catch {}
 
           // Prefer unified releaseGate decision; if gate says released and we are armed, allow latch
@@ -2749,25 +3161,25 @@ if (typeof window.clientToVideoXY !== 'function') {
             try { window.__GATE_LATCH_FRAME = fidx; } catch {}
             // Global cooldown to avoid double-trigger while follow-through holds
             const now = performance.now();
-            const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 2000);
+            const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
             const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
             const shouldFire = since >= cd;
             if (H) {
               const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
                             ? window.proxFromHoop(window.canonHoop(H)) : null;
               if (shouldFire && (!window.__releaseEventSent)) {
-                (window.__markReleasePose || window.markRelease)?.(fidx, { prox, via: 'pose-heuristic', requirePose: true });
-                try { window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame: fidx, via: 'pose-heuristic' } })); } catch {}
-                try { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'pose-heuristic' } })); } catch {}
-                try { window.__REL_LAST_FIRE_MS = now; } catch {}
+                const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
+                if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
               } else {
-                // Override cooldown if the last event was not pose-sourced and we have an all-green latch now
-                const lastVia = String(window.__REL_LAST_VIA || '');
-                if ((!shouldFire || window.__releaseEventSent) && allGreen && !/pose/i.test(lastVia)) {
-                  (window.__markReleasePose || window.markRelease)?.(fidx, { prox, via: 'pose-heuristic', requirePose: true });
-                  try { window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame: fidx, via: 'pose-heuristic' } })); } catch {}
-                  try { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'pose-heuristic' } })); } catch {}
-                  try { window.__REL_LAST_FIRE_MS = now; } catch {}
+                // Optional: allow a one-time cooldown override when lastVia wasn't pose/hud and we are fully all-green
+                if (window.ALLOW_COOLDOWN_OVERRIDE === true) {
+                  const lastVia = String(window.__REL_LAST_VIA || '');
+                  if ((!shouldFire || window.__releaseEventSent) && allGreen && !/(pose|hud)/i.test(lastVia) && !window.__releaseEventSent) {
+                    const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
+                    if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
+                  } else {
+                    try { if (window.DOACH_RELEASE_TRACE) console.log('[gate:suppress]', { frame: fidx, reason:'cooldown', remaining: Math.ceil(cd - since) }); } catch {}
+                  }
                 } else {
                   try { if (window.DOACH_RELEASE_TRACE) console.log('[gate:suppress]', { frame: fidx, reason:'cooldown', remaining: Math.ceil(cd - since) }); } catch {}
                 }
@@ -3470,30 +3882,19 @@ window.resetShots = window.resetShots || function () {
         // analyzer hasn’t started yet or RVFC stalls on some devices.
         try {
           if (Array.isArray(poses) && poses.length >= 33) {
-            try {
-              // fidx computed above
-              updatePlayerTracker?.(poses, fidx);
-                try {
-                  const H = window.getLockedHoopBox?.();
-                  const bs = (window.ballState ||= {});
-                  if (H && !Number.isFinite(bs.releaseFrame) && Array.isArray(window.playerState?.keypoints) && window.playerState.keypoints.length >= 33) {
-                    const hist = (window.playerState.frameHistory || []).slice(-5);
-                    const gate = (typeof window.releaseGate === 'function') ? window.releaseGate(hist) : { released:false, tests:{} };
-                    const TH = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH);
-                    const allScore = Number(gate?.tests?.score || 0);
-                    const allGreen = allScore >= TH - 1e-6;
-                    if (gate.released && allGreen) {
-                      const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
-                                    ? window.proxFromHoop(window.canonHoop(H)) : null;
-                      (window.__markReleasePose || window.markRelease)?.(fidx, { prox, via: 'bg-pose' });
-                      try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'bg-pose', score: allScore } })); } } catch {}
-                    }
-                  }
-                } catch {}
-
-
-            } catch { updatePlayerTracker?.(poses, frame); }
+          // choose a target pose + gate for believability before writing
+          const v = document.getElementById('videoPlayer');
+          const off = document.createElement('canvas'); off.width = v.videoWidth||640; off.height = v.videoHeight||360;
+          const chosen = (typeof pickPoseForActive === 'function')
+            ? pickPoseForActive([poses], off, getLockedHoopBox?.())
+            : { scaled: poses };
+          if (chosen && Array.isArray(chosen.scaled) && isPoseBelievable(chosen.scaled, objects, off)) {
+            try { updatePlayerTracker?.(chosen.scaled, fidx); window.playerState._believable = true; }
+            catch { updatePlayerTracker?.(chosen.scaled, frame); window.playerState._believable = true; }
+          } else {
+            try { window.playerState._believable = false; } catch {}
           }
+        }
         } catch {}
 
         const hoop = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
@@ -3509,10 +3910,9 @@ window.resetShots = window.resetShots || function () {
               try {
                 const s = (window.ballState ||= {});
                 if (!Number.isFinite(s.releaseFrame)) {
-                  markRelease?.(fidx, { prox: proxFromHoop?.(canonHoop?.(hoop)) });
+                  window.safeEmitRelease?.(fidx, 'bg-fsm');
                 }
               } catch {}
-              try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'bg-fsm' } })); } } catch {}
               window.dispatchEvent(new CustomEvent('bg:shot:release', { detail: { frame: fidx, tMs: performance.now() } }));
               }
             }

@@ -222,6 +222,49 @@
   }
 
   // ---------- Panels ----------
+async function openDiagnosticsPanel(){
+  const panel = (openDiagnosticsPanel.panel ||= makeSidePanel('Coach Diagnostics'));
+  const body  = document.createElement('div');
+  body.style.padding = '6px';
+
+  function row(label, btns){
+    const d = document.createElement('div'); d.style.cssText='display:flex;justify-content:space-between;align-items:center;margin:8px 0;gap:8px;';
+    const l = document.createElement('div'); l.textContent = label; l.style.opacity='.9';
+    const r = document.createElement('div'); btns.forEach(b => r.appendChild(b));
+    d.append(l,r); return d;
+  }
+  function mk(label, onclick){ const b=document.createElement('button'); b.className='doach-btn'; b.textContent=label; b.onclick=onclick; return b; }
+  function log(text){ const p=document.createElement('pre'); p.textContent=text; p.style.maxHeight='200px'; p.style.overflow='auto'; p.style.background='#0b0f14'; p.style.border='1px solid #1f2a36'; p.style.borderRadius='8px'; p.style.padding='6px'; return p; }
+
+  const out = document.createElement('div');
+  out.appendChild(log('Diagnostics ready.'));
+
+  const dumpBtn = mk('Dump Pose', async ()=>{
+    try { const d = (typeof window.dumpPoseData==='function') ? window.dumpPoseData() : null; out.appendChild(log(JSON.stringify(d,null,2))); } catch(e){ out.appendChild(log('dump error: '+(e.message||e))); }
+  });
+  const testBtn = mk('Test AI', async ()=>{
+    try {
+      let snap = (typeof window.__getPoseSnapshot==='function') ? window.__getPoseSnapshot() : null;
+      if (!snap && typeof window.__samplePoseSnapshotNow==='function') snap = await window.__samplePoseSnapshotNow();
+      if (!snap) { out.appendChild(log('No snapshot available')); return; }
+      const body = { prompt: 'You are a concise basketball shooting coach. Using only these metrics, give 1-3 specific release cues (no fluff). Metrics: '+JSON.stringify(snap), model:(window.DOACH&&window.DOACH.model)||'gpt-4o-mini', lang:'en-US', shot:snap, profile:(localStorage.getItem('doachProfile')||'') };
+      const r = await fetch('/api/coach', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+      const j = await r.json(); out.appendChild(log(JSON.stringify(j,null,2))); if (j?.text) (window.doachSpeak||window.coachSpeak||console.log)(j.text);
+    } catch(e){ out.appendChild(log('AI test error: '+(e.message||e))); }
+  });
+  const traceBtn = mk('Toggle Trace', ()=>{ window.DOACH_RELEASE_TRACE = !window.DOACH_RELEASE_TRACE; out.appendChild(log('Trace: '+window.DOACH_RELEASE_TRACE)); });
+  const startObs = mk('Start Observe', ()=>{ try { window.startObserverStreaming?.(2); out.appendChild(log('Observe start')); } catch(e){ out.appendChild(log('Observe start error: '+(e.message||e))); } });
+  const stopObs  = mk('Stop Observe', ()=>{ try { window.stopObserverStreaming?.(); out.appendChild(log('Observe stop')); } catch(e){ out.appendChild(log('Observe stop error: '+(e.message||e))); } });
+
+  body.append(
+    row('Pose', [dumpBtn]),
+    row('AI',   [testBtn, traceBtn]),
+    row('Observe', [startObs, stopObs]),
+    document.createElement('hr'), out
+  );
+
+  panel.setBody(body); panel.open();
+}
 async function openContentPanel(){
   const panel = (openContentPanel.panel ||= makeSidePanel('Content'));
   const body  = el('div');
@@ -562,6 +605,7 @@ function mountHamburgerMenu(){
       el('li', {}, el('button', {class:'doach-item', onclick:openMyDoachPanel}, 'My Doach')),
       el('li', {}, el('button', {class:'doach-item', onclick:openAuthPanel}, 'Login / Account')),
       el('li', {}, el('button', {class:'doach-item', onclick:() => window.open('/static/my_sessions.html','_blank')}, 'My Sessions')),
+      el('li', {}, el('button', {class:'doach-item', onclick:openDiagnosticsPanel}, 'Coach Diagnostics')),
       // ✅ one Preferences item only
       el('li', {}, el('button', {
         class:'doach-item',

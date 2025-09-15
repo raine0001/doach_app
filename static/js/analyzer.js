@@ -485,7 +485,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
       scoringTick?.(frameIdx);
       checkShotConditions?.(window.ballState, hoopLocked, frameIdx);
       if (window.DOACH_SHOT_DEBUG) {
-        console.log('[score:fbf]', frameIdx, { rel: window.ballState?.releaseFrame, enter: window.ballState?.proxEnterFrame, exit: window.ballState?.proxExitFrame, state: window.ballState?.state, shots: (window.shotLog?.length || 0) });
+        if (window.DOACH_VERBOSE === true) console.log('[score:fbf]', frameIdx, { rel: window.ballState?.releaseFrame, enter: window.ballState?.proxEnterFrame, exit: window.ballState?.proxExitFrame, state: window.ballState?.state, shots: (window.shotLog?.length || 0) });
       }
       if (!window.__lastSummary && Array.isArray(window.shotLog) && window.shotLog.length > 0) { window.__lastSummary = window.shotLog.at(-1); }
     }
@@ -551,8 +551,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       try {
         const bs = (window.ballState ||= {});
         if (window.__TEST_MODE && bs.releaseFrame == null) {
-          const fn = (window.__markReleasePose || window.markRelease);
-          if (typeof fn === 'function') fn(0, { via: 'tm-autolatch-bootstrap' });
+          if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(0, 'tm-autolatch-bootstrap');
         }
       } catch {}
     }, 800);
@@ -569,7 +568,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
           if (bs.releaseFrame == null) {
             const fn = (window.__markReleasePose || window.markRelease);
             if (typeof fn === 'function') fn(0, { via: 'tm-bootstrap' });
-            try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: 0, via: 'tm-bootstrap' } })); } } catch {}
+            try { if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(0, 'tm-bootstrap'); } catch {}
           }
         } catch {}
       }, 600));
@@ -692,9 +691,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
             const s = (window.ballState ||= {});
             if (st.released && !(Number.isFinite(s.releaseFrame))) {
               if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
-                const fn = (window.__markReleasePose || window.markRelease);
-                fn?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)), via: 'analyzer-backstop' });
-                try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'analyzer-backstop' } })); } } catch {}
+                if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(frameIdx, 'analyzer-backstop');
               }
             }
           } catch {}
@@ -711,10 +708,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
               const allGreen = allScore >= TH - 1e-6;
               if (gate.released && allGreen) {
                 if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
-                  const fn = (window.__markReleasePose || window.markRelease);
-                  fn?.(frameIdx, { prox: proxFromHoop?.(canonHoop?.(hoopLocked)), via: 'analyzer-pose-only', score: allScore });
-                  try { if (window.DOACH_RELEASE_TRACE) console.log('[release:pose]', { frame: frameIdx, score: allScore, tests: gate.tests }); } catch {}
-                  try { if (!window.__releaseEventSent) { window.__releaseEventSent = true; window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame: fidx, via: 'analyzer-pose-only', score: allScore } })); } } catch {}
+                  if (typeof window.safeEmitRelease === 'function') window.safeEmitRelease(frameIdx, 'analyzer-pose-only');
                 }
               }
             }
@@ -764,7 +758,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
           const sc = Number(gate?.tests?.score || 0);
           const th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
           const lastF = Number(window.__SCORE_LAST_FRAME || -1);
-          if (window.__shotTrackingArmed === true && sc >= th - 1e-6 && frameIdx !== lastF) {
+          if (window.HUD_LOCAL_PULSE === true && window.__shotTrackingArmed === true && sc >= th - 1e-6 && frameIdx !== lastF) {
             window.__SCORE_LAST_FRAME = frameIdx;
             window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1;
             window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));

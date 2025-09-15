@@ -278,6 +278,22 @@ if (typeof window.__forceServerDetect === 'undefined') {
   window.__forceServerDetect = false;
 }
 
+// Event-driven HUD pulse: show a single center Shot N on canonical releases
+try {
+  if (!window.__hudPulseBound) {
+    window.__hudPulseBound = true;
+    window.addEventListener('shot:release', () => {
+      try {
+        // If session is capped/ended, ignore any late pulses
+        if (window.__sessionEnded === true || window.__sessionCapped === true) return;
+        window.__SCORE_SHOT_COUNT = (window.__SCORE_SHOT_COUNT || 0) + 1;
+        window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));
+        // Do not auto-end here to avoid race with row creation; end handled by UI pipeline
+      } catch {}
+    });
+  }
+} catch {}
+
 // safe pose detector wrapper helper
 if (typeof window.safeDetectForVideo !== 'function') {
   window.safeDetectForVideo = async function safeDetectForVideo(canvasOrVideo, frameIndex) {
@@ -423,12 +439,12 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
     line(`strict: angle≥${window.REL_ELBOW_STRICT_MIN}° & wr>sh ${strictOK?'✓':'✗'}`, strictOK);
     line(`align: ${(alignOK?'✓':'✗')}  dx=${dx|0} dy=${dy|0}`, alignOK);
     // Compute live gate/score for HUD. Prefer __LAST_GATE (set each tick by the sampler) to avoid drift.
-    let score = 0, th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH);
+    let score = 0, th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 0.26);
     try {
       const last = (window.__LAST_GATE && window.__LAST_GATE.detail && window.__LAST_GATE.detail.tests) ? window.__LAST_GATE.detail.tests : null;
       if (last && typeof last.score !== 'undefined') {
         score = Number(last.score || 0);
-        if (window.DOACH_RELEASE_TRACE === true) {
+        if (window.DOACH_VERBOSE === true && window.DOACH_RELEASE_TRACE === true) {
           try { console.log('[HUD:gate:last]', { frame: window.__LAST_GATE?.detail?.frame, score, th, tests: last }); } catch {}
         }
       } else {
@@ -437,7 +453,7 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
         if (typeof window.releaseGate === 'function') {
           const g = window.releaseGate(hist) || { tests:{} };
           score = Number(g?.tests?.score || 0);
-          if (window.DOACH_RELEASE_TRACE === true) {
+          if (window.DOACH_VERBOSE === true && window.DOACH_RELEASE_TRACE === true) {
             try {
               const lastF = hist.at?.(-1)?.frame ?? null;
               console.log('[HUD:gate]', { frame:lastF, score, th, tests: g.tests||{}, reason: g.reason, released: g.released, histLen: hist.length });
@@ -446,41 +462,42 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
         }
       }
     } catch (e) {
-      try { if (window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:gate:error]', e); } catch {}
+      try { if (window.DOACH_VERBOSE === true && window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:gate:error]', e); } catch {}
     }
 
-    // As a final fallback for display only, compute score directly from current booleans
+    // Compute local 0.26-weight score from booleans for HUD display and all-four check
+    let scoreLocal26 = null, allFour26 = false, tot26 = null;
     try {
-      if (!(score > 0)) {
-        const useUp = (window.REL_SCORE_USE_UPTREND === true);
-        const norm = (x,d)=>{ const n=Number(x); return (Number.isFinite(n)&&n>=0)?n:d; };
-        const cfgW = (window.REL_CFG && window.REL_CFG.weights) || {};
-        const wA = norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A), 0.26);
-        const wB = norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B), 0.26);
-        const wC = norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C), 0.26);
-        const wDsrc = useUp
-          ? (cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D)
-          : (cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D);
-        const wD = norm(wDsrc, 0.26);
-        const sLocal =
-          (wristAboveElbow ? wA : 0) +
-          (elbowExtended   ? wB : 0) +
-          (alignOK         ? wC : 0) +
-          ((useUp ? wristUpTrend : wristAboveShoulder) ? wD : 0);
-        if (Number.isFinite(sLocal)) {
-          score = Math.max(score, sLocal);
-          if (window.DOACH_RELEASE_TRACE === true) {
-            try { console.log('[HUD:score-local]', { score: +sLocal.toFixed?.(3), useUp, wA, wB, wC, wD }); } catch {}
-          }
-        }
-      }
+      const useUp = (window.REL_SCORE_USE_UPTREND === true);
+      const norm = (x,d)=>{ const n=Number(x); return (Number.isFinite(n)&&n>=0)?n:d; };
+      const cfgW = (window.REL_CFG && window.REL_CFG.weights) || {};
+      const wA = norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A), 0.26);
+      const wB = norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B), 0.26);
+      const wC = norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C), 0.26);
+      const wDsrc = useUp
+        ? (cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D)
+        : (cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D);
+      const wD = norm(wDsrc, 0.26);
+      tot26 = wA + wB + wC + wD;
+      scoreLocal26 =
+        (wristAboveElbow ? wA : 0) +
+        (elbowExtended   ? wB : 0) +
+        (alignOK         ? wC : 0) +
+        ((useUp ? wristUpTrend : wristAboveShoulder) ? wD : 0);
+      allFour26 = Number.isFinite(scoreLocal26) && Number.isFinite(tot26) && (scoreLocal26 >= (tot26 - 1e-6));
+      // Prefer showing the local score if gate score is missing
+      if (!(score > 0) && Number.isFinite(scoreLocal26)) score = scoreLocal26;
+      // if (window.DOACH_RELEASE_TRACE === true) {
+      //   try { console.log('[HUD:score-local-26]', { score: +(scoreLocal26||0).toFixed?.(3), tot: +(tot26||0).toFixed?.(3), allFour26 }); } catch {}
+      // }
     } catch {}
-    line(`score: ${(score||0).toFixed(2)} (≥${th})`, (score||0) >= th);
+    const scoreDisp = Number.isFinite(scoreLocal26) ? scoreLocal26 : score;
+    line(`score: ${(scoreDisp||0).toFixed(2)} (≥${th})`, (scoreDisp||0) >= th);
 
-    // Shot count (HUD-local): increment on score trip with a simple cooldown
-    try {
-      const tripTh = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
-      const cdMs   = Number(window.HUD_SHOT_COOLDOWN_MS ?? 3000);  // cooldown between releases to avoid double-count
+    // Shot count (HUD-local) (DISABLED by default). Enable with window.HUD_LOCAL_PULSE = true.
+    if (window.HUD_LOCAL_PULSE === true) { try {
+      const tripTh = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 0.26);
+      const cdMs   = Number(window.HUD_SHOT_COOLDOWN_MS ?? 2000);
       const nowMs  = performance.now();
       const lastMs = Number(window.__HUD_LAST_SHOT_MS || 0);
       if (Number(score) >= tripTh - 1e-6 && (nowMs - lastMs >= cdMs)) {
@@ -488,7 +505,7 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
         window.__HUD_LAST_SHOT_MS = nowMs;
         try { window.shotTaken = Number(window.__HUD_SHOT_COUNT); } catch {}
         try { window.dispatchEvent(new CustomEvent('hud:shot-taken', { detail: { count: Number(window.__HUD_SHOT_COUNT) } })); } catch {}
-        // Optional center prompt for this tally
+        try { window.dispatchEvent(new CustomEvent('hud:score-trip', { detail: { frame: (playerState?.frameIndex || null), score: Number(score) } })); } catch {}
         try {
           const msg = `Shot ${window.__HUD_SHOT_COUNT}`;
           if (typeof window.showCenterPrompt === 'function') {
@@ -500,9 +517,47 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
           try { console.log('[HUD:shot-count]', { count: window.__HUD_SHOT_COUNT, th: tripTh, score: Number(score).toFixed?.(3) }); } catch {}
         }
       }
-    } catch {}
-    const shotsTaken = Number(window.__HUD_SHOT_COUNT || 0);
-    line(`shot made: ${shotsTaken}`, shotsTaken > 0);
+    } catch {} }
+
+    // Canonical release bridge — DISABLED unless explicitly enabled
+    if (window.HUD_BRIDGE_ENABLE === true) { try {
+      const nowMs = performance.now();
+      let approved = false, gate = null;
+      const hist = (window.playerState?.frameHistory || []).slice(-5);
+      if (typeof window.releaseGate === 'function' && hist.length) {
+        gate = window.releaseGate(hist) || { released:false };
+        approved = !!gate.released;
+      }
+      const armed = (window.__shotTrackingArmed === true);
+      if (armed && approved && allFour26 === true) {
+        const since = nowMs - (Number(window.__REL_LAST_FIRE_MS) || 0);
+        const relCd = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 2000);
+        if (since >= relCd && !window.__releaseEventSent) {
+          const frame = (playerState?.frameIndex ?? (window.playerState?.frameHistory?.at?.(-1)?.frame) ?? 0);
+          const H = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
+          let prox = null;
+          try {
+            if (H && Number.isFinite(H.x) && Number.isFinite(H.y)) {
+              const px   = Number.isFinite(window.proxX)      ? Number(window.proxX)      : Number(window.PREF_PROX?.x ?? 200);
+              const pya  = Number.isFinite(window.proxYAbove) ? Number(window.proxYAbove) : Number(window.PREF_PROX?.yAbove ?? 170);
+              const pyb  = Number.isFinite(window.proxYBelow) ? Number(window.proxYBelow) : Number(window.PREF_PROX?.yBelow ?? 100);
+              const rimT = H.y - (H.h || 0)/2;
+              prox = { x: H.x - px, y: rimT - pya, w: px*2, h: pya + pyb };
+            }
+          } catch {}
+          try { (window.__markReleasePose || window.markRelease)?.(frame, { prox, via: 'hud-bridge', requirePose: true }); } catch {}
+          try { window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via: 'hud-bridge', gate } })); } catch {}
+          try { window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via: 'hud-bridge', gate } })); } catch {}
+          try { window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = nowMs; } catch {}
+        }
+      }
+    } catch {} }
+    const shotsTaken = Number(
+      window.__SCORE_SHOT_COUNT            // canonical: increments on shot:release
+      ?? window.__HUD_SHOT_COUNT           // legacy HUD counter (only if HUD_LOCAL_PULSE=true)
+      ?? (window.__shotList?.length ?? 0)  // fallback to finalized shots
+    );
+    line(`shots taken: ${shotsTaken}`, shotsTaken > 0);
     // keep HUD minimal to the core indicators (no extra trend line)
     if (window.__LAST_GATE?.latched) { ctx.fillStyle = '#00FF88'; ctx.fillText('LATCHED', x0, (drawPoseMathHUD._i++ * 14*hair) + y0); }
     ctx.restore();
@@ -772,7 +827,8 @@ export function drawLiveOverlay(objects = [], playerState) {
   try {
     const kps = playerState?.keypoints;
     const valid = Array.isArray(kps) && kps.length >= 33 &&
-                  kps.every(k => k && Number.isFinite(k.x) && Number.isFinite(k.y));
+                 kps.every(k => k && Number.isFinite(k.x) && Number.isFinite(k.y)) &&
+                 (playerState?._believable !== false);
     if (valid) {
       drawPoseSkeleton?.(ctx, kps);
       drawWristTrail?.(ctx);
@@ -785,8 +841,8 @@ export function drawLiveOverlay(objects = [], playerState) {
   try { drawBallArc?.(ctx); } catch {}          // draw the arc dots + line
   try { if ((window.PREF_SHOW?.trails) !== false) drawBallTrails?.(ctx); } catch {}
 
-  // ——— Score trigger HUD pulse (diagnostic): show "Shot N" when score trips ———
-  try {
+  // ——— Score trigger HUD pulse (diagnostic) — optional — enable with window.HUD_LOCAL_PULSE = true ———
+  if (window.HUD_LOCAL_PULSE === true) { try {
     const th = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
     // Prefer the sampler-computed gate snapshot (__LAST_GATE), then fall back to a fresh call
     let scoreNow = null, frameNow = null, testsNow = null;
@@ -831,7 +887,7 @@ export function drawLiveOverlay(objects = [], playerState) {
         } catch {}
       }
     }
-  } catch {}
+  } catch {} }
 
   // Draw canvas-based pulse so it's visible even if DOM HUD isn't ready
   try {
@@ -859,9 +915,8 @@ export function drawLiveOverlay(objects = [], playerState) {
       }
     }
   } catch {}
-  // Fallback pose-gate latch: if upstream emitters miss a valid all-green pose release,
-  // dispatch a guarded release here so the HUD can log a shot. Uses the same releaseGate math.
-  try {
+  // Fallback pose-gate latch (optional). Disable by default; set window.DISABLE_HUD_FALLBACK = false to enable.
+  if (window.DISABLE_HUD_FALLBACK !== true) { try {
     const armed = (window.__shotTrackingArmed === true);
     const H = window.getLockedHoopBox?.();
     if (armed && H) {
@@ -889,7 +944,7 @@ export function drawLiveOverlay(objects = [], playerState) {
         }
       }
     }
-  } catch {}
+  } catch {} }
   // Release marker (debug): draw a distinct circle around the release point briefly
   try {
     const bs = (window.ballState || {});
@@ -1520,63 +1575,77 @@ export function setOverlayInteractive(on) {
 
 
 
-// ✅ Call this each frame  - 
+// —— Bottom-left HUD (self-installing) ————————————————————————————————
+function ensureDebugHudBox() {
+  // Reuse existing, or create one
+  let box = window.__debugBox || document.getElementById('doachDebugHud');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'doachDebugHud';
+    (document.querySelector('.video-frame') || document.body).appendChild(box);
+    window.__debugBox = box;
+  }
+
+  // Pin to bottom-left of the video frame and keep it non-interactive
+  const style = box.style;
+  style.position      = 'absolute';
+  style.left          = '12px';
+  style.bottom        = '12px';
+  style.top           = 'auto';
+  style.right         = 'auto';
+  style.zIndex        = '250';              // above video/overlay, below menus if needed
+  style.pointerEvents = 'none';             // never steal clicks
+  style.userSelect    = 'none';
+  style.padding       = '8px 10px';
+  style.borderRadius  = '10px';
+  style.background    = 'rgba(0,0,0,0.45)';
+  style.color         = '#fff';
+  style.font          = '12px system-ui, -apple-system, Segoe UI, Roboto, sans-serif';
+  style.lineHeight    = '1.35';
+  style.boxShadow     = '0 6px 14px rgba(0,0,0,0.25)';
+  return box;
+}
+
+// Keep the tiny CSS for the blinking dot once
+(function installHudDotCss(){
+  if (document.getElementById('hudDotCss')) return;
+  const st = document.createElement('style');
+  st.id = 'hudDotCss';
+  st.textContent = '@keyframes hudBlink{from{opacity:1}to{opacity:.35}}';
+  document.head.appendChild(st);
+})();
+
+// REPLACEMENT: bottom-left, compact HUD
 export function updateDebugOverlay(poses, objects, __frameIdx = null) {
-  const debugBox = window.__debugBox;
+  // Make sure the HUD exists and is pinned BL
+  const debugBox = ensureDebugHudBox();
   if (!debugBox) return;
+
   try {
-    // Inject a tiny CSS once for blinking effect
-    if (!document.getElementById('hudDotCss')) {
-      const st = document.createElement('style');
-      st.id = 'hudDotCss';
-      st.textContent = '@keyframes hudBlink{from{opacity:1}to{opacity:.35}}';
-      document.head.appendChild(st);
-    }
-    const hasPose = (poses && poses.length) || (window.playerState && Array.isArray(window.playerState.keypoints) && window.playerState.keypoints.length >= 33);
+    const hasPose    = !!(poses?.length) ||
+                       !!(window.playerState && Array.isArray(window.playerState.keypoints) && window.playerState.keypoints.length >= 33);
     const hoopLocked = !!(typeof window.getLockedHoopBox === 'function' && window.getLockedHoopBox());
-    const inSession = !!window.__SESSION_ACTIVE;
-    const V = window.__VIEW || {};
-    const ov = document.getElementById('overlay');
-    const mode = String(window.__overlayMode || (inSession ? 'coach' : 'live'));
-    const msSincePose = (function(){ try { return (performance.now() - (window.__lastPoseUpdateMs||0)).toFixed(0); } catch { return 'na'; } })();
-    const wrist = (function(){ try { const w=window.__lastPoseWrist; return w ? `${w.x|0},${w.y|0}` : '—'; } catch { return '—'; } })();
-    const dot = (ok, blink=false) => `<span style="display:inline-block;width:10px;height:10px;border-radius:50%;margin-left:6px;background:${ok?'#24d05a':'#ff4d4f'};box-shadow:0 0 8px ${ok?'#24d05a':'#ff4d4f'};${blink&&ok?'animation:hudBlink 1s infinite alternate;':''}"></span>`;
+    const inSession  = !!window.__SESSION_ACTIVE;
+
+    // Small status dot
+    const dot = (ok, blink=false) =>
+      `<span style="
+        display:inline-block;width:10px;height:10px;border-radius:50%;
+        margin-left:6px;
+        background:${ok?'#24d05a':'#ff4d4f'};
+        box-shadow:0 0 8px ${ok?'#24d05a':'#ff4d4f'};
+        ${blink&&ok?'animation:hudBlink 1s infinite alternate;':''}
+      "></span>`;
+
+    // Minimal, bold label + dot on each line
     debugBox.innerHTML = `
-      <div>Hoop selected: ${dot(hoopLocked)}</div>
-      <div>Pose detected: ${dot(!!hasPose)}</div>
-      <div>Session in play: ${dot(inSession, true)}</div>
-
+      <div style="white-space:nowrap">Hoop selected ${dot(hoopLocked)}</div>
+      <div style="white-space:nowrap">Pose detected ${dot(hasPose)}</div>
+      <div style="white-space:nowrap">Session in play ${dot(inSession, true)}</div>
     `;
-    return;
-  } catch {}
-
-      // Extra info if you want it - add above in status box:
-      // <div style="opacity:.85">Overlay: ${mode}</div>
-      // <div style="opacity:.85">ov ${ov?.width||0}x${ov?.height||0} | vw ${V?.vw||0} vh ${V?.vh||0} sx ${V?.sx||0} sy ${V?.sy||0}</div>
-      // <div style=\"opacity:.85\">poseΔ: ${msSincePose} ms | wrist: ${wrist}</div>
-
-
-
-  const poseStatus = poses?.length ? '🟢 Pose Detected' : '🔴 No Pose';
-  const ballFound = objects?.some(o => o.label === 'basketball');
-  const ballStatus = ballFound ? '🏀 Ball Found' : '⭕ Ball Missing';
-
-  const frameLine = __frameIdx !== null ? `<br>🧠 Frame: ${__frameIdx}` : '';
-
-  // Optional: show expected outcome if provided by tests/runtime
-  let expectLine = '';
-  try {
-    const exp = (window.__expectedOutcome || window.expectedShot || '').toString().trim().toLowerCase();
-    if (exp) {
-      const pretty = (exp === 'make') ? '✅ Make'
-                   : (exp === 'miss') ? '❌ Miss'
-                   : (exp === 'swirl' || exp === 'rattle' || exp === 'circle') ? '⭕ Swirl'
-                   : exp;
-      expectLine = `<br>🎯 Expect: ${pretty}`;
-    }
-  } catch {}
-
-  debugBox.innerHTML = `${poseStatus}<br>${ballStatus}${frameLine}${expectLine}`;
+  } catch {
+    // swallow — HUD is best-effort only
+  }
 }
 
 export function armOverlayForPickNow() {

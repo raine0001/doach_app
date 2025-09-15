@@ -9,6 +9,70 @@ import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './ho
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection; 
 
+// ---------------------------------------------------------------
+// Connection banner: show backend origin and active session id
+// ---------------------------------------------------------------
+function mountConnectionBanner() {
+  try {
+    const root = ensureHudRoot?.() || document.body;
+    let box = document.getElementById('connBanner');
+    const hidden = (localStorage.getItem('doach_hide_conn_banner') === '1') && (window.SHOW_CONN_BANNER !== true);
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'connBanner';
+      box.className = 'hud-card';
+      Object.assign(box.style, {
+        position: 'absolute', top: '8px', left: '10px',
+        padding: '6px 8px', font: '600 11px system-ui',
+        zIndex: 10080, pointerEvents: 'auto',
+        opacity: 0.95
+      });
+      root.appendChild(box);
+    }
+
+    const origin = (location && location.origin) ? location.origin : (location.protocol + '//' + location.host);
+    const sid = (window.__SESSION_ID || '—');
+    const debugHref = (sid && sid !== '—') ? `/admin/session/${sid}/debug` : null;
+    const healthHref = '/healthz';
+    const html = [
+      `<span style="opacity:.9">Connected:</span> <span style="font-weight:700">${origin}</span>`,
+      `&nbsp;&nbsp;<span style="opacity:.9">sid:</span> <span id="connSidVal" style="font-weight:700">${sid}</span>`,
+      debugHref ? `&nbsp;<a id="connDbg" href="${debugHref}" target="_blank" style="text-decoration:none">debug</a>` : '',
+      `&nbsp;<a id="connHealth" href="${healthHref}" target="_blank" style="text-decoration:none">health</a>`,
+      `&nbsp;<button id="connHide" class="vc-btn" title="Hide" style="padding:0 6px">×</button>`
+    ].join('');
+    box.innerHTML = html;
+    box.style.display = hidden ? 'none' : 'block';
+
+    // Wire hide
+    try {
+      box.querySelector('#connHide')?.addEventListener('click', () => {
+        localStorage.setItem('doach_hide_conn_banner', '1');
+        box.style.display = 'none';
+      }, { once: true });
+    } catch {}
+
+    // Live update when SID changes
+    clearInterval(box.__upd);
+    box.__lastSid = sid;
+    box.__upd = setInterval(() => {
+      try {
+        const curSid = (window.__SESSION_ID || '—');
+        if (curSid !== box.__lastSid) {
+          box.__lastSid = curSid;
+          const val = box.querySelector('#connSidVal');
+          if (val) val.textContent = curSid;
+          const a = box.querySelector('#connDbg');
+          if (a) a.setAttribute('href', `/admin/session/${curSid}/debug`);
+          box.style.display = ((localStorage.getItem('doach_hide_conn_banner') === '1') && (window.SHOW_CONN_BANNER !== true)) ? 'none' : 'block';
+        }
+      } catch {}
+    }, 800);
+
+  } catch {}
+}
+window.mountConnectionBanner = mountConnectionBanner;
+
 // Slow_arbiter.js — make sure it reads SLOW_RATE
 (function installSlowArbiter(){  
   // Fully opt-in only. Unless explicitly enabled, do nothing.
@@ -45,12 +109,22 @@ window.handleHoopSelection = handleHoopSelection;
       window.__hudReleaseWired = true;
   window.addEventListener('shot:release', (e) => {
         try {
+          // Cap session at SESSION_SIZE shots
+          try {
+            const cap = Number(window.SESSION_SIZE || 10);
+            const cur = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
+            if (cur >= cap) return;
+          } catch {}
+          // Auto-create a backend session if missing
+          try { ensureSessionId(); } catch {}
           // Ignore any release before hoop is confirmed/locked
           if (window.__hoopConfirmed !== true) return;
           if (!window.getLockedHoopBox?.()) return;
           if (window.__shotTrackingArmed !== true) return;
+          // Require live pose before logging
+          try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
           // UI cooldown only; trust the upstream release latch
-          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
+          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 3000);
           const now = performance.now();
           const lastUiMs = Number(window.__UI_LAST_RELEASE_MS || 0);
           if (now - lastUiMs < unlockMs) return; // UI cooldown: ignore rapid repeats
@@ -68,6 +142,7 @@ window.handleHoopSelection = handleHoopSelection;
               : null;
             list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
             try { console.log('[HUD:add-pending]', { frame: rf, len: list.length }); } catch {}
+            try { window.__SHOT_IDX = (list.length - 1); } catch {}
           }
           window.__UI_LAST_RELEASE_MS = now;
           const taken = list.length;
@@ -76,6 +151,22 @@ window.handleHoopSelection = handleHoopSelection;
           window.mountSessionHUD?.();
           window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
           window.setSessionStatus?.('Shot ' + taken + ' in progress');
+          // Auto end at cap — wait for the last summary or fall back after a short grace
+          try {
+            const cap = Number(window.SESSION_SIZE || 10);
+            const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
+            if (Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
+              try { window.__sessionCapped = true; } catch {}
+              try { window.__capAwait = true; } catch {}
+              // Do NOT stop camera/analyzer yet; allow final summary to emit
+              try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
+              try {
+                window.__capTimer = setTimeout(() => {
+                  try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
+                }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
+              } catch {}
+            }
+          } catch {}
         } catch {}
       });
     }
@@ -84,6 +175,19 @@ window.handleHoopSelection = handleHoopSelection;
   window.addEventListener('shot:summary', () => {
     capTo = 0;
     setRate(1, 'summary');
+    try {
+      if (window.__capAwait && window.__summaryShown !== true) {
+        window.__capAwait = false;
+        try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
+        setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
+      }
+    } catch {}
+  });
+
+  // On end-session, speak and open summary table automatically
+  window.addEventListener('hud:end-session', () => {
+    try { if (window.PREF_VOICE_INTRO === true) speak('I am finalizing the session with shot results.'); } catch {}
+    try { renderFullShotTable(); wireFullShotModalActions(); } catch {}
   });
 
   window.addEventListener('shot:end', () => { setRate(1, 'end'); });
@@ -126,6 +230,73 @@ window.handleHoopSelection = handleHoopSelection;
       }, 500);
     } catch {}
   }
+})();
+
+// --- Minimal HUD wires (always-on) -------------------------------------------
+// Ensure the session HUD 'shots taken' and coach prefixes advance even when
+// slow-mo arbiter is disabled. Reuses the same guard flag to avoid double wiring.
+(function installMinimalHudWires(){
+  try {
+    if (window.__hudReleaseWired) return; // already wired by slowmo block
+    window.__hudReleaseWired = true;
+
+    window.addEventListener('shot:release', (e) => {
+      try {
+        // Ignore any release before hoop is confirmed/locked
+        if (window.__hoopConfirmed !== true) return;
+        if (!window.getLockedHoopBox?.()) return;
+        // Ensure a pending shot record exists immediately on pose release
+        const list = (window.__shotList ||= []);
+        const rf = Number(e?.detail?.frame || 0);
+        const lastEntry = list.at?.(-1) || null;
+        const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
+        if (!same) {
+          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+            : null;
+          list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
+          try { window.__SHOT_IDX = (list.length - 1); } catch {}
+        }
+        const taken = list.length;
+        const made = (window.shotLog?.filter?.(s => s.made).length || 0);
+        const acc  = taken ? Math.round((made / taken) * 100) : 0;
+        window.mountSessionHUD?.();
+        window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
+        window.setSessionStatus?.('Shot ' + taken + ' in progress');
+
+        // HARD STOP at cap: lock session and present summary
+        try {
+          const cap = Number(window.SESSION_SIZE || 10);
+          const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
+          if (Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
+            try { window.__sessionCapped = true; } catch {}
+            try { window.__sessionEnded = true; } catch {}
+            try { window.__SESSION_ACTIVE = false; } catch {}
+            try { window.__shotTrackingArmed = false; } catch {}
+            try { window.stopPoseReleaseSampler?.(); } catch {}
+            setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
+          }
+        } catch {}
+      } catch {}
+    });
+
+    // End on final summary as a backstop (ensures table even if release-path end was skipped)
+    window.addEventListener('shot:summary', () => {
+      try {
+        const cap   = Number(window.SESSION_SIZE || 10);
+        const taken = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
+        if (Number.isFinite(cap) && taken >= cap && window.__summaryShown !== true) {
+          // Lock and present now
+          try { window.__sessionCapped = true; } catch {}
+          try { window.__sessionEnded = true; } catch {}
+          try { window.__SESSION_ACTIVE = false; } catch {}
+          try { window.__shotTrackingArmed = false; } catch {}
+          try { window.stopPoseReleaseSampler?.(); } catch {}
+          setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 60);
+        }
+      } catch {}
+    }, { passive:true });
+  } catch {}
 })();
 
 // ---- Global slow-mo FPS ----
@@ -265,7 +436,7 @@ export function setSessionStatus(text = '') {
     badge.id = 'sessionStatusBadge';
     badge.className = 'hud-card';
     Object.assign(badge.style, {
-      position:'absolute', top:'10px', left:'50%', transform:'translateX(-50%)',
+      position:'absolute', bottom:'90px', left:'50%', transform:'translateX(-50%)',
       padding:'6px 10px', font:'600 12px system-ui', letterSpacing:'0.04em',
       pointerEvents:'none'
     });
@@ -289,8 +460,7 @@ export function createPlaybackControls(video) {
     return;
   }
 
-  // Always mount the camera switcher for live sessions
-  try { mountCameraSwitcher(); } catch {}
+  // Camera switcher now lives in the bottom HUD as an icon button
 
   // Skip transport controls for live camera feeds (srcObject present)
   // but still mount the session HUD so the bottom bar is always visible.
@@ -396,7 +566,7 @@ window.__hoopConfirmed = false;
 
 function requireHoopOrPrompt() {
   if (isHoopReady()) return true;
-  showPromptMessage('📍 Tap the hoop to begin setup', 2000);
+  showPromptMessage('📍 Tap the hoop to begin setup', 3000);
   if (!window.__hoopPickArmed) {
     window.__hoopPickArmed = true;
     window.enableHoopPickOnce?.();   // arm picker again if needed
@@ -484,7 +654,7 @@ function startHoopPromptLoop() {
 
   const tick = () => {
     if (!isHoopReady()) {
-      showPromptMessage('📍 Tap the hoop to begin setup', 2000);
+      showPromptMessage('📍 Tap the hoop to begin setup', 3000);
       if (!window.__hoopPickArmed) {
         window.__hoopPickArmed = true;
         window.enableHoopPickOnce?.();
@@ -519,6 +689,79 @@ export function ensureHudRoot() {
   return root;
 }
 
+// ------------------ Admin Observer (optional) ------------------
+// Stream low-FPS overlay snapshots to the server for remote viewing.
+// Enable from console: startObserverStreaming(); stopObserverStreaming();
+let __observerTimer = null;
+window.startObserverStreaming = function startObserverStreaming(fps = 2){
+  try {
+    const sid = (window.__SESSION_ID || null);
+    if (!sid) { console.warn('[observer] missing __SESSION_ID'); return; }
+    const overlay = document.getElementById('overlay') || document.getElementById('hudRoot');
+    const video = document.getElementById('videoPlayer');
+    if (!overlay) { console.warn('[observer] overlay not found'); return; }
+    const period = Math.max(200, Math.round(1000/Math.max(0.5, fps)));
+    if (__observerTimer) clearInterval(__observerTimer);
+    const off = document.createElement('canvas');
+    __observerTimer = setInterval(async () => {
+      try {
+        const oc = overlay.tagName === 'CANVAS' ? overlay : null;
+        const vw = (video?.videoWidth || oc?.width || 0);
+        const vh = (video?.videoHeight || oc?.height || 0);
+        if (!vw || !vh) return;
+        off.width = vw; off.height = vh;
+        const ctx = off.getContext('2d');
+        if (!ctx) return;
+        // Draw camera frame first (if accessible)
+        if (video && video.readyState >= 2) {
+          try { ctx.drawImage(video, 0, 0, vw, vh); } catch {}
+        }
+        // Draw overlay on top
+        if (oc) { try { ctx.drawImage(oc, 0, 0, vw, vh); } catch {} }
+        off.toBlob(async (blob) => {
+          if (!blob) return;
+          const fd = new FormData();
+          fd.append('image', blob, 'frame.jpg');
+          await fetch(`/api/sessions/${sid}/observer_frame`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
+        }, 'image/jpeg', 0.65);
+      } catch {}
+    }, period);
+    console.log('[observer] streaming at', fps, 'fps');
+  } catch (e) { console.warn('[observer] failed', e); }
+};
+window.stopObserverStreaming = function stopObserverStreaming(){ if (__observerTimer) { clearInterval(__observerTimer); __observerTimer = null; console.log('[observer] stopped'); } };
+
+// Ensure a backend session exists when first needed
+async function ensureSessionId(){
+  try {
+    if (window.__SESSION_ID) return window.__SESSION_ID;
+    const r = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ device: navigator.userAgent }), credentials:'include' });
+    if (!r.ok) return null;
+    const j = await r.json();
+    window.__SESSION_ID = j?.id || null; window.__SHOT_IDX = 0;
+    return window.__SESSION_ID;
+  } catch { return null; }
+}
+
+// Idempotent shot upsert to backend session.json (and DB if configured)
+const __postedShots = new Set();
+async function postShotUpsert(idx, patch, opts){
+  try {
+    const sid = await ensureSessionId();
+    if (!sid) return;
+    const key = `${sid}|${idx}|${patch && patch.made != null ? +!!patch.made : 'na'}`;
+    const force = !!(opts && opts.force);
+    if (!force && __postedShots.has(key)) return;
+    __postedShots.add(key);
+    try { if (window.SESS_FINAL_TRACE === true) console.log('[postShotUpsert]', { sid, idx, patch, force }); } catch {}
+    await fetch(`/api/sessions/${sid}/shot`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(Object.assign({ idx, t: Date.now() }, patch||{})),
+      credentials:'include'
+    }).catch(()=>{});
+  } catch {}
+}
+
 // -----------------------------------------------------------------//
 // Camera switcher (front/back toggle + device picker)
 // -----------------------------------------------------------------//
@@ -539,9 +782,9 @@ export async function mountCameraSwitcher() {
     btn.id = 'camToggleBtn';
     btn.className = 'hud-card';
     Object.assign(btn.style, {
-      position: 'absolute', top: '10px', right: '10px',
+      position: 'absolute', top: '80px', right: '10px',
       padding: '8px 10px', font: '600 12px system-ui',
-      pointerEvents: 'auto', zIndex: 10020, cursor: 'pointer'
+      pointerEvents: 'auto', zIndex: 10005, cursor: 'pointer'
     });
     btn.textContent = 'Back  🔁';
     root.appendChild(btn);
@@ -634,13 +877,10 @@ export function mountSessionHUD() {
 
     bar.innerHTML = `
       <button id="hudMute" class="vc-btn" title="Mute/Unmute">🔇</button>
+      <button id="hudCamFlip" class="vc-btn" title="Flip Camera">📷↺</button>
 
       <div class="hud-metric" id="mShots"><div class="num">0/10</div><div class="label">Shots Taken</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
-
-      <button id="openSummaryBtn" class="hud-btn">Summary</button>
-      <button id="startSessionHUD" class="hud-btn">Start Session</button>
-      <button id="endSessionBtn" class="hud-btn">End Session</button>
     `;
     root.appendChild(bar);
 
@@ -648,12 +888,15 @@ export function mountSessionHUD() {
     try { if (typeof window.PREF_LIVE_TIPS === 'undefined') window.PREF_LIVE_TIPS = false; } catch {}
 
     const muteBtn = bar.querySelector('#hudMute');
+    const camBtn  = bar.querySelector('#hudCamFlip');
 
     // --- unified apply function: UI, storage, prefs, event
     const applyMute = (muted) => {
       // button reflects CURRENT state
       muteBtn.setAttribute('data-muted', muted ? '1' : '0');
       muteBtn.textContent = muted ? '🔇' : '🔊';
+      // keep any legacy floating cam toggle hidden; HUD contains the control now
+      try { const legacy = document.getElementById('camToggleBtn'); if (legacy) legacy.style.display = 'none'; } catch {}
 
       // persist & sync with doachPrefs so doachSpeak() logic matches HUD
       try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
@@ -684,6 +927,19 @@ export function mountSessionHUD() {
       e.stopPropagation();
       const muted = muteBtn.getAttribute('data-muted') === '1';
       applyMute(!muted);
+    });
+
+    // --- camera flip button (short press: toggle front/back)
+    camBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        // Toggle facing preference and restart camera
+        const cur = (localStorage.getItem('doach_camera_facing') || 'environment').toLowerCase();
+        const next = (cur === 'user' || cur === 'front') ? 'environment' : 'user';
+        localStorage.setItem('doach_camera_facing', next);
+        if (typeof window.setPreferredFacing === 'function') await window.setPreferredFacing(next);
+        else if (typeof window.flipCamera === 'function') await window.flipCamera();
+      } catch (err) { console.warn('[hud] flip camera failed', err); }
     });
 
     // other HUD buttons (unchanged)
@@ -739,10 +995,16 @@ try { if (typeof window.updateSessionHUD !== "function") window.updateSessionHUD
   const elAcc   = $('mAcc');
   const elTime  = $('mTime');
 
-  // Prefer HUD-local running shot count when available
+  // Prefer the maximum of: explicit param, canonical counter, pending list, legacy HUD
   try {
+    const canonTaken = Math.max(
+      Number(window.__SCORE_SHOT_COUNT || 0),
+      Array.isArray(window.__shotList) ? window.__shotList.length : 0,
+      Array.isArray(window.shotLog) ? window.shotLog.length : 0
+    );
     const hudTaken = Number(window.shotTaken || window.__HUD_SHOT_COUNT || 0);
-    if (!taken || taken < hudTaken) taken = hudTaken;
+    const cur = Number(taken || 0);
+    taken = Math.max(cur, canonTaken, hudTaken);
   } catch {}
   if (elShots) elShots.textContent = `${taken}/${SESSION_SIZE}`;
   // Makes/Accuracy hidden in simplified HUD; keep code paths no-op for future use
@@ -763,12 +1025,25 @@ try {
     };
   }
   window.addEventListener('hud:start-session', () => {
+    try { window.__SESSION_ACTIVE = true; } catch {}
+    try { if (window.__sessionEnded) { location.reload(); return; } } catch {}
+    try { window.__summaryShown = false; window.__SESSION_REVIEW_SPOKEN = false; } catch {}
     try { resetSessionClockAndCount(); window.__sessionCapPrompted = false; } catch {}
-    try { speak('Start session. Shoot when ready.'); } catch {}
+    try { if (typeof window.PREF_VOICE_INTRO === 'undefined') window.PREF_VOICE_INTRO = false; } catch {}
+    try { if (window.PREF_VOICE_INTRO === true) speak('Start session. Shoot when ready.'); } catch {}
+    // If hoop is already locked, run 5s countdown and arm; otherwise wait for hoop:locked
+    try {
+      const h = window.getLockedHoopBox?.();
+      if (window.__hoopConfirmed === true && h && !window.__armCountdownActive && window.__shotTrackingArmed !== true) {
+        try { window.__shotTrackingArmed = false; } catch {}
+        startShotTrackingCountdown?.(5);
+      }
+    } catch {}
   });
   window.addEventListener('hud:end-session', () => {
     try { window.__sessionCapPrompted = false; } catch {}
     try { speak('Session ended.'); } catch {}
+    try { window.__SESSION_ACTIVE = false; } catch {}
   });
   window.addEventListener('hud:pause-session', () => { try { speak('Session paused.'); } catch {} });
   window.addEventListener('hud:continue-session', () => { try { speak('Continuing session.'); } catch {} });
@@ -799,6 +1074,20 @@ function renderFullShotTable() {
   const list = getShotList();
   const root = ensureHudRoot();
 
+  // Choose a best shot (highest local rating among makes) to highlight
+  let __bestIdx = -1; let __bestScore = -1;
+  try {
+    const golden = window.DOACH_MEM?.get?.()?.golden || null;
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (!s || !s.made) continue;
+      const r = (typeof window.computeShotRating === 'function')
+        ? Number(window.computeShotRating(s.poseSnapshot || null, golden))
+        : -1;
+      if (Number.isFinite(r) && r > __bestScore) { __bestScore = r; __bestIdx = i; }
+    }
+  } catch {}
+
   let modal = document.getElementById('fullShotModal');
   if (!modal) {
     modal = document.createElement('div');
@@ -812,19 +1101,26 @@ function renderFullShotTable() {
       maxWidth: '74%',
       minWidth: '640px',
       zIndex: 10020,
-      pointerEvents: 'auto'
+      pointerEvents: 'auto',
+      maxHeight: '78vh',
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch'
     });
     root.appendChild(modal);
   }
 
   modal.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-      <div style="font-weight:600">📋 Shot Summary (${list.length}/${SESSION_SIZE})</div>
+      <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
+        <span>📋 Shot Summary (${list.length}/${SESSION_SIZE})</span>
+        <span id=\"sessFinalBadge\" style=\"display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;\">Finalizing…</span>
+      </div>
       <div>
         <button id="exportCSV" class="vc-btn" title="Export CSV">⬇︎ CSV</button>
         <button id="closeFull" class="vc-btn">✖</button>
       </div>
     </div>
+    <div id=\"sessReviewLine\" style=\"display:none;opacity:.95;margin:4px 0 10px;line-height:1.35\"></div>
     <table class="hud-table">
       <colgroup>
         <col id="cNum"><col id="cRes"><col id="cArc"><col id="cEntry"><col id="cRel"><col><col id="cFix">
@@ -847,9 +1143,10 @@ function renderFullShotTable() {
     const coach = pickCoach(s);
     const tr = document.createElement('tr');
     tr.setAttribute('data-shot-idx', i + 1);
+    if (i === __bestIdx) tr.setAttribute('data-best', '1');
     tr.innerHTML = `
       <td class="num">${i+1}</td>
-      <td class="result">${s.made ? '✅' : '❌'}</td>
+      <td class="result" title="${i===__bestIdx ? 'Best shot' : ''}">${s.made ? (i===__bestIdx ? '⭐️ ✅' : '✅') : '❌'}</td>
       <td class="arc">${Math.round(s.arcHeight ?? 0) || '–'}</td>
       <td class="entry">${s.entryAngle ?? '–'}</td>
       <td class="release">${s.releaseAngle ?? '–'}</td>
@@ -861,6 +1158,20 @@ function renderFullShotTable() {
           <button class="vc-btn btn-ai"    title="AI Review" data-id="${i+1}">🤖</button>
         </div>
       </td>`;
+
+    // Inject a Replay button between Miss and AI Review
+    try {
+      const bar = tr.querySelector('td.fix > div');
+      if (bar) {
+        const aiBtn = bar.querySelector('.btn-ai');
+        const replay = document.createElement('button');
+        replay.className = 'vc-btn btn-replay';
+        replay.title = 'Replay';
+        replay.dataset.id = String(i + 1);
+        replay.textContent = '▶';
+        if (aiBtn) bar.insertBefore(replay, aiBtn); else bar.appendChild(replay);
+      }
+    } catch {}
 
     try {
       if (s && s.pending === true) {
@@ -879,8 +1190,11 @@ function renderFullShotTable() {
   modal.querySelector('#closeFull').onclick = () => modal.style.display = 'none';
   modal.querySelector('#exportCSV').onclick = () => exportSessionCSV(list);
   modal.style.display = 'block';
+  try { modal.style.zIndex = '10060'; } catch {}
   return modal;
 }
+
+// Cap prompt removed; auto-end handles finish
 
 // keep the data
 function exportSessionCSV(list){
@@ -912,7 +1226,7 @@ function computeTotals(list){
 }
 
 // Record a shot summary and update the session HUD
-window.recordShotSummary = function recordShotSummary(summary) {
+window.recordShotSummary = async function recordShotSummary(summary) {
   // de-dupe
   const key = `${+summary.made}|${Math.round(summary.arcHeight||0)}|${summary.entryAngle}|${summary.releaseAngle}|${summary.frameExit||''}`;
   if (window.__lastShotKey === key) return;
@@ -934,29 +1248,40 @@ window.recordShotSummary = function recordShotSummary(summary) {
     summary.__idx = idx;            // keep the index on the object for later
   }
 
-  // If the full table is open, append this row now (properly marked up)
+  // If the full table is open, update existing pending row or append now
   const modal = document.getElementById('fullShotModal');
   if (modal) {
     const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     const tb  = modal.querySelector('tbody');
     if (tb) {
-      const tr = document.createElement('tr');
-      tr.setAttribute('data-shot-idx', idx);
-      tr.innerHTML = `
-        <td class="num">${idx}</td>
-        <td class="result">${summary.made ? '✅' : '❌'}</td>
-        <td class="arc">${Math.round(summary.arcHeight ?? 0) || '–'}</td>
-        <td class="entry">${summary.entryAngle ?? '–'}</td>
-        <td class="release">${summary.releaseAngle ?? '–'}</td>
-        <td class="coach" title="${esc(summary.doach||'')}">${summary.doach ? esc(summary.doach) : '—'}</td>
-        <td class="fix">
-          <div style="display:flex;gap:6px">
-            <button class="vc-btn btn-make"  title="Mark Make" data-id="${idx}">✅</button>
-            <button class="vc-btn btn-miss"  title="Mark Miss" data-id="${idx}">❌</button>
-            <button class="vc-btn btn-ai"    title="AI Review" data-id="${idx}">🤖</button>
-          </div>
-        </td>`;
-      tb.appendChild(tr);
+      let tr = modal.querySelector(`tr[data-shot-idx="${idx}"]`);
+      if (!tr) {
+        tr = document.createElement('tr');
+        tr.setAttribute('data-shot-idx', idx);
+        tr.innerHTML = `
+          <td class="num">${idx}</td>
+          <td class="result"></td>
+          <td class="arc"></td>
+          <td class="entry"></td>
+          <td class="release"></td>
+          <td class="coach"></td>
+          <td class="fix"><div style="display:flex;gap:6px"></div></td>`;
+        tb.appendChild(tr);
+        // Inject buttons (including Replay)
+        try {
+          const bar = tr.querySelector('td.fix > div');
+          const mk = document.createElement('button'); mk.className='vc-btn btn-make'; mk.title='Mark Make'; mk.dataset.id=String(idx); mk.textContent='✅'; bar.appendChild(mk);
+          const ms = document.createElement('button'); ms.className='vc-btn btn-miss'; ms.title='Mark Miss'; ms.dataset.id=String(idx); ms.textContent='❌'; bar.appendChild(ms);
+          const rp = document.createElement('button'); rp.className='vc-btn btn-replay'; rp.title='Replay'; rp.dataset.id=String(idx); rp.textContent='▶'; bar.appendChild(rp);
+          const ai = document.createElement('button'); ai.className='vc-btn btn-ai'; ai.title='AI Review'; ai.dataset.id=String(idx); ai.textContent='🤖'; bar.appendChild(ai);
+        } catch {}
+      }
+      // Update existing row cells
+      try { const c = tr.querySelector('.coach'); if (c) { c.textContent = summary.doach ? esc(summary.doach) : '—'; c.title = esc(summary.doach||''); } } catch {}
+      try { const e = tr.querySelector('.result');  if (e) e.textContent = summary.made ? '✅' : '❌'; } catch {}
+      try { const e = tr.querySelector('.arc');     if (e) e.textContent = (Math.round(summary.arcHeight ?? 0) || '–'); } catch {}
+      try { const e = tr.querySelector('.entry');   if (e) e.textContent = (summary.entryAngle ?? '–'); } catch {}
+      try { const e = tr.querySelector('.release'); if (e) e.textContent = (summary.releaseAngle ?? '–'); } catch {}
     }
   }
 
@@ -966,48 +1291,43 @@ window.recordShotSummary = function recordShotSummary(summary) {
   const elapsedSec = Math.floor((Date.now() - start) / 1000);
   updateSessionHUD({ taken, made, accuracy: acc, elapsedSec });
 
-  // End-of-session prompt at 10 shots; allow end/new/continue
+  // Attach/update per-shot coach line immediately for the table (no extra speech)
+  try {
+    const last = list[idx - 1];
+    const snap = last?.poseSnapshot
+      || (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints
+          ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+          : null);
+    const sForCoach = { ...summary, poseSnapshot: snap };
+    window.doachOnShot?.(sForCoach); // respect DOACH_ONLY_REALTIME inside doachOnShot
+  } catch {}
+
+  // End-of-session prompt at 10 shots; reuse central prompt logic
   if (taken === SESSION_SIZE && !window.__sessionContinue && !window.__sessionCapPrompted) {
     window.__sessionCapPrompted = true;
-    const root = ensureHudRoot();
-    let prompt = document.getElementById('endOrContinuePrompt');
-    if (!prompt) {
-      prompt = document.createElement('div');
-      prompt.id = 'endOrContinuePrompt';
-      prompt.className = 'hud-card';
-      Object.assign(prompt.style, {
-        position:'absolute', left:'50%', transform:'translateX(-50%)', bottom:'110px',
-        padding:'10px 12px', pointerEvents:'auto', zIndex:10020
-      });
-      prompt.innerHTML = `
-        <div style="margin-bottom:6px;font-weight:600">That was ${SESSION_SIZE} shots. End session, start new, or continue?</div>
-        <div style="display:flex;gap:8px;justify-content:center">
-          <button id="btnEndNow" class="vc-btn">End</button>
-          <button id="btnStartNew" class="vc-btn">Start New</button>
-          <button id="btnContinue" class="vc-btn">Continue</button>
-        </div>`;
-      root.appendChild(prompt);
-      prompt.querySelector('#btnEndNow').onclick = () => {
-        try { prompt.remove(); } catch {}
-        try { speak('Ending session.'); } catch {}
-        try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
-        try { renderFullShotTable(); wireFullShotModalActions(); } catch {}
-      };
-      const onStartNew = () => {
-        try { prompt.remove(); } catch {}
-        try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
-        try { resetSessionClockAndCount(); } catch {}
-        try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch {}
-        try { speak('Starting a new session. Shoot when ready.'); } catch {}
-      };
-      prompt.querySelector('#btnStartNew').onclick = onStartNew;
-      prompt.querySelector('#btnContinue').onclick = () => {
-        window.__sessionContinue = true;   // keep going; user will end manually
-        try { prompt.remove(); } catch {}
-        try { speak("Let's continue, keep shooting."); } catch {}
-      };
-    }
+    try { window.dispatchEvent(new Event('doach:show-cap-prompt')); } catch {}
+    try { window.autoEndSessionAndSummarize?.(); } catch {}
   }
+
+  // Persist summary to backend even if no shot:summary event fired
+  try {
+    let sid = (window.__SESSION_ID || null);
+    if (!sid) { try { sid = await ensureSessionId(); } catch {} }
+    if (sid) {
+      let idxPost = null;
+      try { idxPost = Number.isFinite(window.__SHOT_IDX) ? Number(window.__SHOT_IDX) : (list.length - 1); } catch {}
+      const payload = {
+        idx: idxPost,
+        t: Date.now(),
+        made: (summary?.made ?? null),
+        arcHeight: (summary?.arcHeight ?? null),
+        entryAngle: (summary?.entryAngle ?? null),
+        releaseAngle: (summary?.releaseAngle ?? null),
+        missReason: (summary?.missReason ?? null)
+      };
+      fetch(`/api/sessions/${sid}/shot`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+    }
+  } catch {}
 };
 
 // Wire correction buttons for the full-session modal (id: fullShotModal)
@@ -1035,12 +1355,16 @@ function wireFullShotModalActions() {
     } catch {}
   }
 
-  // Delegated button handlers (Make / Miss / AI)
+  // Delegated button handlers (Replay / Make / Miss / AI)
   tbody.addEventListener('click', async (e) => {
     const b  = e.target.closest('button'); if (!b) return;
     const id = Number(b.dataset.id || 0);  if (!id) return;
 
     try {
+      if (b.classList.contains('btn-replay')) {
+        try { window.playShotReplay?.({ id }); } catch {}
+        return;
+      }
       if (b.classList.contains('btn-make')) {
         await window.applyShotCorrection?.({ id, made: true,  reason: 'Table' });
       } else if (b.classList.contains('btn-miss')) {
@@ -1130,6 +1454,7 @@ export function initHUDForVideo(videoEl) {
 
   videoEl?.addEventListener('loadeddata', () => {
     ensureHudRoot();
+    try { mountConnectionBanner(); } catch {}
     startHoopPromptLoop();
     showCenterCountdownAndPrompt();
     setOverlayInteractive(true);
@@ -1138,6 +1463,7 @@ export function initHUDForVideo(videoEl) {
   // if video was already loaded (fast cache), still start the loop
   if (videoEl?.readyState >= 2) {
     ensureHudRoot();
+    try { mountConnectionBanner(); } catch {}
     startHoopPromptLoop();
     showCenterCountdownAndPrompt();
     setOverlayInteractive(true);
@@ -1146,6 +1472,7 @@ export function initHUDForVideo(videoEl) {
   // keep HUD on top when playback state toggles
   videoEl?.addEventListener('play',  ensureHudRoot);
   videoEl?.addEventListener('pause', ensureHudRoot);
+  try { mountConnectionBanner(); } catch {}
   // Always ensure the bottom HUD is present for both uploads and live camera
   try { mountSessionHUD(); } catch {}
   try { setSessionStatus('SESSION IN PROGRESS…'); } catch {}
@@ -1169,12 +1496,170 @@ export function initHUDForVideo(videoEl) {
   try {
     window.addEventListener('hud:end-session', () => {
       try { if (window.__hudTimeTimer) { clearInterval(window.__hudTimeTimer); window.__hudTimeTimer = null; } } catch {}
+      try { window.stopObserverStreaming?.(); } catch {}
     }, { once: false });
   } catch {}
+
+  // Optional: capture live clips around release and upload per shot (overlay-only)
+  // Enable via: window.CAPTURE_LIVE_CLIPS = true
+  (function wireLiveClipCapture(){
+    if (window.__liveClipWired) return; window.__liveClipWired = true;
+    function startLiveClip(){
+      try {
+        if (!window.CAPTURE_LIVE_CLIPS) return;
+        if (window.__liveRec?.rec) return;
+        const ov = document.getElementById('overlay');
+        if (!ov || !ov.captureStream) return;
+        const stream = ov.captureStream(30);
+        const chunks = [];
+        let rec;
+        try { rec = new MediaRecorder(stream, { mimeType: 'video/webm' }); } catch { return; }
+        rec.ondataavailable = (e)=>{ try { if (e.data && e.data.size) chunks.push(e.data); } catch {} };
+        rec.start();
+        window.__liveRec = { rec, chunks, idxHint: Number(window.__SHOT_IDX || (window.__shotList||[]).length || 0) };
+      } catch {}
+    }
+    async function stopAndUpload(){
+      try {
+        const pack = window.__liveRec; if (!pack || !pack.rec) return;
+        const { rec, chunks, idxHint } = pack;
+        await new Promise((resolve)=>{
+          try {
+            rec.onstop = async () => {
+              try {
+                const blob = new Blob(chunks, { type:'video/webm' });
+                const sid = await ensureSessionId();
+                if (sid && blob && blob.size) {
+                  const fd = new FormData();
+                  fd.append('file', blob, `shot_${idxHint}.webm`);
+                  await fetch(`/api/sessions/${sid}/shot_video?index=${idxHint}`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
+                }
+              } catch {}
+              finally { try { window.__liveRec = null; } catch {} resolve(); }
+            };
+            rec.stop();
+          } catch { try { window.__liveRec = null; } catch {} resolve(); }
+        });
+      } catch {}
+    }
+    window.addEventListener('shot:release', startLiveClip);
+    window.addEventListener('hud:score-trip', startLiveClip);
+    window.addEventListener('shot:summary', () => { stopAndUpload(); });
+  })();
+
+  // Auto end helper: stop camera, black out, force post pending shots, show summary
+  async function autoEndSessionAndSummarize(){
+    try { if (window.__summaryShown === true) return; } catch {}
+    try { window.__sessionCapped = true; } catch {}
+    try { window.__sessionEnded = true; } catch {}
+    try { window.__SESSION_ACTIVE = false; } catch {}
+    try { window.__shotTrackingArmed = false; } catch {}
+    try { window.stopPoseReleaseSampler?.(); } catch {}
+    try { window.stopCamera?.(); } catch {}
+    try {
+      // Black overlay (dim, but keep table readable)
+      const root = ensureHudRoot();
+      let blk = document.getElementById('endBlackout');
+      if (!blk) {
+        blk = document.createElement('div'); blk.id='endBlackout';
+        Object.assign(blk.style,{position:'absolute',inset:'0',background:'#000',opacity:'0.65',zIndex:10040, pointerEvents:'none'});
+        root.appendChild(blk);
+      } else { blk.style.display='block'; blk.style.opacity='0.65'; blk.style.zIndex = '10040'; blk.style.pointerEvents='none'; }
+    } catch {}
+
+    // Ensure the shot list has placeholders so the table reflects session cap
+    try {
+      const cap = Number(window.SESSION_SIZE || 10);
+      const curLen = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
+      const scoreCnt = Number(window.__SCORE_SHOT_COUNT || 0);
+      const logCnt = Array.isArray(window.shotLog) ? window.shotLog.length : 0;
+      // If the session was capped, force placeholders up to cap; otherwise use the max observed count
+      const target = (window.__sessionCapped === true) ? cap : Math.max(curLen, scoreCnt, logCnt);
+      const list = (window.__shotList ||= []);
+      for (let i = list.length; i < target; i++) list.push({ pending: true });
+      try { if (window.SESS_FINAL_TRACE === true) console.log('[end:placeholders]', { curLen, scoreCnt, logCnt, target, cap, capped: !!window.__sessionCapped }); } catch {}
+    } catch {}
+    // Force-post any pending summaries as placeholders
+    try {
+      const list = (window.__shotList||[]);
+      for (let i=0;i<list.length;i++) {
+        const s = list[i] || {};
+        await postShotUpsert(i, { made: (s.made ?? null), entryAngle: s.entryAngle ?? null, releaseAngle: s.releaseAngle ?? null, arcHeight: s.arcHeight ?? null });
+      }
+    } catch {}
+    // End server session to update totals
+    try { const sid = window.__SESSION_ID; if (sid) await fetch(`/api/sessions/${sid}/end`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}', credentials:'include' }).catch(()=>{}); } catch {}
+    // Show summary table (ensure above blackout)
+    try {
+      const modal = renderFullShotTable();
+      try { if (modal && modal.style) modal.style.zIndex = '10060'; } catch {}
+      wireFullShotModalActions();
+      // Populate per-shot Doach Summary lines immediately from pose snapshots
+      try {
+        const list = window.__shotList || [];
+        const golden = window.DOACH_MEM?.get?.()?.golden || null;
+        for (let i = 0; i < list.length; i++) {
+          const s = list[i]; if (!s) continue;
+          if (!s.doach) {
+            const issues = (typeof window.summarizePoseIssues === 'function')
+              ? (window.summarizePoseIssues(s, golden) || [])
+              : [];
+            const line = issues.length ? issues.slice(0,2).join(' ') : 'Solid form. Hold your follow‑through.';
+            s.doach = line;
+            try {
+              const cell = modal.querySelector(`tbody tr[data-shot-idx="${i+1}"] td.coach`) || null;
+              if (cell) { cell.textContent = line; cell.title = line; }
+            } catch {}
+          }
+        }
+      } catch {}
+      // Hydrate AI feedback from server and poll briefly for late arrivals
+      try {
+        let status = await hydrateAiFeedbackFromServer();
+        let polls = 0;
+        const iv = setInterval(async () => {
+          try {
+            status = await hydrateAiFeedbackFromServer();
+            if (status && status.done) { clearInterval(iv); }
+          } catch {}
+          if (++polls >= 50 || window.__sessionContinue) { clearInterval(iv); }
+        }, 1200);
+      } catch {}
+      // Background reconcile: if DB is missing rows, force-upsert from local list after a short delay
+      try {
+        setTimeout(async () => {
+          try {
+            const sid = (window.__SESSION_ID || null);
+            if (!sid) return;
+            const list = (window.__shotList || []);
+            const dbg = await fetch(`/admin/session/${sid}/debug`, { credentials:'include' }).then(r=>r.ok?r.json():null).catch(()=>null);
+            const have = new Set(Array.isArray(dbg?.shotsDB) ? dbg.shotsDB.map(r=>Number(r.idx)).filter(Number.isFinite) : []);
+            try { if (window.SESS_FINAL_TRACE === true) console.log('[finalize:reconcile]', { have: Array.from(have).sort((a,b)=>a-b), need: list.length }); } catch {}
+            for (let i = 0; i < list.length; i++) {
+              if (!have.has(i)) {
+                const s = list[i] || {};
+                const patch = { made: (typeof s.made==='boolean'?s.made:null), arcHeight: s.arcHeight ?? null, entryAngle: s.entryAngle ?? null, releaseAngle: s.releaseAngle ?? null };
+                await postShotUpsert(i, patch, { force: true });
+              }
+            }
+          } catch {}
+        }, 1500);
+      } catch {}
+      try { window.__summaryShown = true; } catch {}
+    } catch {}
+    // Announce + trigger coach session summary
+    try { window.coachSpeak?.("That's your tenth shot — let's review the session."); } catch {}
+    try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
+    try { window.__summaryShown = true; } catch {}
+  }
+
+  // Expose end-session routine globally for guards and other modules
+  try { if (typeof window.autoEndSessionAndSummarize !== 'function') window.autoEndSessionAndSummarize = autoEndSessionAndSummarize; } catch {}
 
   // confirm hoop locker fires
 window.addEventListener('hoop:locked', () => {
   window.__hoopConfirmed = true;      // <-- user has confirmed
+  try { window.__SESSION_ACTIVE = true; } catch {}
   hidePromptMessage();
   clearInterval(window.__hoopPromptTimer);
   try { const v = document.getElementById('videoPlayer') || document.querySelector('video'); if (v) v.playbackRate = 1; } catch {}
@@ -1185,10 +1670,237 @@ window.addEventListener('hoop:locked', () => {
     // Reset armed and announce countdown
     window.__shotTrackingArmed = false;
     try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec: 5 } })); } catch {}
-    try { speak(`Let's get started. Get into position and shoot when ready.`); } catch {}
+    try { if (typeof window.PREF_VOICE_INTRO === 'undefined') window.PREF_VOICE_INTRO = false; } catch {}
+    try { if (window.PREF_VOICE_INTRO === true) speak(`Let's get started, select hoop, get into position, and shoot when ready.`); } catch {}
     startShotTrackingCountdown?.(5);
   } catch {}
 });
+}
+
+// ---- Server AI feedback + metrics hydrator ----
+// Returns status { present, haveMade, need, done }
+async function hydrateAiFeedbackFromServer() {
+  // Helper: merge from local memory only (no server)
+  function hydrateFromLocalOnly() {
+    try {
+      const modal = document.getElementById('fullShotModal');
+      const badge = modal?.querySelector('#sessFinalBadge') || null;
+      // Inform the user in the review line
+      try {
+        const line = modal?.querySelector('#sessReviewLine') || null;
+        if (line) { line.style.display = 'block'; line.textContent = 'Server offline — showing local summaries only.'; }
+      } catch {}
+      const list = (window.__shotList || window.shotLog || []);
+      const need = Math.min(list.length, Number(window.SESSION_SIZE || list.length || 0));
+      let present = 0, haveMade = 0;
+      for (let i = 0; i < list.length && i < need; i++) {
+        const idx = i + 1;
+        const s = list[i] || {};
+        if (s && typeof s === 'object') {
+          present++;
+          if (typeof s.made === 'boolean') haveMade++;
+          updateShotCells(idx, s);
+          if (s.doach) updateCoachCell(idx, String(s.doach));
+        }
+      }
+      if (badge) {
+        badge.style.display = 'inline-block';
+        const done = present >= (need || list.length || 0);
+        if (done) {
+          badge.textContent = 'Finalized';
+          badge.style.background = '#22c55e';
+          badge.style.color = '#071607';
+        } else {
+          badge.textContent = `Server offline… ${present}/${need || list.length || 0}`;
+          badge.style.background = '#ef4444';
+          badge.style.color = '#0b0b0b';
+        }
+      }
+      const status = { present, haveMade, need, done: present >= (need || list.length || 0) };
+      try { if (window.SESS_FINAL_TRACE === true) console.warn('[finalize:offline]', status); } catch {}
+      return status;
+    } catch {
+      return { present:0, haveMade:0, need:0, done:false };
+    }
+  }
+
+  try {
+    // Ensure we have (or try to create) a session id
+    let sid = window.__SESSION_ID || null;
+    if (!sid) {
+      try { sid = await ensureSessionId(); } catch {}
+    }
+    if (!sid) {
+      // No server available to mint a session; hydrate from local memory only
+      return hydrateFromLocalOnly();
+    }
+
+    const list = (window.__shotList ||= []);
+    // Use admin joined view which includes ai_feedback rows and shotsDB metrics
+    let j = null;
+    try {
+      const r = await fetch(`/admin/session/${sid}/debug`, { credentials:'include' });
+      if (!r || !r.ok) {
+        try { if (window.SESS_FINAL_TRACE === true) console.warn('[finalize] debug fetch not ok', r && r.status); } catch {}
+        return hydrateFromLocalOnly();
+      }
+      j = await r.json();
+    } catch (e) {
+      // Network error (backend down); fill from local
+      try { if (window.SESS_FINAL_TRACE === true) console.warn('[finalize] debug fetch error', e); } catch {}
+      return hydrateFromLocalOnly();
+    }
+
+    try {
+      if (window.UI_TRACE_HYDRATE === true || window.SESS_FINAL_TRACE === true) {
+        const sdbN = Array.isArray(j?.shotsDB) ? j.shotsDB.length : 0;
+        const sjN  = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots.length : 0;
+        console.log('[hydrate:debug]', { sid, sdbN, sjN, fbN: Array.isArray(j?.feedback)? j.feedback.length : 0 });
+      }
+    } catch {}
+
+    // 1) Update finalization badge based on shotsDB rows
+    const status = updateFinalizationBadgeFromDebug(j);
+
+    // 2) Merge server shot metrics (made, arc, entry, release) into UI rows
+    try {
+      const sdb = Array.isArray(j?.shotsDB) ? j.shotsDB : [];
+      const sjson = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots : [];
+      // Union by idx: start with session.json (filesystem), overlay DB (authoritative)
+      const byIdx = new Map();
+      for (const src of [sjson, sdb]) {
+        for (const row of src) {
+          const i0 = Number(row?.idx);
+          if (!Number.isFinite(i0)) continue;
+          const cur = byIdx.get(i0) || {};
+          const merged = {
+            idx: i0,
+            made: (typeof row.made === 'boolean') ? row.made : (typeof cur.made === 'boolean' ? cur.made : null),
+            arcHeight: (row.arcHeight != null) ? row.arcHeight : (cur.arcHeight != null ? cur.arcHeight : null),
+            entryAngle: (row.entryAngle != null) ? row.entryAngle : (cur.entryAngle != null ? cur.entryAngle : null),
+            releaseAngle: (row.releaseAngle != null) ? row.releaseAngle : (cur.releaseAngle != null ? cur.releaseAngle : null)
+          };
+          byIdx.set(i0, merged);
+        }
+      }
+      const mergedIdxs = [];
+      for (const [i0, row] of byIdx) {
+        const idx = Math.min(list.length, Math.max(1, i0 + 1)); // DB is 0-based; UI is 1-based
+        const shot = list[idx-1] || (list[idx-1] = {});
+        if (typeof row.made === 'boolean') shot.made = row.made;
+        if (row.arcHeight != null) shot.arcHeight = row.arcHeight;
+        if (row.entryAngle != null) shot.entryAngle = row.entryAngle;
+        if (row.releaseAngle != null) shot.releaseAngle = row.releaseAngle;
+        updateShotCells(idx, shot);
+        mergedIdxs.push(idx);
+      }
+      try { if (window.UI_TRACE_HYDRATE === true) console.log('[hydrate:merge]', { mergedIdxs: mergedIdxs.sort((a,b)=>a-b) }); } catch {}
+    } catch {}
+
+    // 3) Merge AI feedback text (if present). Do this last so text is fresh.
+    try {
+      const fbs = Array.isArray(j?.feedback) ? j.feedback.slice() : [];
+      if (fbs.length) {
+        try { fbs.sort((a,b)=> (new Date(a.created_at||0)) - (new Date(b.created_at||0))); } catch {}
+        // Accept either 0-based or 1-based shot_idx. If indexes look unreliable
+        // (e.g., all 0), fall back to sequential mapping by arrival order.
+        const nums = fbs.map(x => Number(x.shot_idx)).filter(n => Number.isFinite(n));
+        const uniq = new Set(nums);
+        const idxLookReliable = (nums.length === fbs.length) && uniq.size > Math.max(1, Math.floor(fbs.length/3));
+        if (idxLookReliable) {
+          for (const fb of fbs) {
+            const n = Number(fb.shot_idx);
+            const idx = Math.min(list.length, Math.max(1, (n >= 1 ? n : (n + 1))));
+            const text = String(fb.text||'').trim();
+            if (text) { list[idx-1].doach = text; updateCoachCell(idx, text); }
+          }
+          try { if (window.UI_TRACE_HYDRATE === true) console.log('[hydrate:fb]', { mode:'index', count:fbs.length }); } catch {}
+        } else {
+          // Sequential mapping: spread feedback across rows 1..N
+          for (let i = 0; i < list.length && i < fbs.length; i++) {
+            const text = String(fbs[i].text||'').trim();
+            if (text) { list[i].doach = text; updateCoachCell(i+1, text); }
+          }
+          try { if (window.UI_TRACE_HYDRATE === true) console.log('[hydrate:fb]', { mode:'sequential', count:fbs.length }); } catch {}
+        }
+      }
+    } catch {}
+
+    // Optional debug trace
+    try { if (window.SESS_FINAL_TRACE === true) console.log('[finalize]', status); } catch {}
+    return status;
+  } catch {
+    return { present:0, haveMade:0, need:0, done:false };
+  }
+}
+
+function updateCoachCell(idx, text) {
+  try {
+    const modal = document.getElementById('fullShotModal');
+    if (!modal) return;
+    const cell = modal.querySelector(`tbody tr[data-shot-idx="${idx}"] td.coach`);
+    if (cell) { cell.textContent = text; cell.title = text; }
+  } catch {}
+}
+
+function updateShotCells(idx, shot) {
+  try {
+    const modal = document.getElementById('fullShotModal');
+    if (!modal) return;
+    const tr = modal.querySelector(`tbody tr[data-shot-idx="${idx}"]`);
+    if (!tr) return;
+    const set = (sel, val) => { const el = tr.querySelector(sel); if (el) el.textContent = val; };
+    // Result
+    if (typeof shot.made === 'boolean') set('.result', shot.made ? '✅' : '❌');
+    // Arc / Entry / Release
+    if (shot.arcHeight != null) set('.arc', `${Math.round(shot.arcHeight)||0}`);
+    if (shot.entryAngle != null) set('.entry', `${shot.entryAngle}`);
+    if (shot.releaseAngle != null) set('.release', `${shot.releaseAngle}`);
+  } catch {}
+}
+
+function updateFinalizationBadgeFromDebug(j) {
+  try {
+    const modal = document.getElementById('fullShotModal');
+    if (!modal) return { present:0, haveMade:0, need:0, done:false };
+    const badge = modal.querySelector('#sessFinalBadge');
+    if (!badge) return { present:0, haveMade:0, need:0, done:false };
+    const list = window.__shotList || [];
+    const need = Math.min(list.length, Number(window.SESSION_SIZE || 10));
+    const sdb = Array.isArray(j?.shotsDB) ? j.shotsDB : [];
+    const sj  = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots : [];
+    const presentIdx = new Set();
+    const madeIdx = new Set();
+    // Count union of DB and session.json so late DB rows don't hide file rows
+    for (const row of sdb) {
+      const i0 = Number(row.idx);
+      if (!Number.isFinite(i0)) continue;
+      if (i0 >= 0 && i0 < need) presentIdx.add(i0);
+      if (row.made === true || row.made === false) madeIdx.add(i0);
+    }
+    for (const row of sj) {
+      const i0 = Number(row.idx);
+      if (!Number.isFinite(i0)) continue;
+      if (i0 >= 0 && i0 < need) presentIdx.add(i0);
+      if (row.made === true || row.made === false) madeIdx.add(i0);
+    }
+    const present = presentIdx.size;
+    const haveMade = madeIdx.size;
+    if (!need) return { present:0, haveMade:0, need:0, done:false };
+    badge.style.display = 'inline-block';
+    // Flip to green as soon as all rows are present (do not wait for DB 'made')
+    const done = present >= need;
+    if (done) {
+      badge.textContent = 'Finalized';
+      badge.style.background = '#22c55e';
+      badge.style.color = '#071607';
+    } else {
+      badge.textContent = `Finalizing… ${present}/${need}`;
+      badge.style.background = '#f59e0b';
+      badge.style.color = '#111';
+    }
+    return { present, haveMade, need, done };
+  } catch { return { present:0, haveMade:0, need:0, done:false }; }
 }
 
 window.ensureHudRoot = ensureHudRoot;
@@ -1205,6 +1917,7 @@ function ensureShotTableStyles(){
     #fullShotModal .hud-table col#cArc   { width:64px; }
     #fullShotModal .hud-table col#cEntry { width:72px; }
     #fullShotModal .hud-table col#cRel   { width:72px; }
+    #fullShotModal .hud-table thead th{ position: sticky; top: 0; background: rgba(0,0,0,0.85); z-index: 2; backdrop-filter: blur(2px); }
     #fullShotModal .hud-table th,
     #fullShotModal .hud-table td{ padding:8px 10px; vertical-align:top; text-align:left;
       border-bottom:1px solid rgba(255,255,255,.12); }
@@ -1212,8 +1925,163 @@ function ensureShotTableStyles(){
     #fullShotModal td.num, #fullShotModal td.arc, #fullShotModal td.entry, #fullShotModal td.release { text-align:center; }
     #fullShotModal td.result{ text-align:center; }
     #fullShotModal td.coach{ white-space:normal; word-break:break-word; line-height:1.25; }
+    #fullShotModal tbody tr[data-best="1"] td { background: rgba(255,215,0,0.10) !important; }
+    #fullShotModal tbody tr[data-best="1"] td.result { font-weight: 800; }
   `;
+
+  // Insert a "Replay Best" button if we found a best shot
+  try {
+    if (__bestIdx >= 0) {
+      const actions = modal.querySelector('div > div:last-child');
+      if (actions) {
+        const btn = document.createElement('button');
+        btn.id = 'replayBest';
+        btn.className = 'vc-btn';
+        btn.title = 'Replay Best Shot';
+        btn.textContent = 'Best ▶';
+        btn.addEventListener('click', () => { try { window.playShotReplay?.({ id: (__bestIdx + 1) }); } catch {} });
+        actions.insertBefore(btn, actions.querySelector('#exportCSV'));
+      }
+    }
+  } catch {}
+
+  // Post best-shot mark to backend once per session (optional; ignored if server doesn't use it)
+  try {
+    const sid = window.__SESSION_ID || null;
+    if (sid && __bestIdx >= 0) {
+      const key = `${sid}|best|${__bestIdx}`;
+      window.__bestShotMarkSent ||= new Set();
+      if (!window.__bestShotMarkSent.has(key)) {
+        window.__bestShotMarkSent.add(key);
+        fetch(`/api/sessions/${sid}/shot`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idx: __bestIdx, best: true, t: Date.now() }),
+          credentials: 'include'
+        }).catch(()=>{});
+      }
+    }
+  } catch {}
   document.head.appendChild(css);
+}
+
+// --- Lightweight overlay replay of a shot trail (no video seek required) ---
+function makeReplayCanvasSize() {
+  const ov = document.getElementById('overlay');
+  const v  = document.getElementById('videoPlayer') || document.querySelector('video');
+  const w = ov?.width || v?.videoWidth || 640;
+  const h = ov?.height || v?.videoHeight || 360;
+  return { w: Math.max(320, w), h: Math.max(180, h) };
+}
+
+function drawHoopSimple(ctx) {
+  try {
+    const hoop = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
+    if (!hoop) return;
+    const cx = Number.isFinite(hoop.cx) ? hoop.cx : (hoop.x + (hoop.w||0)/2);
+    const cy = Number.isFinite(hoop.cy) ? hoop.cy : (hoop.y + (hoop.h||0)/2);
+    const r  = Math.max(28, Math.min(72, (hoop.w||hoop.width||60)/2));
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(255,165,0,0.9)'; ctx.lineWidth = 3; ctx.stroke();
+    ctx.restore();
+  } catch {}
+}
+
+function openShotReplay(shot) {
+  const root = ensureHudRoot();
+  let box = document.getElementById('shotReplayModal');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'shotReplayModal';
+    Object.assign(box.style, {
+      position:'absolute', left:'50%', top:'12%', transform:'translateX(-50%)', zIndex:10040,
+      background:'rgba(0,0,0,0.88)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', borderRadius:'14px',
+      boxShadow:'0 20px 50px rgba(0,0,0,0.45)', padding:'10px 10px', pointerEvents:'auto'
+    });
+    root.appendChild(box);
+  }
+  const { w, h } = makeReplayCanvasSize();
+  const cw = Math.min(w, Math.round(window.innerWidth * 0.9));
+  const ch = Math.round(cw * (h / w));
+
+  box.innerHTML = '';
+  const header = document.createElement('div');
+  header.style.display = 'flex'; header.style.alignItems = 'center'; header.style.justifyContent='space-between'; header.style.margin='4px 6px 6px';
+  header.innerHTML = `<div style="font-weight:700">Replay — Shot ${shot.__idx || '?'} ${shot.made ? '✅' : '❌'}</div>
+    <div>
+      <button id="replayToggle" class="vc-btn" style="margin-right:6px">⏯</button>
+      <button id="replayClose" class="vc-btn">✖</button>
+    </div>`;
+  box.appendChild(header);
+
+  const info = document.createElement('div');
+  info.style.font = '600 12px system-ui'; info.style.opacity = '0.85'; info.style.margin = '0 8px 6px';
+  info.textContent = `Arc ${Math.round(shot.arcHeight||0)}px · Entry ${shot.entryAngle??'–'}° · Release ${shot.releaseAngle??'–'}°`;
+  box.appendChild(info);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = w; canvas.height = h; canvas.style.width = `${cw}px`; canvas.style.height = `${ch}px`;
+  canvas.style.display='block'; canvas.style.background='rgba(0,0,0,0.6)'; canvas.style.borderRadius='10px';
+  box.appendChild(canvas);
+
+  const ctx = canvas.getContext('2d');
+  const trail = Array.isArray(shot.trail) ? shot.trail.slice() : [];
+  let i = 0; let raf = 0; let playing = true;
+  function drawFrame() {
+    try {
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // hoop
+      drawHoopSimple(ctx);
+      // path
+      if (trail.length >= 2) {
+        ctx.save();
+        ctx.lineWidth = 3; ctx.strokeStyle = 'lime'; ctx.beginPath();
+        const upto = Math.max(1, Math.min(i, trail.length-1));
+        for (let k=0; k<=upto; k++) {
+          const p = trail[k]; if (!p) continue;
+          if (k===0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
+        }
+        ctx.stroke();
+        // head dot
+        const P = trail[upto];
+        if (P) { ctx.beginPath(); ctx.arc(P.x, P.y, 6, 0, Math.PI*2); ctx.fillStyle = '#22c55e'; ctx.fill(); }
+        ctx.restore();
+      } else {
+        ctx.save();
+        ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.font='600 14px system-ui';
+        ctx.fillText('No trail available for this shot.', 16, 26);
+        ctx.restore();
+      }
+    } catch {}
+  }
+  function step() {
+    drawFrame();
+    if (playing && trail.length) {
+      i = Math.min(trail.length, i + 2);
+      if (i < trail.length) raf = requestAnimationFrame(step);
+    }
+  }
+  // wire controls
+  const close = () => { try { cancelAnimationFrame(raf); } catch {} try { box.remove(); } catch {} };
+  box.querySelector('#replayClose')?.addEventListener('click', close, { once:true });
+  box.querySelector('#replayToggle')?.addEventListener('click', () => {
+    playing = !playing;
+    if (playing) { if (i >= trail.length) i = 0; raf = requestAnimationFrame(step); }
+  });
+
+  // start
+  i = 0; playing = true; cancelAnimationFrame(raf); raf = requestAnimationFrame(step);
+}
+
+if (!window.playShotReplay) {
+  window.playShotReplay = function playShotReplay({ id } = {}){
+    try {
+      const list = window.__shotList || [];
+      const shot = list[id - 1];
+      if (!shot) return;
+      openShotReplay(shot);
+    } catch {}
+  };
 }
 
 // ---- Center prompt + countdown (on load/connect) ----
@@ -1291,21 +2159,46 @@ function startShotTrackingCountdown(sec = 5) {
   try {
     // Avoid double countdowns
     if (window.__armCountdownActive) return; window.__armCountdownActive = true;
-    const el = showCenterPrompt('Get into position…');
-    const run = async () => {
-      for (let i = sec; i >= 1; i--) {
-        el.textContent = `Starting in ${i}…`;
-        await new Promise(r => setTimeout(r, 1000));
+    // Block releases while counting down
+    try { window.__shotTrackingArmed = false; } catch {}
+    try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec } })); } catch {}
+
+    // Build large centered number overlay
+    const root = ensureHudRoot();
+    let box = document.getElementById('countdownOverlay');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'countdownOverlay';
+      Object.assign(box.style, {
+        position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
+        background:'rgba(0,0,0,0.45)', color:'#fff', padding:'24px 32px', borderRadius:'16px',
+        font:'900 120px/1 system-ui, -apple-system, Segoe UI, Arial',
+        textShadow: '0 6px 18px rgba(0,0,0,.55)', zIndex:10040,
+        pointerEvents:'none', display:'none'
+      });
+      root.appendChild(box);
+    }
+    const showNum = (t) => { box.style.display = 'block'; box.textContent = String(t); };
+    const showGo  = () => { box.style.display = 'block'; box.textContent = 'GO'; };
+    const hide    = () => { box.style.display = 'none'; };
+
+    (async () => {
+      try {
+        for (let i = sec; i >= 1; i--) {
+          showNum(i);
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        showGo();
+        setTimeout(hide, 700);
+        // Arm and announce
+        window.__shotTrackingArmed = true;
+        try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
+        try { speak('Shoot when ready.'); } catch {}
+        try { window.__releaseEventSent = false; } catch {}
+      } finally {
+        window.__armCountdownActive = false;
       }
-      el.textContent = 'Shoot when ready';
-      setTimeout(hideCenterPrompt, 650);
-      window.__shotTrackingArmed = true;
-      try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
-      // try { speak('Shoot when ready.'); } catch {}
-      try { window.__releaseEventSent = false; } catch {}
-      window.__armCountdownActive = false;
-    };
-    run();
+    })();
   } catch {}
 }
 try { if (typeof window.startShotTrackingCountdown !== 'function') window.startShotTrackingCountdown = startShotTrackingCountdown; } catch {}
@@ -1369,8 +2262,8 @@ window.addEventListener('shot:summary', () => {
 
       // Trust upstream latch; UI enforces only armed + hoop + cooldown
 
-      const list = (window.__shotList ||= []);
-      const rf = Number(e?.detail?.frame || 0);
+          const list = (window.__shotList ||= []);
+          const rf = Number(e?.detail?.frame || 0);
       const last = list.at?.(-1) || null;
       const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
       if (!same) {
@@ -1378,6 +2271,21 @@ window.addEventListener('shot:summary', () => {
           ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
           : null;
         list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
+        // If snapshot was not yet ready at the exact release tick, grab one immediately
+        try {
+          queueMicrotask(async () => {
+            try {
+              const lastRow = list.at?.(-1) || null;
+              if (lastRow && !lastRow.poseSnapshot && typeof window.__samplePoseSnapshotNow === 'function') {
+                const s2 = await window.__samplePoseSnapshotNow();
+                if (s2) lastRow.poseSnapshot = s2;
+              }
+            } catch {}
+          });
+        } catch {}
+        try { window.__SHOT_IDX = (list.length - 1); } catch {}
+        // also upsert a placeholder shot row to backend so admin shows attempts
+        try { postShotUpsert((list.length - 1), { made: null }); } catch {}
       }
       window.__UI_LAST_RELEASE_MS = now;
       const taken = list.length;
@@ -1395,6 +2303,8 @@ window.addEventListener('shot:summary', () => {
   // This is visual/log-only; summaries still come from the scorer.
   window.addEventListener('hud:score-trip', (e) => {
     try {
+      // Cap session at SESSION_SIZE
+      try { const cap = Number(window.SESSION_SIZE||10); const cur = (window.__shotList||[]).length; if (cur >= cap) return; } catch {}
       const list = (window.__shotList ||= []);
       // Prefer frame from event; fallback to latest sampler index or RELEASE_SCORE
       let rf = Number(e?.detail?.frame);
@@ -1406,10 +2316,25 @@ window.addEventListener('shot:summary', () => {
       const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
       if (same) return;
 
+      // Require pose present
+      try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
       const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
         ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
         : null;
       list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap, via: 'score-trip' });
+      // Freshen snapshot immediately if we didn't have one yet
+      try {
+        queueMicrotask(async () => {
+          try {
+            const lastRow = list.at?.(-1) || null;
+            if (lastRow && !lastRow.poseSnapshot && typeof window.__samplePoseSnapshotNow === 'function') {
+              const s2 = await window.__samplePoseSnapshotNow();
+              if (s2) lastRow.poseSnapshot = s2;
+            }
+          } catch {}
+        });
+      } catch {}
+      try { window.__SHOT_IDX = (list.length - 1); } catch {}
 
       const taken = list.length;
       const start = (window.__sessionStart ||= Date.now());
@@ -1419,12 +2344,36 @@ window.addEventListener('shot:summary', () => {
       window.setSessionStatus?.('Shot ' + taken + ' in progress');
       if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:add-pending:score-trip]', { frame: rf, len: taken });
 
+      // Fallback: persist a release mark to the backend even if no strict release event fired
+      (async () => {
+        try {
+          let sid = (window.__SESSION_ID || null);
+          if (!sid) { try { sid = await ensureSessionId(); } catch {} }
+          if (!sid) return;
+          const payload = {
+            sessionId: sid,
+            shotId: (window.__SHOT_IDX || (list.length - 1) || 0),
+            frame: rf,
+            tMs: Date.now(),
+            via: 'hud:score-trip',
+            poseSnapshot: snap,
+            hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
+            gate: (window.__LAST_GATE || null)
+          };
+          await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+        } catch {}
+      })();
+
+      // Auto end at cap
+      try { const cap = Number(window.SESSION_SIZE||10); if (taken >= cap) autoEndSessionAndSummarize(); } catch {}
+
       // If the full table is open, refresh so the new row appears as "pending"
       try {
         const modal = document.getElementById('fullShotModal');
         if (modal && modal.style.display === 'block') { renderFullShotTable(); wireFullShotModalActions(); }
       } catch {}
-    } catch (err) { if (window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:score-trip:error]', err); }
+    }  
+    catch (err) { if (window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:score-trip:error]', err); }
   });
 
   // Live update the bottom HUD when HUD shot counter changes
@@ -1435,16 +2384,72 @@ window.addEventListener('shot:summary', () => {
       const elapsedSec = Math.floor((Date.now() - start) / 1000);
       window.updateSessionHUD?.({ taken: cnt, elapsedSec });
       if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:update:mShots]', { taken: cnt });
-      // Show the cap prompt as soon as the counter reaches the session size (summary may lag)
+      // Auto-end as soon as HUD count reaches cap
       try {
         const cap = Number(window.SESSION_SIZE || 10);
-        if (cnt >= cap && !window.__sessionCapPrompted) {
-          window.__sessionCapPrompted = true;
-          // Reuse the same prompt renderer as the summary path
-          const evt = new Event('doach:show-cap-prompt');
-          window.dispatchEvent(evt);
+        if (cnt >= cap && !window.__sessionCapped) {
+          window.__sessionCapped = true;
+          autoEndSessionAndSummarize();
+          return;
         }
       } catch {}
+      // Ensure local list has a pending record for this HUD shot index
+      try {
+        // Require pose present
+        try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
+        const list = (window.__shotList ||= []);
+        const targetIdx = Math.max(0, cnt - 1); // 0-based index from HUD count
+        // Grow list with pending placeholders up to targetIdx
+        while (list.length <= targetIdx) {
+          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+            : null;
+          list.push({ pending: true, frameRelease: null, tMs: Date.now(), poseSnapshot: snap, via: 'hud:shot-taken' });
+          // If just-added row has no snapshot, try sampling once immediately
+          try {
+            queueMicrotask(async () => {
+              try {
+                const lastRow = list.at?.(-1) || null;
+                if (lastRow && !lastRow.poseSnapshot && typeof window.__samplePoseSnapshotNow === 'function') {
+                  const s2 = await window.__samplePoseSnapshotNow();
+                  if (s2) lastRow.poseSnapshot = s2;
+                }
+              } catch {}
+            });
+          } catch {}
+        }
+        try { window.__SHOT_IDX = targetIdx; } catch {}
+        // Ensure a placeholder row exists in backend for this attempt
+        postShotUpsert(targetIdx, { made: null });
+      } catch {}
+      // Also persist a release snapshot for admin even if strict release event didn't fire
+      (async () => {
+        try {
+          let sid = (window.__SESSION_ID || null);
+          if (!sid) { try { sid = await ensureSessionId(); } catch {} }
+          if (!sid) return;
+          // Pick a reasonable frame index approximation
+          let rf = Number(window.__AN_IDX);
+          if (!Number.isFinite(rf)) rf = Number(window.RELEASE_SCORE?.frame);
+          if (!Number.isFinite(rf)) rf = 0;
+          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+            : null;
+          const payload = {
+            sessionId: sid,
+            shotId: (window.__SHOT_IDX || Math.max(0, cnt - 1) || 0),
+            frame: rf,
+            tMs: Date.now(),
+            via: 'hud:shot-taken',
+            poseSnapshot: snap,
+            hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
+            gate: (window.__LAST_GATE || null)
+          };
+          await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+        } catch {}
+      })();
+      // Auto end at cap
+      try { const cap = Number(window.SESSION_SIZE||10); if (cnt >= cap) autoEndSessionAndSummarize(); } catch {}
     } catch {}
   });
 })();
@@ -1490,6 +2495,8 @@ window.showCenterPrompt = showCenterPrompt;
       // rAF + short timeout to cover layout resync and decoder latency
       requestAnimationFrame(() => { forcePoseStepOnce(); });
       setTimeout(forcePoseStepOnce, 140);
+      // Start admin observer streaming automatically for demos
+      try { window.startObserverStreaming?.(2); } catch {}
 
       // For the next ~2.5s after lock, actively sample pose at ~8–10 fps
       // so playerState keeps moving even if analyzer is spinning up.

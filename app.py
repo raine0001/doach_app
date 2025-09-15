@@ -63,6 +63,20 @@ try:
 except Exception:
     app.secret_key = os.urandom(24)
 
+# Simple trace flag (enable with DOACH_TRACE=1)
+try:
+    _TRACE = os.getenv('DOACH_TRACE', '1')
+    TRACE_ON = not (_TRACE.lower() in ('0', 'false', 'no', 'off', ''))
+except Exception:
+    TRACE_ON = True
+
+def _trace(*args, **kwargs):
+    try:
+        if TRACE_ON:
+            print(*args, **kwargs)
+    except Exception:
+        pass
+
 REQUIRED_LABELS = {'basketball', 'hoop', 'net', 'backboard', 'player'}
 CONFIDENCE_THRESHOLD = 0.01  # Lowered from 0.75 to 0.01 for improved detection
 SKIPPED_LOG_PATH = 'skipped_frames.json'
@@ -74,6 +88,36 @@ os.makedirs(FRAME_FOLDER, exist_ok=True)
 DATA_DIR = Path("data")
 DATA_DIR.mkdir(exist_ok=True)
 PRESET_FILE = DATA_DIR / "voice_presets.json"
+
+# Track active users (lightweight, in-memory). Production should use Redis.
+app.active_users = {}
+app.observer_frames = {}
+
+@app.before_request
+def _track_active_user():
+    try:
+        uid = session.get('user_id')
+        if uid:
+            app.active_users[uid] = {
+                'user_id': uid,
+                'last_seen': datetime.utcnow().isoformat(timespec='seconds') + 'Z',
+                'path': request.path,
+                'ip': request.headers.get('X-Forwarded-For') or request.remote_addr,
+            }
+            # prune very old ( > 2h )
+            if len(app.active_users) > 500:
+                to_del = []
+                for k, v in app.active_users.items():
+                    try:
+                        dt = datetime.fromisoformat(v['last_seen'].rstrip('Z'))
+                        if (datetime.utcnow() - dt).total_seconds() > 7200:
+                            to_del.append(k)
+                    except Exception:
+                        to_del.append(k)
+                for k in to_del:
+                    app.active_users.pop(k, None)
+    except Exception:
+        pass
 
 client = None
 
@@ -259,7 +303,8 @@ def api_session_start():
     try:
         _db_add_session(sid, now)
     except Exception as e:
-        print('db add session error:', e)
+        _trace('db add session error:', e)
+    _trace('api:sessions/start', {'sid': sid, 'device': sess.get('device')})
     return jsonify({ 'id': sid, 'startedAt': now })
 
 @app.post('/api/sessions/<sid>/shot')
@@ -268,9 +313,36 @@ def api_session_add_shot(sid):
     sess = _read_session(sid)
     if not sess:
         return jsonify({'error':'session not found'}), 404
-    shots = sess.get('shots', [])
-    data['idx'] = len(shots)
-    shots.append(data)
+    shots = list(sess.get('shots', []))
+    client_idx = data.get('idx') if isinstance(data.get('idx'), int) else None
+    replace = bool(data.get('replace'))
+    # Determine next server index from both file and DB to avoid duplicate 0s
+    next_idx = len(shots)
+    try:
+        db = _db_get()
+        if db:
+            from sqlalchemy import select, func
+            with db['Session']() as s:
+                ShotRow = db['ShotRow']
+                mx = s.execute(select(func.max(ShotRow.idx)).where(ShotRow.sid == sid)).scalar_one_or_none()
+                if mx is not None:
+                    next_idx = max(next_idx, int(mx) + 1)
+    except Exception as e:
+        _trace('api:sid/shot: max idx probe failed:', e)
+    _trace('api:sid/shot', {'sid': sid, 'idx': client_idx, 'replace': replace, 'serverNext': next_idx, 'keys': list(data.keys())})
+    # Append by default; only replace when explicitly requested
+    found_idx = None
+    if replace and client_idx is not None:
+        for i, srow in enumerate(shots):
+            if isinstance(srow, dict) and srow.get('idx') == client_idx:
+                found_idx = i
+                break
+    if found_idx is not None:
+        data['idx'] = client_idx
+        shots[found_idx] = data
+    else:
+        data['idx'] = next_idx
+        shots.append(data)
     sess['shots'] = shots
     # update totals
     attempts = len(shots)
@@ -281,7 +353,7 @@ def api_session_add_shot(sid):
     try:
         _db_add_shot(sid, data['idx'], data)
     except Exception as e:
-        print('db add shot error:', e)
+        _trace('db add shot error:', e)
     return jsonify({ 'ok': True, 'idx': data['idx'], 'totals': sess['totals'] })
 
 @app.post('/api/sessions/<sid>/shot_video')
@@ -314,7 +386,13 @@ def api_session_end(sid):
     try:
         _db_finalize_session(sid)
     except Exception as e:
-        print('db finalize error:', e)
+        _trace('db finalize error:', e)
+    # Backfill DB shots from session.json to guarantee coverage
+    try:
+        _db_backfill_session_shots(sid)
+    except Exception as e:
+        _trace('db backfill error:', e)
+    _trace('api:sessions/end', {'sid': sid, 'totals': sess['totals']})
     return jsonify({ 'ok': True, 'id': sid, 'totals': sess['totals'] })
 
 @app.get('/api/sessions')
@@ -370,6 +448,7 @@ def api_release_mark():
             'via': via,
             'poseSnapshot': snap,
             'hoop': hoop,
+            'gate': data.get('gate') or None,
         }
         # Persist to session folder if present; else log in a global file
         if sid:
@@ -380,6 +459,29 @@ def api_release_mark():
             p = os.path.join(SESSIONS_DIR, 'releases.jsonl')
         with open(p, 'a', encoding='utf-8') as f:
             f.write(json.dumps(entry, ensure_ascii=False) + '\n')
+        # Also persist to SQL if configured
+        try:
+            db = getattr(app, 'db', None)
+            if db and sid:
+                with db['Session']() as sdb:
+                    # store a pose snapshot row (create table below)
+                    PoseSnap = db.get('PoseSnapshotRow')
+                    if PoseSnap is not None:
+                        row = PoseSnap(
+                            sid=sid,
+                            shot_idx=(shot or 0),
+                            frame=frame,
+                            t_ms=t_ms,
+                            via=via,
+                            metrics=snap,
+                            hoop=hoop,
+                            gate=entry.get('gate')
+                        )
+                        sdb.add(row)
+                        sdb.commit()
+        except Exception as e:
+            print('db_add_pose_snapshot:', e)
+
         # Keep a simple in-memory mirror for quick debugging
         app.config['LAST_RELEASE'] = entry
         return jsonify({'ok': True, 'saved': True})
@@ -465,11 +567,35 @@ def _try_init_db():
             clip_url = Column(String(512))
             data = Column(MyJSON)
 
+        class PoseSnapshotRow(Base):
+            __tablename__ = 'pose_snapshots'
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            sid = Column(String(64), ForeignKey('sessions.sid'), nullable=False)
+            shot_idx = Column(Integer, nullable=True)
+            created_at = Column(DateTime, default=datetime.utcnow)
+            frame = Column(Integer)
+            t_ms = Column(Integer)
+            via = Column(String(64))
+            metrics = Column(MyJSON)   # poseSnapshot metrics JSON
+            hoop = Column(MyJSON)      # hoop box JSON
+            gate = Column(MyJSON)      # unified gate result/tests JSON
+
+        class CoachFeedbackRow(Base):
+            __tablename__ = 'ai_feedback'
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            sid = Column(String(64), ForeignKey('sessions.sid'), nullable=True)
+            shot_idx = Column(Integer, nullable=True)
+            created_at = Column(DateTime, default=datetime.utcnow)
+            provider = Column(String(64))
+            model = Column(String(64))
+            latency_ms = Column(Integer)
+            text = Column(Text)
+
         Base.metadata.create_all(engine)
         DBSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
         # attach to app for reuse
-        app.db = { 'engine': engine, 'Session': DBSessionLocal, 'User': User, 'SessionRow': SessionRow, 'ShotRow': ShotRow }
+        app.db = { 'engine': engine, 'Session': DBSessionLocal, 'User': User, 'SessionRow': SessionRow, 'ShotRow': ShotRow, 'PoseSnapshotRow': PoseSnapshotRow, 'CoachFeedbackRow': CoachFeedbackRow }
         print('✅ SQLAlchemy connected')
         return app.db
     except Exception as e:
@@ -499,25 +625,120 @@ def _db_add_shot(sid, idx, payload):
         if not db:
             return
         with db['Session']() as s:
-            row = db['ShotRow'](
-                sid=sid, idx=idx,
-                made=bool(payload.get('made')),
-                entry_angle=payload.get('entryAngle'),
-                release_angle=payload.get('releaseAngle'),
-                arc_height=payload.get('arcHeight'),
-                miss_reason=payload.get('missReason'),
-                data=payload
-            )
-            s.add(row)
-            # update totals
-            sess = s.get(db['SessionRow'], sid)
-            if sess:
-                sess.shots_count = (sess.shots_count or 0) + 1
-                sess.makes = (sess.makes or 0) + (1 if row.made else 0)
-                sess.accuracy = int(round((sess.makes / max(1, sess.shots_count)) * 100))
+            from sqlalchemy import select, func, case
+            ShotRow = db['ShotRow']
+            # Upsert by (sid, idx)
+            existing = s.execute(select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)).scalar_one_or_none()
+            if existing is not None:
+                m_in = payload.get('made')
+                if m_in is not None:
+                    existing.made = bool(m_in)
+                existing.entry_angle = payload.get('entryAngle')
+                existing.release_angle = payload.get('releaseAngle')
+                existing.arc_height = payload.get('arcHeight')
+                existing.miss_reason = payload.get('missReason')
+                existing.data = payload
+                row = existing
+            else:
+                m_in = payload.get('made')
+                made_val = (None if m_in is None else bool(m_in))
+                row = ShotRow(
+                    sid=sid,
+                    idx=idx,
+                    made=made_val,
+                    entry_angle=payload.get('entryAngle'),
+                    release_angle=payload.get('releaseAngle'),
+                    arc_height=payload.get('arcHeight'),
+                    miss_reason=payload.get('missReason'),
+                    data=payload,
+                )
+                s.add(row)
+
+            # Ensure a session row exists, create if missing (idempotent)
+            try:
+                sess = s.get(db['SessionRow'], sid)
+                if not sess:
+                    sess = db['SessionRow'](sid=sid, created_at=datetime.utcnow())
+                    s.add(sess)
+            except Exception as e_sess:
+                _trace('db_add_shot: ensure session error:', e_sess)
+
+            # Ensure the shot row is persisted
+            try:
+                s.flush()
+            except Exception as e_flush:
+                _trace('db_add_shot: flush error:', e_flush)
+
+            # Update totals if the session row exists; always commit at least the shot row
+            try:
+                sess = s.get(db['SessionRow'], sid)
+                if sess:
+                    total, makes = s.execute(
+                        select(
+                            func.count(ShotRow.id),
+                            func.sum(case((ShotRow.made == True, 1), else_=0)),
+                        ).where(ShotRow.sid == sid)
+                    ).one()
+                    sess.shots_count = int(total or 0)
+                    sess.makes = int(makes or 0)
+                    sess.accuracy = int(round((sess.makes / max(1, sess.shots_count)) * 100))
+            except Exception as e_tot:
+                _trace('db_add_shot: totals error:', e_tot)
+
+            # Commit regardless of whether totals were updated
             s.commit()
+            _trace('db:upsert:shot', {'sid': sid, 'idx': idx, 'made': row.made, 'arcHeight': row.arc_height, 'entryAngle': row.entry_angle, 'releaseAngle': row.release_angle})
     except Exception as e:
-        print('db_add_shot:', e)
+        _trace('db_add_shot:', e)
+
+def _db_backfill_session_shots(sid: str):
+    """Ensure DB has a ShotRow for every shot in session.json. Idempotent."""
+    try:
+        db = getattr(app, 'db', None)
+        if not db:
+            return
+        sess_file = _read_session(sid) or {}
+        shots = list(sess_file.get('shots') or [])
+        if not shots:
+            return
+        with db['Session']() as s:
+            from sqlalchemy import select
+            ShotRow = db['ShotRow']
+            have = set()
+            for r in s.execute(select(ShotRow.idx).where(ShotRow.sid == sid)).scalars().all():
+                try:
+                    have.add(int(r))
+                except Exception:
+                    continue
+            # Create missing rows
+            created = 0
+            for sh in shots:
+                try:
+                    i = int(sh.get('idx'))
+                except Exception:
+                    continue
+                if i in have:
+                    continue
+                m_in = sh.get('made')
+                row = ShotRow(
+                    sid=sid,
+                    idx=i,
+                    made=(None if m_in is None else bool(m_in)),
+                    entry_angle=sh.get('entryAngle'),
+                    release_angle=sh.get('releaseAngle'),
+                    arc_height=sh.get('arcHeight'),
+                    miss_reason=sh.get('missReason'),
+                    data=sh,
+                )
+                s.add(row)
+                created += 1
+            if created:
+                try:
+                    s.commit()
+                except Exception:
+                    s.rollback()
+    except Exception as e:
+        print('db_backfill_session_shots:', e)
 
 def _db_finalize_session(sid):
     try:
@@ -603,6 +824,18 @@ def my_doach():
 def dashboard():
     return send_from_directory('static', 'dashboard.html')
 
+# Serve root favicon for browsers that request /favicon.ico
+@app.route('/favicon.ico')
+def favicon_root():
+    try:
+        return send_from_directory('static', 'favicon.ico')
+    except Exception:
+        return ('', 204)
+
+@app.route('/d_admin')
+def d_admin_page():
+    return send_from_directory('static', 'd_admin.html')
+
 # Serve development tools (e.g., arc_contract.js) to the client
 @app.route('/tools/<path:filename>')
 def serve_tools(filename):
@@ -615,10 +848,7 @@ def list_videos_api():
 
 # ------------------------ coach routes --------------------------
 
-# Where we store named voice presets (JSON file on disk)
-DATA_DIR = Path("data")
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-PRESET_FILE = DATA_DIR / "voice_presets.json"
+# Voice presets: use global DATA_DIR/PRESET_FILE defined once at top
 
 # Language names used in prompts/translations
 LANG_NAMES = {
@@ -748,11 +978,13 @@ def api_tts():
 @app.post("/api/coach")
 def api_coach():
     b = request.get_json(force=True) or {}
-    prompt  = (b.get("prompt")  or "").strip()
-    model   =  b.get("model")   or "gpt-4o-mini"
-    lang    =  b.get("lang")    or "en-US"
-    shot    =  b.get("shot")
-    profile =  b.get("profile")
+    prompt   = (b.get("prompt")  or "").strip()
+    model    =  b.get("model")   or "gpt-4o-mini"
+    lang     =  b.get("lang")    or "en-US"
+    shot     =  b.get("shot")
+    profile  =  b.get("profile")
+    sid      =  (b.get("sid") or b.get("sessionId") or '').strip() or None
+    shot_idx =  b.get("shotId") if isinstance(b.get("shotId"), int) else None
 
     if not prompt:
         return jsonify({"error": "prompt is required"}), 400
@@ -773,9 +1005,43 @@ def api_coach():
         msgs.append({"role":"system","content": f"Shot data: {shot}"})
     msgs.append({"role": "user",   "content": prompt})
 
+    t0 = time.time()
     resp = client.chat.completions.create(model=model, messages=msgs, temperature=0.6)
+    dt_ms = int((time.time() - t0) * 1000)
     text = (resp.choices[0].message.content or "").strip()
-    return jsonify({"text": text})
+
+    # Persist feedback when DB is available; also mirror brief coach text into the shot's JSON data
+    try:
+        db = getattr(app, 'db', None)
+        if db:
+            with db['Session']() as sdb:
+                FB = db.get('CoachFeedbackRow')
+                if FB is not None:
+                    row = FB(sid=sid, shot_idx=(shot_idx or 0), provider='openai', model=model, latency_ms=dt_ms, text=text)
+                    sdb.add(row)
+                # Mirror summary onto the shot row's JSON for easier joins later
+                try:
+                    if sid and isinstance(shot_idx, int):
+                        Shot = db['ShotRow']
+                        from sqlalchemy import select
+                        sr = sdb.execute(select(Shot).where(Shot.sid==sid, Shot.idx==shot_idx)).scalar_one_or_none()
+                        if sr is None:
+                            # create a minimal row if missing
+                            sr = Shot(sid=sid, idx=shot_idx, data={})
+                            sdb.add(sr)
+                        try:
+                            d = dict(sr.data or {})
+                            d['coach_summary'] = text
+                            sr.data = d
+                        except Exception:
+                            sr.data = {'coach_summary': text}
+                except Exception as e2:
+                    print('coach mirror to shot failed:', e2)
+                sdb.commit()
+    except Exception as e:
+        print('db_add_ai_feedback:', e)
+
+    return jsonify({"text": text, "latency_ms": dt_ms})
 
 #-----------app routes --------------
 @app.route('/frames/<video_name>/<frame_file>')
@@ -799,6 +1065,256 @@ def list_frames(video_name):
     frames = [f for f in os.listdir(folder_path) if f.endswith('.jpg')]
     frames.sort()
     return jsonify({'frames': frames})
+
+# ---------------------- Admin Debug Views ----------------------
+
+@app.get('/admin/sessions')
+def admin_sessions():
+    """List sessions with basic stats and user info when available."""
+    items = []
+    try:
+        db = _db_get()
+        if db:
+            from sqlalchemy import select
+            with db['Session']() as s:
+                rows = s.execute(select(db['SessionRow'])).scalars().all()
+                for r in rows:
+                    items.append({
+                        'sid': r.sid,
+                        'created_at': r.created_at.isoformat() if r.created_at else None,
+                        'ended_at': r.ended_at.isoformat() if r.ended_at else None,
+                        'shots': r.shots_count,
+                        'makes': r.makes,
+                        'accuracy': r.accuracy,
+                        'user': ({'user_id': r.user.user_id, 'name': r.user.name, 'email': r.user.email} if r.user else None)
+                    })
+        else:
+            # Fallback to filesystem-only
+            for sid in sorted(os.listdir(SESSIONS_DIR)):
+                p = os.path.join(SESSIONS_DIR, sid, 'session.json')
+                if os.path.exists(p):
+                    try:
+                        with open(p, 'r', encoding='utf-8') as f:
+                            sdat = json.load(f)
+                        items.append({
+                            'sid': sid,
+                            'created_at': sdat.get('startedAt'),
+                            'ended_at': sdat.get('endedAt'),
+                            'shots': len(sdat.get('shots', [])),
+                            'user': None
+                        })
+                    except Exception:
+                        pass
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+    return jsonify({'sessions': items})
+
+@app.post('/api/sessions/<sid>/observer_frame')
+def api_observer_frame(sid):
+    """Accept low-FPS JPEG overlay snapshots from a client to aid real-time observing."""
+    try:
+        # Accept multipart file 'image' or JSON { image: 'data:image/jpeg;base64,...' }
+        img_bytes = None
+        if 'image' in request.files:
+            f = request.files['image']
+            img_bytes = f.read()
+        else:
+            b = request.get_json(silent=True) or {}
+            data_url = b.get('image') or ''
+            if data_url.startswith('data:image') and ';base64,' in data_url:
+                img_bytes = base64.b64decode(data_url.split(',')[1])
+        if not img_bytes:
+            return jsonify({'error': 'no image'}), 400
+        app.observer_frames[sid] = {'ts': int(time.time()*1000), 'bytes': img_bytes}
+        # Best-effort write to disk for later review
+        try:
+            d = _session_path(sid)
+            with open(os.path.join(d, 'observer_latest.jpg'), 'wb') as f:
+                f.write(img_bytes)
+        except Exception:
+            pass
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.get('/admin/observe/<sid>.jpg')
+def admin_observe_jpg(sid):
+    rec = app.observer_frames.get(sid)
+    if rec and rec.get('bytes'):
+        return Response(rec['bytes'], mimetype='image/jpeg')
+    # fallback to disk if present
+    try:
+        p = os.path.join(_session_path(sid), 'observer_latest.jpg')
+        if os.path.exists(p):
+            return send_file(p, mimetype='image/jpeg')
+    except Exception:
+        pass
+    return jsonify({'error': 'no observer frame'}), 404
+
+@app.get('/admin/observe/<sid>')
+def admin_observe_page(sid):
+    # Simple auto-refreshing viewer (client reloads every 600ms)
+    html = f"""
+<!doctype html>
+<title>Observe {sid}</title>
+<style>body{{margin:0;background:#111;color:#fff;font-family:system-ui}}#wrap{{display:flex;justify-content:center;align-items:center;height:100vh}}img{{max-width:96vw;max-height:94vh;box-shadow:0 10px 30px rgba(0,0,0,.4);border:1px solid #333}}</style>
+<div id=\"wrap\"> 
+  <img id=\"pic\" src=\"/admin/observe/{sid}.jpg?ts={int(time.time()*1000)}\" alt=\"observer\"/>
+  <script>
+    const img = document.getElementById('pic');
+    setInterval(()=>{{ img.src = '/admin/observe/{sid}.jpg?ts=' + Date.now(); }}, 600);
+  </script>
+  </div>
+"""
+    return Response(html, mimetype='text/html')
+
+@app.get('/admin/session/<sid>/debug')
+def admin_session_debug(sid):
+    """Return joined view: session.json + DB shots + pose_snapshots + ai_feedback + files"""
+    out = {
+        'sid': sid,
+        'sessionFile': None,
+        'user': None,
+        'shotsDB': [],
+        'snapshots': [],
+        'feedback': [],
+        'files': []
+    }
+    # session.json
+    try:
+        sdat = _read_session(sid)
+        out['sessionFile'] = sdat
+    except Exception:
+        pass
+    # files in session dir
+    try:
+        d = _session_path(sid)
+        files = [f for f in os.listdir(d) if os.path.isfile(os.path.join(d, f))]
+        out['files'] = sorted(files)
+    except Exception:
+        pass
+    # DB parts
+    try:
+        db = _db_get()
+        if db:
+            from sqlalchemy import select
+            with db['Session']() as s:
+                # user from SessionRow
+                sess = s.get(db['SessionRow'], sid)
+                if sess and sess.user:
+                    out['user'] = {'user_id': sess.user.user_id, 'name': sess.user.name, 'email': sess.user.email}
+                # shots
+                ShotRow = db['ShotRow']
+                rows = s.execute(select(ShotRow).where(ShotRow.sid==sid).order_by(ShotRow.idx.asc())).scalars().all()
+                out['shotsDB'] = [
+                    {'idx': r.idx, 'made': r.made, 'entryAngle': r.entry_angle, 'releaseAngle': r.release_angle, 'arcHeight': r.arc_height,
+                     'missReason': r.miss_reason, 'created_at': r.created_at.isoformat() if r.created_at else None}
+                    for r in rows
+                ]
+                # pose snapshots
+                PS = db.get('PoseSnapshotRow')
+                if PS:
+                    snaps = s.execute(select(PS).where(PS.sid==sid).order_by(PS.id.asc())).scalars().all()
+                    out['snapshots'] = [
+                        {'id': r.id, 'shot_idx': r.shot_idx, 'frame': r.frame, 't_ms': r.t_ms, 'via': r.via, 'metrics': r.metrics, 'hoop': r.hoop, 'gate': r.gate,
+                         'created_at': r.created_at.isoformat() if r.created_at else None}
+                        for r in snaps
+                    ]
+                # ai feedback
+                FB = db.get('CoachFeedbackRow')
+                if FB:
+                    fbs = s.execute(select(FB).where(FB.sid==sid).order_by(FB.id.asc())).scalars().all()
+                    out['feedback'] = [
+                        {'id': r.id, 'shot_idx': r.shot_idx, 'provider': r.provider, 'model': r.model, 'latency_ms': r.latency_ms, 'text': r.text,
+                         'created_at': r.created_at.isoformat() if r.created_at else None}
+                        for r in fbs
+                    ]
+    except Exception as e:
+        return jsonify({'error': str(e), 'partial': out}), 500
+    # Opportunistic backfill when DB rows are missing but session.json has shots
+    try:
+        sf = out.get('sessionFile') or {}
+        if sf and isinstance(sf.get('shots'), list):
+            if len(out.get('shotsDB') or []) < len(sf['shots']):
+                _db_backfill_session_shots(sid)
+                # refresh minimal DB rows after backfill
+                db = _db_get()
+                if db:
+                    from sqlalchemy import select
+                    with db['Session']() as s:
+                        ShotRow = db['ShotRow']
+                        rows = s.execute(select(ShotRow).where(ShotRow.sid==sid).order_by(ShotRow.idx.asc())).scalars().all()
+                        out['shotsDB'] = [
+                            {'idx': r.idx, 'made': r.made, 'entryAngle': r.entry_angle, 'releaseAngle': r.release_angle, 'arcHeight': r.arc_height,
+                             'missReason': r.miss_reason, 'created_at': r.created_at.isoformat() if r.created_at else None}
+                            for r in rows
+                        ]
+    except Exception:
+        pass
+    # Fallback: read JSONL snapshots from filesystem if DB empty
+    try:
+        if not out['snapshots']:
+            snaps = []
+            # session-scoped JSONL
+            p1 = os.path.join(_session_path(sid), 'releases.jsonl')
+            # global JSONL
+            p2 = os.path.join(SESSIONS_DIR, 'releases.jsonl')
+            for p in (p1, p2):
+                if os.path.exists(p):
+                    with open(p, 'r', encoding='utf-8') as f:
+                        for ln in f:
+                            ln = ln.strip()
+                            if not ln:
+                                continue
+                            try:
+                                j = json.loads(ln)
+                                if j.get('sessionId') and j.get('sessionId') != sid:
+                                    continue
+                                snaps.append({
+                                    'frame': j.get('frame'), 't_ms': j.get('tMs') or j.get('t'), 'via': j.get('via'),
+                                    'metrics': j.get('poseSnapshot'), 'hoop': j.get('hoop'), 'gate': j.get('gate'),
+                                })
+                            except Exception:
+                                continue
+            if snaps:
+                out['snapshots'] = snaps
+    except Exception as e:
+        _trace('admin_session_debug: backfill error:', e)
+    _trace('admin_session_debug', {'sid': sid, 'sessionFile': (len(out.get('sessionFile',{}).get('shots',[]) or [])), 'shotsDB': len(out.get('shotsDB') or []), 'feedback': len(out.get('feedback') or [])})
+    return jsonify(out)
+
+@app.get('/admin/users')
+def admin_users():
+    try:
+        db = _db_get()
+        users = []
+        if db:
+            from sqlalchemy import select, func
+            with db['Session']() as s:
+                U = db['User']; SR = db['SessionRow']
+                rows = s.execute(select(U)).scalars().all()
+                for u in rows:
+                    cnt = s.execute(select(func.count(SR.sid)).where(SR.user_id==u.user_id)).scalar_one() or 0
+                    users.append({'user_id': u.user_id, 'name': u.name, 'email': u.email, 'sessions': int(cnt)})
+        return jsonify({'users': users, 'active': list(app.active_users.values())})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.get('/admin/user/<int:uid>/sessions')
+def admin_user_sessions(uid):
+    try:
+        db = _db_get()
+        items = []
+        if db:
+            from sqlalchemy import select
+            with db['Session']() as s:
+                SR = db['SessionRow']
+                rows = s.execute(select(SR).where(SR.user_id==uid)).scalars().all()
+                for r in rows:
+                    items.append({'sid': r.sid, 'created_at': r.created_at.isoformat() if r.created_at else None, 'ended_at': r.ended_at.isoformat() if r.ended_at else None, 'shots': r.shots_count, 'accuracy': r.accuracy})
+        return jsonify({'sessions': items})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
 
 # new frame extraction routes
 @app.route('/save_yolo_label', methods=['POST'])

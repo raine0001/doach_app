@@ -6,52 +6,176 @@
   <title>My Sessions</title>
   <link rel="stylesheet" href="/static/style.css" />
   <style>
-    body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:20px}
-    table{border-collapse:collapse;width:100%;max-width:1080px}
-    th,td{border:1px solid #ddd;padding:8px}
-    th{background:#f4f4f4;text-align:left}
-    .shots{margin-top:16px}
-    .shotClip{margin:6px 0}
+    :root { color-scheme: light dark; }
+    body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:0;background:#0b0f14;color:#e6edf3}
+    header{position:sticky;top:0;z-index:2;display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#0f1621;border-bottom:1px solid #1f2a36}
+    h1{font-size:18px;margin:0}
+    main{display:grid;grid-template-columns: 420px 1fr;gap:12px;padding:12px}
+    section{background:#0f1621;border:1px solid #1f2a36;border-radius:10px;overflow:hidden}
+    section>h2{font-size:14px;margin:0;padding:8px 10px;background:#111a25;border-bottom:1px solid #1f2a36}
+    .toolbar{display:flex;gap:8px;align-items:center}
+    input,select,button{font:13px/1.2 system-ui}
+    input[type="text"],select{background:#0b0f14;color:#e6edf3;border:1px solid #233143;padding:6px 8px;border-radius:8px}
+    .btn{background:#1a2533;color:#dbe5ee;border:1px solid #283241;padding:6px 10px;border-radius:8px;cursor:pointer}
+    .btn:hover{background:#223144}
+    table{border-collapse:collapse;width:100%}
+    th,td{border-bottom:1px solid #192534;padding:8px 10px}
+    th{background:#111a25;color:#c9d5e1;position:sticky;top:0;z-index:1}
+    tr:hover{background:#0d131c}
+    .muted{opacity:.8}
+    .pill{display:inline-block;padding:2px 8px;border-radius:999px;font-weight:700;font-size:12px}
+    .ok{background:#11331f;color:#34d399;border:1px solid #1e7a42}
+    .bad{background:#2a1111;color:#f87171;border:1px solid #7a1e1e}
+    .shots{padding:8px;display:grid;grid-template-columns: repeat(auto-fill,minmax(280px,1fr));gap:10px}
+    .card{background:#0b0f14;border:1px solid #1f2a36;border-radius:10px;overflow:hidden}
+    .card h3{font-size:14px;margin:0;padding:8px 10px;background:#111a25;border-bottom:1px solid #1f2a36}
+    .card .body{padding:8px}
+    .actions{display:flex;gap:8px;align-items:center}
+    .rightHead{display:flex;gap:8px;align-items:center}
+    .empty{padding:12px;color:#9fb0c2}
+    @media print {
+      header, .actions, .toolbar, .rightHead { display:none !important; }
+      body{background:#fff;color:#000}
+      section{border:0}
+      main{grid-template-columns: 1fr}
+      video{display:none}
+    }
   </style>
   <script>
+    let __SESSIONS = [];
+    let __SORT = { key: 'startedAt', dir: 'desc' };
+
+    function fmt(n){ return Number.isFinite(n)? n : ''; }
+    function fmtPct(n){ return Number.isFinite(n)? `${n}%` : ''; }
+    function fmtDate(ts){ try { return ts? new Date(ts).toLocaleString(): ''; } catch { return ''; } }
+    function sortList(list){
+      const k = __SORT.key, dir = __SORT.dir === 'desc' ? -1 : 1;
+      return list.slice().sort((a,b)=>{
+        const A = (k==='startedAt'? a.startedAt : k==='accuracy'? (a.totals?.accuracy||0) : a.totals?.attempts||0);
+        const B = (k==='startedAt'? b.startedAt : k==='accuracy'? (b.totals?.accuracy||0) : b.totals?.attempts||0);
+        return (A===B? 0 : (A>B?1:-1)) * dir;
+      });
+    }
+
     async function loadSessions(){
+      const qsid = new URLSearchParams(location.search||'').get('sid');
       const res = await fetch('/api/sessions'); const j = await res.json();
-      const list = (j.sessions||[]);
+      __SESSIONS = j.sessions||[];
+      renderTable();
+      if (qsid) showSession(qsid);
+    }
+
+    function renderTable(){
       const tbody = document.getElementById('rows'); tbody.innerHTML='';
-      for (const s of list){
-        const tr = document.createElement('tr');
-        const dt = s.startedAt? new Date(s.startedAt).toLocaleString():'-';
-        const acc = s.totals? (s.totals.accuracy||0)+'%':'';
-        tr.innerHTML = `<td><a href="#" data-id="${s.id}" class="link">${s.id}</a></td><td>${dt}</td><td>${s.totals?.attempts||0}</td><td>${s.totals?.made||0}</td><td>${acc}</td>`;
+      const ft = (document.getElementById('filterTxt').value||'').toLowerCase();
+      const data = sortList(__SESSIONS).filter(s => !ft || (String(s.id||'').toLowerCase().includes(ft)));
+      for (const s of data){
+        const tr = document.createElement('tr'); tr.className='row'; tr.setAttribute('data-sid', s.id);
+        const acc = s.totals? (s.totals.accuracy||0) : 0;
+        tr.innerHTML = `<td><button class="btn btn-sm" data-act="open" data-id="${s.id}">Open</button></td>
+          <td class="muted">${s.id}</td>
+          <td>${fmtDate(s.startedAt)}</td>
+          <td>${fmt(s.totals?.attempts||0)}</td>
+          <td>${fmt(s.totals?.made||0)}</td>
+          <td>${fmtPct(acc)} ${acc>=50?'<span class="pill ok">OK</span>':'<span class="pill bad">LOW</span>'}</td>
+          <td><button class="btn" data-act="csv" data-id="${s.id}">CSV</button> <button class="btn" data-act="share" data-id="${s.id}">Share</button> <button class="btn" data-act="print" data-id="${s.id}">Print</button></td>`;
         tbody.appendChild(tr);
       }
-      document.querySelectorAll('a.link').forEach(a=>{
-        a.addEventListener('click', async (e)=>{
-          e.preventDefault(); const sid=e.target.getAttribute('data-id'); await showSession(sid);
-        });
-      });
     }
+
     async function showSession(sid){
       const res = await fetch('/api/sessions/'+sid); const s = await res.json();
-      const box = document.getElementById('detail'); box.innerHTML = `<h3>Session ${s.id}</h3>`;
-      const ul = document.createElement('div'); ul.className='shots';
+      const box = document.getElementById('detail');
+      box.innerHTML = `<div class="rightHead" id="rightHead">
+        <div class="actions">
+          <button class="btn" onclick="exportSessionCSV('${sid}')">Export CSV</button>
+          <button class="btn" onclick="copyShare('${sid}')">Copy Share Link</button>
+          <button class="btn" onclick="window.print()">Print</button>
+        </div>
+      </div>
+      <div class="card"><h3>Session ${sid}</h3><div class="body">
+        <div class="muted">Started: ${fmtDate(s.startedAt)} &nbsp; • &nbsp; Attempts: ${fmt(s.totals?.attempts||0)} &nbsp; • &nbsp; Accuracy: ${fmtPct(s.totals?.accuracy||0)}</div>
+      </div></div>`;
+      const grid = document.createElement('div'); grid.className='shots';
       (s.shots||[]).forEach((sh,i)=>{
         const url = `/sessions/${s.id}/shot_${i}.webm`;
-        const made = sh.made? '✅ make':'❌ miss';
-        ul.innerHTML += `<div class="shotClip"><strong>Shot ${i+1}:</strong> ${made} — entry ${sh.entryAngle??'-'}°, release ${sh.releaseAngle??'-'}°<br/><video src="${url}" controls width="420"></video></div>`;
+        const made = (sh.made===true)? '✅ make' : (sh.made===false? '❌ miss' : '⏳ pending');
+        const card = document.createElement('div'); card.className='card';
+        card.innerHTML = `<h3>Shot ${i+1}</h3><div class="body">
+          <div>${made}</div>
+          <div class="muted">Entry ${fmt(sh.entryAngle)}° • Release ${fmt(sh.releaseAngle)}° • Arc ${fmt(sh.arcHeight)}</div>
+          <video src="${url}" controls width="100%"></video>
+        </div>`;
+        grid.appendChild(card);
       });
-      box.appendChild(ul);
+      if (!grid.children.length) grid.innerHTML = '<div class="empty">No shots recorded yet.</div>';
+      box.appendChild(grid);
     }
-    window.addEventListener('DOMContentLoaded', loadSessions);
+
+    function exportSessionCSV(sid){
+      const s = __SESSIONS.find(x=>x.id===sid);
+      if (!s) { alert('Session not found in list.'); return; }
+      fetch('/api/sessions/'+sid).then(r=>r.json()).then(sess=>{
+        const rows = [['#','made','entryAngle','releaseAngle','arcHeight']];
+        (sess.shots||[]).forEach((sh,i)=> rows.push([i+1, sh.made===true?'made':(sh.made===false?'miss':'pending'), fmt(sh.entryAngle), fmt(sh.releaseAngle), fmt(sh.arcHeight)]));
+        const csv = rows.map(r=>r.join(',')).join('\n');
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'})); a.download = `session_${sid}.csv`; a.click(); URL.revokeObjectURL(a.href);
+      });
+    }
+    function exportAllCSV(){
+      const rows = [['sessionId','startedAt','attempts','made','accuracy%']];
+      sortList(__SESSIONS).forEach(s=> rows.push([s.id, fmtDate(s.startedAt), fmt(s.totals?.attempts||0), fmt(s.totals?.made||0), fmt(s.totals?.accuracy||0)]));
+      const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([rows.map(r=>r.join(',')).join('\n')],{type:'text/csv'})); a.download = 'doach_sessions.csv'; a.click(); URL.revokeObjectURL(a.href);
+    }
+    async function copyShare(sid){
+      const url = `${location.origin}/static/my_sessions.html?sid=${encodeURIComponent(sid)}`;
+      try { await navigator.clipboard.writeText(url); alert('Link copied to clipboard'); } catch { prompt('Copy link:', url); }
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('btnRefresh').onclick = loadSessions;
+      document.getElementById('filterTxt').oninput = renderTable;
+      document.getElementById('sortKey').onchange = (e)=>{ __SORT.key = e.target.value; renderTable(); };
+      document.getElementById('sortDir').onchange = (e)=>{ __SORT.dir = e.target.value; renderTable(); };
+      document.getElementById('exportAll').onclick = exportAllCSV;
+      document.getElementById('rows').addEventListener('click', (e)=>{
+        const b = e.target.closest('button'); if (!b) return;
+        const sid = b.getAttribute('data-id');
+        const act = b.getAttribute('data-act');
+        if (act==='open') showSession(sid);
+        else if (act==='csv') exportSessionCSV(sid);
+        else if (act==='share') copyShare(sid);
+        else if (act==='print') { showSession(sid).then(()=>window.print()); }
+      });
+      loadSessions();
+    });
   </script>
 </head>
 <body>
-  <h2>My Sessions</h2>
-  <table>
-    <thead><tr><th>ID</th><th>Started</th><th>Attempts</th><th>Made</th><th>Accuracy</th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
-  <div id="detail"></div>
+  <header>
+    <h1>My Sessions</h1>
+    <div class="toolbar">
+      <input id="filterTxt" type="text" placeholder="Filter by ID…"/>
+      <select id="sortKey"><option value="startedAt">Sort: Date</option><option value="attempts">Sort: Attempts</option><option value="accuracy">Sort: Accuracy</option></select>
+      <select id="sortDir"><option value="desc">Desc</option><option value="asc">Asc</option></select>
+      <button class="btn" id="exportAll">Export All</button>
+      <button class="btn" id="btnRefresh">Refresh</button>
+    </div>
+  </header>
+  <main>
+    <section>
+      <h2>Sessions</h2>
+      <table>
+        <thead>
+          <tr><th></th><th>ID</th><th>Started</th><th>Attempts</th><th>Made</th><th>Accuracy</th><th>Actions</th></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </section>
+    <section>
+      <h2>Details</h2>
+      <div id="detail" class="empty">Select a session to view shots.</div>
+    </section>
+  </main>
 </body>
 </html>
-

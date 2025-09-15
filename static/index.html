@@ -45,6 +45,8 @@
 
   <!-- Core libraries -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+  <!-- Lottie for splash animation -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
 
   <!-- Early shims: provide globals the tests probe before modules load -->
   <script>
@@ -154,6 +156,32 @@
 
 <body>
 
+  <!-- Splash animation (3s) -->
+  <div id="splashOverlay" style="
+    position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,.85) 0%, rgba(0,0,0,.92) 60%, rgba(0,0,0,.98) 100%);
+    z-index:10080;">
+    <div id="lottieSplash" style="width:min(70vw,520px); height:min(70vh,520px);"></div>
+  </div>
+
+  <!-- Auth / Start overlays -->
+  <div id="startSessionOverlay" style="
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:10060;">
+    <button id="btnStartLive" style="
+      font:700 22px system-ui, -apple-system, Segoe UI, Arial; padding:16px 24px; border-radius:14px; border:1px solid rgba(255,255,255,.18);
+      background: rgba(0,0,0,.78); color:#fff; cursor:pointer; box-shadow:0 10px 40px rgba(0,0,0,.35);">Start Session</button>
+  </div>
+
+  <div id="authOverlay" style="
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:10060;">
+    <div id="authCard" style="
+      width:min(92%, 520px); background: rgba(0,0,0,.88); color:#fff; border:1px solid rgba(255,255,255,.12);
+      border-radius:16px; padding:18px 18px 16px; box-shadow:0 10px 40px rgba(0,0,0,.45);">
+      <div id="authTitle" style="font:700 18px system-ui; margin-bottom:10px; text-align:center;">Welcome to Doach</div>
+      <div id="authBody"></div>
+    </div>
+  </div>
+
   <!-- Overlay Prompt Message -->
   <div id="overlayPrompt" class="prompt-message" style="display:none;">Tap the hoop to begin setup</div>
   <div id="promptBar"></div>
@@ -221,7 +249,8 @@
       };
 
       window.endSession = () => {
-        alert("✅ Session ended. Scroll down for summary.");
+        try { window.autoEndSessionAndSummarize?.(); }
+        catch { alert('✅ Session ended.'); }
       };
     });
   </script>
@@ -292,6 +321,137 @@
   <!-- app entry (ESM) imports the rest of your modules -->
   <script type="module" src="/static/js/app.js?v=20250820"></script>
   <script type="module" src="/static/js/session_manager.js?v=1"></script>
+
+  <!-- Splash + Auth bootstrap -->
+  <script>
+    (function bootSplashAndAuth(){
+      const splash = document.getElementById('splashOverlay');
+      const lottieDiv = document.getElementById('lottieSplash');
+      // try {
+      //   if (window.lottie && lottieDiv) {
+      //     const anim = lottie.loadAnimation({ container: lottieDiv, renderer: 'svg', loop: false, autoplay: true, path: '/static/GlowingYellow%202.json' });
+      //   }
+      // } catch {}
+
+      const showStart = () => { try { document.getElementById('startSessionOverlay').style.display = 'flex'; } catch {} };
+      const hideStart = () => { try { document.getElementById('startSessionOverlay').style.display = 'none'; } catch {} };
+      const showAuth  = () => { try { document.getElementById('authOverlay').style.display = 'flex'; } catch {} };
+      const hideAuth  = () => { try { document.getElementById('authOverlay').style.display = 'none'; } catch {} };
+      const setAuthBody = (html) => { try { document.getElementById('authBody').innerHTML = html; } catch {} };
+      const setAuthTitle= (txt)  => { try { document.getElementById('authTitle').textContent = txt; } catch {} };
+
+      // Login form
+      function renderLogin(){
+        setAuthTitle('Login to Doach');
+        setAuthBody(`
+          <div style="display:grid; gap:10px">
+            <input id="lg_email" type="email" placeholder="Email" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            <input id="lg_password" type="password" placeholder="Password" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            <button id="btnDoLogin" style="padding:12px;border-radius:10px;border:0;background:#ffcc33;color:#111;font:700 14px system-ui;cursor:pointer">Login</button>
+            <button id="btnShowSignup" style="padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:transparent;color:#fff;font:600 13px system-ui;cursor:pointer">Sign up Now</button>
+            <div id="authMsg" style="min-height:18px;color:#f88;font:600 12px system-ui"></div>
+          </div>`);
+        document.getElementById('btnShowSignup').onclick = renderSignup;
+        document.getElementById('btnDoLogin').onclick = async () => {
+          const email = document.getElementById('lg_email').value.trim();
+          const password = document.getElementById('lg_password').value;
+          try {
+            const r = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, password }) });
+            const j = await r.json(); if (!r.ok) throw new Error(j.error||'Login failed');
+            localStorage.setItem('firstname', j.name || 'player'); hideAuth(); showStart();
+          } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Login failed'; }
+        };
+      }
+
+      // Signup form (extended)
+      function renderSignup(){
+        setAuthTitle('Create Your Account');
+        setAuthBody(`
+          <div style="display:grid; gap:10px">
+            <input id="su_name"  placeholder="Name" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            <div style="display:flex; gap:8px">
+              <input id="su_birth_mm" placeholder="MM" style="flex:1;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+              <input id="su_birth_dd" placeholder="DD" style="flex:1;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+              <input id="su_birth_yy" placeholder="YYYY" style="flex:2;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            </div>
+            <input id="su_email" type="email" placeholder="Email" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            <input id="su_phone" placeholder="Phone" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            <div style="display:flex; gap:8px">
+              <input id="su_height_ft" placeholder="Height ft" style="flex:1;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+              <input id="su_height_in" placeholder="in" style="flex:1;padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            </div>
+            <select id="su_hand" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+              <option value="right">Right</option>
+              <option value="left">Left</option>
+              <option value="both">Both</option>
+            </select>
+            <select id="su_exp" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+              <option>beginner</option>
+              <option>recreational</option>
+              <option>intermediate</option>
+              <option>advanced</option>
+              <option>competitive</option>
+              <option>elite</option>
+            </select>
+            <input id="su_pw" type="password" placeholder="Password" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
+            <button id="btnDoSignup" style="padding:12px;border-radius:10px;border:0;background:#ffcc33;color:#111;font:700 14px system-ui;cursor:pointer">Create Account</button>
+            <button id="btnShowLogin" style="padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:transparent;color:#fff;font:600 13px system-ui;cursor:pointer">Back to Login</button>
+            <div id="authMsg" style="min-height:18px;color:#f88;font:600 12px system-ui"></div>
+          </div>`);
+        document.getElementById('btnShowLogin').onclick = renderLogin;
+        document.getElementById('btnDoSignup').onclick = async () => {
+          const name = document.getElementById('su_name').value.trim();
+          const email= document.getElementById('su_email').value.trim();
+          const password = document.getElementById('su_pw').value;
+          const profile = {
+            name,
+            birthdate: `${document.getElementById('su_birth_mm').value}/${document.getElementById('su_birth_dd').value}/${document.getElementById('su_birth_yy').value}`,
+            phone: document.getElementById('su_phone').value.trim(),
+            height: `${document.getElementById('su_height_ft').value}ft ${document.getElementById('su_height_in').value}in`,
+            hand: document.getElementById('su_hand').value,
+            experience: document.getElementById('su_exp').value
+          };
+          try {
+            const r = await fetch('/api/auth/register', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, email, password }) });
+            const j = await r.json(); if (!r.ok) throw new Error(j.error||'Register failed');
+            localStorage.setItem('doachProfile', JSON.stringify(profile));
+            localStorage.setItem('firstname', profile.name || 'player');
+            hideAuth(); showStart();
+          } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Register failed'; }
+        };
+      }
+
+      // Check auth and show next view after splash (3s)
+      function afterSplash(){
+        fetch('/api/auth/me').then(r=>r.json()).then(j=>{
+          try { splash.style.display = 'none'; } catch {}
+          const user = j && j.user;
+          if (user) { showStart(); }
+          else { showAuth(); renderLogin(); }
+        }).catch(()=>{ try { splash.style.display='none'; } catch {}; showAuth(); renderLogin(); });
+      }
+      setTimeout(afterSplash, 3000);
+
+      // Start Session wiring
+      try {
+        document.getElementById('btnStartLive').onclick = async () => {
+          try { hideStart(); } catch {}
+          try {
+            // Ensure a backend session row exists so admin sees it immediately
+            if (!window.__SESSION_ID) {
+              const r = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ device: navigator.userAgent }) });
+              if (r.ok) { const j = await r.json(); window.__SESSION_ID = j.id; window.__SHOT_IDX = 0; }
+            }
+          } catch {}
+          try {
+            // Prefer immediate camera start; then trigger session HUD start
+            if (window.startCamera) await window.startCamera();
+          } catch {}
+          try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch {}
+        };
+      } catch {}
+    })();
+  </script>
 
 <!-- local detector enable (ESM) -->
 <script type="module">
