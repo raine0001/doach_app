@@ -7,6 +7,7 @@ import numpy as np
 import requests
 import cv2
 import os
+import math
 try:
     import torch  # type: ignore
     from ultralytics.nn.tasks import DetectionModel  # type: ignore
@@ -32,12 +33,19 @@ import wave
 from datetime import datetime
 import threading
 try:
-    from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey
+    from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey, text as sa_text
     from sqlalchemy.types import JSON as MyJSON
     from sqlalchemy.orm import declarative_base, sessionmaker, relationship
     SQLA_AVAILABLE = True
 except Exception:
     SQLA_AVAILABLE = False
+
+# Optional server-side pose (for iOS server gating)
+try:
+    import mediapipe as mp  # type: ignore
+    MP_AVAILABLE = True
+except Exception:
+    MP_AVAILABLE = False
 
 try:
     if TORCH_AVAILABLE:
@@ -92,6 +100,7 @@ PRESET_FILE = DATA_DIR / "voice_presets.json"
 # Track active users (lightweight, in-memory). Production should use Redis.
 app.active_users = {}
 app.observer_frames = {}
+app.gate_state = {}
 
 @app.before_request
 def _track_active_user():
@@ -271,16 +280,45 @@ def _session_json_path(sid: str):
     return os.path.join(_session_path(sid), 'session.json')
 
 def _read_session(sid: str):
+    """Robust session.json reader. Returns a dict on success or an empty dict on decode errors.
+    Avoids crashing callers when a concurrent write left a partial file on disk."""
     p = _session_json_path(sid)
-    if os.path.exists(p):
+    if not os.path.exists(p):
+        return None
+    try:
         with open(p, 'r', encoding='utf-8') as f:
             return json.load(f)
-    return None
+    except json.JSONDecodeError:
+        # Partially written/contended file; treat as temporarily empty session view
+        try:
+            app.logger.warning('session.json decode failed; returning empty session for %s', sid)
+        except Exception:
+            pass
+        return {}
+    except Exception:
+        return {}
 
 def _write_session(sid: str, data: dict):
+    """Atomic session.json write: write to temp, fsync, then os.replace into place."""
     p = _session_json_path(sid)
-    with open(p, 'w', encoding='utf-8') as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    d = os.path.dirname(p)
+    os.makedirs(d, exist_ok=True)
+    tmp = p + '.tmp'
+    try:
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            try:
+                f.flush(); os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp, p)
+    except Exception:
+        # Best-effort fallback
+        try:
+            with open(p, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
 
 def _new_session_id():
     return datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
@@ -509,11 +547,12 @@ def _try_init_db():
             engine = create_engine(
                 uri,
                 pool_pre_ping=True,
+                pool_recycle=1800,
                 future=True,
                 connect_args={'use_pure': True}
             )
         else:
-            engine = create_engine(uri, pool_pre_ping=True, future=True)
+            engine = create_engine(uri, pool_pre_ping=True, pool_recycle=1800, future=True)
 
         class User(Base):
             __tablename__ = 'users'
@@ -554,6 +593,9 @@ def _try_init_db():
             id = Column(Integer, primary_key=True, autoincrement=True)
             sid = Column(String(64), ForeignKey('sessions.sid'), nullable=False)
             idx = Column(Integer, nullable=False)
+            # Legacy compatibility: some databases still have a unique index on (sid, shot_idx)
+            # Include it in the model and mirror idx -> shot_idx on writes to avoid integrity errors.
+            shot_idx = Column(Integer, nullable=True)
             created_at = Column(DateTime, default=datetime.utcnow)
             release_frame = Column(Integer)
             end_frame = Column(Integer)
@@ -638,6 +680,12 @@ def _db_add_shot(sid, idx, payload):
                 existing.arc_height = payload.get('arcHeight')
                 existing.miss_reason = payload.get('missReason')
                 existing.data = payload
+                # Mirror idx into legacy shot_idx when present to satisfy unique constraints
+                try:
+                    if getattr(existing, 'shot_idx', None) in (None, 0):
+                        existing.shot_idx = idx
+                except Exception:
+                    pass
                 row = existing
             else:
                 m_in = payload.get('made')
@@ -645,6 +693,7 @@ def _db_add_shot(sid, idx, payload):
                 row = ShotRow(
                     sid=sid,
                     idx=idx,
+                    shot_idx=idx,
                     made=made_val,
                     entry_angle=payload.get('entryAngle'),
                     release_angle=payload.get('releaseAngle'),
@@ -690,6 +739,56 @@ def _db_add_shot(sid, idx, payload):
             _trace('db:upsert:shot', {'sid': sid, 'idx': idx, 'made': row.made, 'arcHeight': row.arc_height, 'entryAngle': row.entry_angle, 'releaseAngle': row.release_angle})
     except Exception as e:
         _trace('db_add_shot:', e)
+
+@app.post('/admin/migrate_shots_unique')
+def admin_migrate_shots_unique():
+    """Drop legacy unique index on (sid, shot_idx) and ensure unique on (sid, idx).
+    Safe to run multiple times; reports actions taken.
+    """
+    out = {'dropped': None, 'created': None, 'backfill': None, 'errors': []}
+    try:
+        db = _db_get()
+        if not db:
+            return jsonify({'error': 'db not configured'}), 500
+        eng = db['engine']
+        with eng.begin() as conn:
+            # Detect indexes
+            rows = conn.execute(
+                sa_text(
+                    """
+                    SELECT INDEX_NAME, NON_UNIQUE,
+                           GROUP_CONCAT(COLUMN_NAME ORDER BY SEQ_IN_INDEX SEPARATOR ',') AS cols
+                    FROM information_schema.STATISTICS
+                    WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'shots'
+                    GROUP BY INDEX_NAME, NON_UNIQUE
+                    """
+                )
+            ).mappings().all()
+            # Drop legacy unique on (sid,shot_idx)
+            legacy = [r['INDEX_NAME'] for r in rows if int(r['NON_UNIQUE']) == 0 and str(r['cols']).lower().replace(' ', '') == 'sid,shot_idx']
+            for name in legacy:
+                try:
+                    conn.execute(sa_text(f"ALTER TABLE shots DROP INDEX `{name}`"))
+                    out['dropped'] = name
+                except Exception as e:
+                    out['errors'].append(f'drop {name}: {e}')
+            # Ensure unique on (sid,idx)
+            have_sid_idx = any(int(r['NON_UNIQUE']) == 0 and str(r['cols']).lower().replace(' ','') == 'sid,idx' for r in rows)
+            if not have_sid_idx:
+                try:
+                    conn.execute(sa_text("CREATE UNIQUE INDEX shots_sid_idx_uniq ON shots (sid, idx)"))
+                    out['created'] = 'shots_sid_idx_uniq'
+                except Exception as e:
+                    out['errors'].append(f'create sid,idx: {e}')
+            # Optional: backfill shot_idx to match idx once (harmless if legacy column remains)
+            try:
+                conn.execute(sa_text("UPDATE shots SET shot_idx = idx WHERE shot_idx IS NULL OR shot_idx = 0"))
+                out['backfill'] = True
+            except Exception as e:
+                out['errors'].append(f'backfill: {e}')
+    except Exception as e:
+        return jsonify({'error': str(e), **out}), 500
+    return jsonify({'ok': True, **out})
 
 def _db_backfill_session_shots(sid: str):
     """Ensure DB has a ShotRow for every shot in session.json. Idempotent."""
@@ -1151,6 +1250,188 @@ def admin_observe_jpg(sid):
         pass
     return jsonify({'error': 'no observer frame'}), 404
 
+@app.post('/api/sessions/<sid>/server_gate_once')
+def api_server_gate_once(sid):
+    """Run a single server-side pose gate step on the latest observer frame.
+    Returns JSON with { ok, available, released, score } and appends a shot row on release.
+    Requires mediapipe on server. If unavailable, returns available:false.
+    """
+    if not MP_AVAILABLE:
+        return jsonify({'ok': False, 'available': False, 'error': 'mediapipe-not-installed'}), 200
+    try:
+        d = _session_path(sid)
+        p = os.path.join(d, 'observer_latest.jpg')
+        if not os.path.exists(p):
+            return jsonify({'ok': True, 'available': True, 'released': False, 'score': 0.0, 'note': 'no-frame'}), 200
+        img = cv2.imread(p)
+        if img is None:
+            return jsonify({'ok': True, 'available': True, 'released': False, 'score': 0.0, 'note': 'bad-frame'}), 200
+
+        # Run MediaPipe Pose
+        with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=1, enable_segmentation=False) as pose:
+            imgRGB = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            res = pose.process(imgRGB)
+            lm = res.pose_landmarks.landmark if (res and res.pose_landmarks) else None
+            if not lm:
+                return jsonify({'ok': True, 'available': True, 'released': False, 'score': 0.0, 'note': 'no-pose'}), 200
+
+            # Landmarks (normalized)
+            def L(i):
+                pt = lm[i]; return (pt.x, pt.y, pt.visibility)
+            # Use right side by default
+            S,E,W = 12,14,16
+            sx,sy,sv = L(S); ex,ey,ev = L(E); wx,wy,wv = L(W)
+            # Guard
+            if min(sv,ev,wv) < 0.45:
+                return jsonify({'ok': True, 'available': True, 'released': False, 'score': 0.0, 'note': 'low-vis'}), 200
+
+            # Convert to image pixels for consistency
+            h, w = img.shape[:2]
+            sx,sy,ex,ey,wx,wy = sx*w,sy*h,ex*w,ey*h,wx*w,wy*h
+
+            # Tests similar to release_gate.js
+            wristAboveElbow    = (wy < ey - 10)
+            wristAboveShoulder = (wy < sy - 8)
+            # Elbow angle at E (S-E-W)
+            v1x, v1y = sx - ex, sy - ey
+            v2x, v2y = wx - ex, wy - ey
+            dot = (v1x*v2x + v1y*v2y)
+            den = (math.hypot(v1x,v1y)*math.hypot(v2x,v2y) + 1e-6)
+            ang = math.degrees(math.acos(max(-1.0, min(1.0, dot/den))))
+            elbowExtended = (ang >= 130)
+            # Nearly vertical/extended alignment
+            dx = abs(wx - sx); dy = abs(sy - wy)
+            nearlyVertical = (dx < 105) and (dy > 12)
+            alignOK = nearlyVertical or elbowExtended
+            # Weighted score (0.26 each)
+            score = 0.0
+            if wristAboveElbow:    score += 0.26
+            if elbowExtended:      score += 0.26
+            if alignOK:            score += 0.26
+            if wristAboveShoulder: score += 0.26
+
+            released = (score >= (float(os.getenv('SERVER_GATE_SCORE_TH','1.0')) - 1e-6))
+
+        # Debounce with cooldown shared with gate_tick
+        st = app.gate_state.get(sid) or {'last_release_ms': 0}
+        app.gate_state[sid] = st
+        now_ms = int(time.time()*1000)
+        cooldown_ms = int(os.getenv('SERVER_GATE_COOLDOWN_MS','1200'))
+        if released and (not st['last_release_ms'] or (now_ms - st['last_release_ms'] >= cooldown_ms)):
+            st['last_release_ms'] = now_ms
+            sess = _read_session(sid)
+            if not sess:
+                sess = {'id': sid, 'shots': [], 'startedAt': now_ms, 'endedAt': None, 'totals': {'attempts':0,'made':0,'accuracy':0}}
+            shots = list(sess.get('shots', []))
+            next_idx = len(shots)
+            row = { 'idx': next_idx, 't': now_ms, 'frame': 0, 'made': None, 'entryAngle': None, 'releaseAngle': None, 'arcHeight': None, 'via':'server-pose' }
+            shots.append(row)
+            sess['shots'] = shots
+            attempts = len(shots); made = sum(1 for s in shots if s.get('made') is True)
+            acc = int(round((made/attempts)*100)) if attempts else 0
+            sess['totals'] = { 'attempts': attempts, 'made': made, 'accuracy': acc }
+            _write_session(sid, sess)
+            try: _db_add_shot(sid, next_idx, row)
+            except Exception as e: _trace('db add shot (server pose) error:', e)
+            return jsonify({'ok': True, 'available': True, 'released': True, 'score': score, 'idx': next_idx})
+
+        return jsonify({'ok': True, 'available': True, 'released': False, 'score': score})
+    except Exception as e:
+        return jsonify({'ok': False, 'available': MP_AVAILABLE, 'error': str(e)}), 500
+
+@app.post('/api/sessions/<sid>/gate_tick')
+def api_gate_tick(sid):
+    """Accept periodic pose-gate ticks from the client and decide release server-side.
+    Body: { frame:int, t:int(ms), released:bool, score:float, tests:dict, armed:bool?, ready:bool? }
+    On decision, creates/updates a ShotRow with placeholder metrics.
+    """
+    try:
+        b = request.get_json(force=True) or {}
+        now_ms = int(time.time()*1000)
+        frame = int(b.get('frame') or 0)
+        released_flag = bool(b.get('released'))
+        score = float(b.get('score') or 0.0)
+        armed = bool(b.get('armed', True))
+        ready = bool(b.get('ready', True))
+
+        st = app.gate_state.get(sid) or {
+            'last_ms': 0,
+            'streak': 0,
+            'last_release_ms': 0,
+        }
+        app.gate_state[sid] = st
+
+        # Cooldown
+        cooldown_ms = int(os.getenv('SERVER_GATE_COOLDOWN_MS', '1200'))
+        if st['last_release_ms'] and (now_ms - st['last_release_ms'] < cooldown_ms):
+            _trace('gate_tick', {'sid': sid, 'frame': frame, 'ok': False, 'cooldown': True})
+            st['last_ms'] = now_ms
+            return jsonify({'ok': True, 'cooldown': True})
+
+        # Decide using client gate flag primarily; fall back to score threshold
+        th = 1.0
+        try:
+            th = float(os.getenv('SERVER_GATE_SCORE_TH', '1.0'))
+        except Exception:
+            th = 1.0
+        ok = released_flag or (score >= (th - 1e-6))
+        # Treat armed/ready as advisory only; iOS client signals can lag
+        if ok:
+            st['streak'] = st.get('streak', 0) + 1
+        else:
+            st['streak'] = 0
+
+        need = 1  # require just one tick when flag is already released
+        if st['streak'] >= need:
+            st['streak'] = 0
+            st['last_release_ms'] = now_ms
+            _trace('gate_decide', {'sid': sid, 'frame': frame, 'score': score, 'idx_next_guess': len(_read_session(sid).get('shots', [])) if _read_session(sid) else 0})
+            # Append a placeholder shot row
+            sess = _read_session(sid)
+            if not sess:
+                sess = {'id': sid, 'shots': [], 'startedAt': now_ms, 'endedAt': None, 'totals': {'attempts':0,'made':0,'accuracy':0}}
+            shots = list(sess.get('shots', []))
+            next_idx = len(shots)
+            try:
+                db = _db_get()
+                if db:
+                    from sqlalchemy import select, func
+                    with db['Session']() as s:
+                        ShotRow = db['ShotRow']
+                        mx = s.execute(select(func.max(ShotRow.idx)).where(ShotRow.sid == sid)).scalar_one_or_none()
+                        if mx is not None:
+                            next_idx = max(next_idx, int(mx) + 1)
+            except Exception:
+                pass
+            row = {
+                'idx': next_idx,
+                't': now_ms,
+                'frame': frame,
+                'made': None,
+                'entryAngle': None,
+                'releaseAngle': None,
+                'arcHeight': None,
+                'via': 'server-gate'
+            }
+            shots.append(row)
+            sess['shots'] = shots
+            attempts = len(shots)
+            made = sum(1 for s in shots if s.get('made') is True)
+            acc = int(round((made/attempts)*100)) if attempts else 0
+            sess['totals'] = { 'attempts': attempts, 'made': made, 'accuracy': acc }
+            _write_session(sid, sess)
+            try:
+                _db_add_shot(sid, next_idx, row)
+            except Exception as e:
+                _trace('db add shot from gate error:', e)
+            return jsonify({'ok': True, 'released': True, 'idx': next_idx})
+
+        st['last_ms'] = now_ms
+        _trace('gate_tick', {'sid': sid, 'frame': frame, 'ok': False, 'streak': st['streak'], 'score': score})
+        return jsonify({'ok': True, 'released': False})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 @app.get('/admin/observe/<sid>')
 def admin_observe_page(sid):
     # Simple auto-refreshing viewer (client reloads every 600ms)
@@ -1280,7 +1561,12 @@ def admin_session_debug(sid):
                 out['snapshots'] = snaps
     except Exception as e:
         _trace('admin_session_debug: backfill error:', e)
-    _trace('admin_session_debug', {'sid': sid, 'sessionFile': (len(out.get('sessionFile',{}).get('shots',[]) or [])), 'shotsDB': len(out.get('shotsDB') or []), 'feedback': len(out.get('feedback') or [])})
+    try:
+        sf = out.get('sessionFile') or {}
+        sfN = len(sf.get('shots') or []) if isinstance(sf, dict) else 0
+        _trace('admin_session_debug', {'sid': sid, 'sessionFile': sfN, 'shotsDB': len(out.get('shotsDB') or []), 'feedback': len(out.get('feedback') or [])})
+    except Exception:
+        pass
     return jsonify(out)
 
 @app.get('/admin/users')
