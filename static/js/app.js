@@ -314,7 +314,24 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
             const list = window.__shotList || [];
             const last = list.at?.(-1) || null;
             if (last && last.pending) {
-              const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
+              // Try to generate a summary from the ball trail if available
+              let summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
+              try {
+                const ballState = window.ballState;
+                const hoopBox = window.getLockedHoopBox?.();
+                if (ballState?.trail && hoopBox && ballState.trail.length >= 3) {
+                  const shotRecord = window.results?.(ballState.trail, window.__AN_IDX || 0, hoopBox, { force: true });
+                  if (shotRecord) {
+                    summary = {
+                      made: shotRecord.made,
+                      arcHeight: shotRecord.arcHeight,
+                      entryAngle: shotRecord.entryAngle,
+                      releaseAngle: shotRecord.releaseAngle,
+                      missReason: shotRecord.missReason
+                    };
+                  }
+                }
+              } catch {}
               window.recordShotSummary?.(summary);
             }
             if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
@@ -3128,6 +3145,20 @@ if (typeof window.clientToVideoXY !== 'function') {
           const wantAll = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
           const allGreen = allScore >= wantAll - 1e-6;
           let latched = ((window.__gateStreak || 0) >= need) || allGreen;
+          
+          // FALLBACK: If normal gate fails, try simple pose detection
+          if (!latched && window.forceReleaseDetection) {
+            try {
+              const currentPose = window.playerState?.keypoints;
+              if (currentPose && currentPose.length >= 33) {
+                const simpleRelease = window.forceReleaseDetection(currentPose, fidx);
+                if (simpleRelease) {
+                  latched = true;
+                  console.log('[FALLBACK-RELEASE] Simple pose detection triggered');
+                }
+              }
+            } catch {}
+          }
           try {
             const rec = { t: Date.now(), type:'gate', detail: { frame: fidx, tests: gate.tests, passed: gate.passed, reason: gate.reason }, latched };
             (window.__REL_LOG ||= []).push(rec);

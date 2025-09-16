@@ -307,6 +307,16 @@ def api_session_start():
     _trace('api:sessions/start', {'sid': sid, 'device': sess.get('device')})
     return jsonify({ 'id': sid, 'startedAt': now })
 
+@app.post('/api/sessions/<sid>/finalize')
+def api_session_finalize(sid):
+    """Finalize a session and calculate averages"""
+    try:
+        _db_finalize_session(sid)
+        return jsonify({'status': 'success', 'message': 'Session finalized'})
+    except Exception as e:
+        print(f'Error finalizing session {sid}:', e)
+        return jsonify({'error': 'Failed to finalize session'}), 500
+
 @app.post('/api/sessions/<sid>/shot')
 def api_session_add_shot(sid):
     data = request.get_json(force=True) or {}
@@ -749,7 +759,59 @@ def _db_finalize_session(sid):
             sess = s.get(db['SessionRow'], sid)
             if sess:
                 sess.ended_at = datetime.utcnow()
+                
+                # CALCULAR PROMEDIOS DE LA SESIÓN
+                from sqlalchemy import select, func
+                ShotRow = db['ShotRow']
+                
+                # Obtener todos los tiros de la sesión
+                shots = s.execute(
+                    select(ShotRow).where(ShotRow.sid == sid)
+                ).scalars().all()
+                
+                if shots:
+                    # Calcular promedios
+                    entry_angles = [s.entry_angle for s in shots if s.entry_angle is not None]
+                    release_angles = [s.release_angle for s in shots if s.release_angle is not None]
+                    arc_heights = [s.arc_height for s in shots if s.arc_height is not None]
+                    
+                    sess.entry_angle_avg = sum(entry_angles) / len(entry_angles) if entry_angles else None
+                    sess.release_angle_avg = sum(release_angles) / len(release_angles) if release_angles else None
+                    sess.arc_height_avg = sum(arc_heights) / len(arc_heights) if arc_heights else None
+                    
+                    # Generar resumen
+                    made_count = sum(1 for s in shots if s.made)
+                    total_count = len(shots)
+                    accuracy = (made_count / total_count * 100) if total_count > 0 else 0
+                    
+                    # Crear resumen detallado
+                    summary_parts = [
+                        f"Session completed: {made_count}/{total_count} shots made ({accuracy:.1f}% accuracy)"
+                    ]
+                    
+                    # Agregar estadísticas de ángulos si están disponibles
+                    if entry_angles:
+                        avg_entry = sum(entry_angles) / len(entry_angles)
+                        summary_parts.append(f"Average entry angle: {avg_entry:.1f}°")
+                    
+                    if release_angles:
+                        avg_release = sum(release_angles) / len(release_angles)
+                        summary_parts.append(f"Average release angle: {avg_release:.1f}°")
+                    
+                    if arc_heights:
+                        avg_arc = sum(arc_heights) / len(arc_heights)
+                        summary_parts.append(f"Average arc height: {avg_arc:.1f}px")
+                    
+                    sess.summary = " | ".join(summary_parts)
+                
                 s.commit()
+                _trace('db_finalize_session: calculated averages', {
+                    'sid': sid, 
+                    'entry_angle_avg': sess.entry_angle_avg,
+                    'release_angle_avg': sess.release_angle_avg,
+                    'arc_height_avg': sess.arc_height_avg,
+                    'summary': sess.summary
+                })
     except Exception as e:
         print('db_finalize_session:', e)
 

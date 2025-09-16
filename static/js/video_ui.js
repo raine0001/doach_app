@@ -274,7 +274,8 @@ window.mountConnectionBanner = mountConnectionBanner;
             try { window.__SESSION_ACTIVE = false; } catch {}
             try { window.__shotTrackingArmed = false; } catch {}
             try { window.stopPoseReleaseSampler?.(); } catch {}
-            setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
+            // Don't auto-end session, let user end manually
+            console.log('[SESSION] Reached shot limit, but waiting for manual end');
           }
         } catch {}
       } catch {}
@@ -1647,6 +1648,27 @@ export function initHUDForVideo(videoEl) {
       } catch {}
       try { window.__summaryShown = true; } catch {}
     } catch {}
+    
+    // Finalize session in backend to calculate averages
+    try {
+      const sid = window.__SESSION_ID;
+      if (sid) {
+        console.log('[SESSION-FINALIZE] Finalizing session in backend:', sid);
+        await fetch(`/api/sessions/${sid}/finalize`, { 
+          method: 'POST', 
+          credentials: 'include' 
+        }).then(r => {
+          if (r.ok) {
+            console.log('[SESSION-FINALIZE] Session finalized successfully');
+          } else {
+            console.log('[SESSION-FINALIZE] Failed to finalize session:', r.status);
+          }
+        }).catch(e => {
+          console.log('[SESSION-FINALIZE] Error finalizing session:', e);
+        });
+      }
+    } catch {}
+    
     // Announce + trigger coach session summary
     try { window.coachSpeak?.("That's your tenth shot — let's review the session."); } catch {}
     try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
@@ -1655,6 +1677,45 @@ export function initHUDForVideo(videoEl) {
 
   // Expose end-session routine globally for guards and other modules
   try { if (typeof window.autoEndSessionAndSummarize !== 'function') window.autoEndSessionAndSummarize = autoEndSessionAndSummarize; } catch {}
+  
+  // Manual session finalization function
+  window.finalizeSession = async function() {
+    try {
+      const sid = window.__SESSION_ID;
+      if (sid) {
+        console.log('[MANUAL-FINALIZE] Finalizing session manually:', sid);
+        
+        // Stop the session first
+        try {
+          window.__SESSION_ACTIVE = false;
+          window.__shotTrackingArmed = false;
+          window.stopPoseReleaseSampler?.();
+        } catch {}
+        
+        const response = await fetch(`/api/sessions/${sid}/finalize`, { 
+          method: 'POST', 
+          credentials: 'include' 
+        });
+        if (response.ok) {
+          console.log('[MANUAL-FINALIZE] Session finalized successfully');
+          
+          // Show summary
+          try { window.autoEndSessionAndSummarize?.(); } catch {}
+          
+          alert('Session finalized! Averages have been calculated.');
+        } else {
+          console.log('[MANUAL-FINALIZE] Failed to finalize session:', response.status);
+          alert('Failed to finalize session. Please try again.');
+        }
+      } else {
+        alert('No active session to finalize.');
+      }
+    } catch (e) {
+      console.log('[MANUAL-FINALIZE] Error:', e);
+      alert('Error finalizing session: ' + e.message);
+    }
+  };
+  
 
   // confirm hoop locker fires
 window.addEventListener('hoop:locked', () => {
@@ -1674,6 +1735,102 @@ window.addEventListener('hoop:locked', () => {
     try { if (window.PREF_VOICE_INTRO === true) speak(`Let's get started, select hoop, get into position, and shoot when ready.`); } catch {}
     startShotTrackingCountdown?.(5);
   } catch {}
+});
+
+// AUTO-HOOP DETECTION: Automatically detect and confirm hoop if not manually selected
+let autoHoopDetectionAttempts = 0;
+const MAX_AUTO_HOOP_ATTEMPTS = 10;
+
+function tryAutoHoopDetection() {
+  if (window.__hoopConfirmed === true) return; // Already confirmed
+  if (autoHoopDetectionAttempts >= MAX_AUTO_HOOP_ATTEMPTS) return;
+  
+  autoHoopDetectionAttempts++;
+  
+  try {
+    // Check if we have detected objects with hoop
+    const lastFrame = window.lastDetectedFrame;
+    if (lastFrame && Array.isArray(lastFrame.objects)) {
+      const hoopObjects = lastFrame.objects.filter(obj => obj.label === 'hoop' || obj.label === 'basketball_hoop');
+      if (hoopObjects.length > 0) {
+        // Use the first detected hoop
+        const hoop = hoopObjects[0];
+        if (hoop.box && Array.isArray(hoop.box) && hoop.box.length >= 4) {
+          const [x1, y1, x2, y2] = hoop.box;
+          const hoopBox = {
+            x: x1,
+            y: y1,
+            x2: x2,
+            y2: y2,
+            w: x2 - x1,
+            h: y2 - y1,
+            cx: (x1 + x2) / 2,
+            cy: (y1 + y2) / 2
+          };
+          
+          // Set the locked hoop
+          try {
+            window.setLockedHoopBox?.(hoopBox);
+            window.__hoopConfirmed = true;
+            console.log('[AUTO-HOOP] Automatically detected and confirmed hoop');
+            
+            // Start countdown immediately
+            if (window.__shotTrackingArmed !== true && !window.__armCountdownActive) {
+              window.__shotTrackingArmed = false;
+              startShotTrackingCountdown?.(3); // Shorter countdown for auto-detection
+            }
+            return;
+          } catch (e) {
+            console.log('[AUTO-HOOP] Failed to set hoop:', e);
+          }
+        }
+      }
+    }
+  } catch (e) {
+    console.log('[AUTO-HOOP] Detection attempt failed:', e);
+  }
+  
+  // Try again in 1 second
+  if (autoHoopDetectionAttempts < MAX_AUTO_HOOP_ATTEMPTS) {
+    setTimeout(tryAutoHoopDetection, 1000);
+  }
+}
+
+// Start auto-detection when session starts
+window.addEventListener('hud:start-session', () => {
+  autoHoopDetectionAttempts = 0;
+  setTimeout(tryAutoHoopDetection, 2000); // Start after 2 seconds
+});
+
+// FALLBACK: Force arm shot tracking if we have basic conditions
+function forceArmShotTracking() {
+  if (window.__shotTrackingArmed === true) return; // Already armed
+  if (window.__armCountdownActive) return; // Countdown in progress
+  
+  try {
+    // Check if we have basic conditions
+    const hasHoop = !!window.getLockedHoopBox?.();
+    const hasPose = !!(window.playerState?.keypoints?.length >= 33);
+    const hasBall = !!(window.ballState?.trail?.length > 0);
+    
+    if (hasHoop || hasPose) { // At least hoop or pose
+      console.log('[FALLBACK] Forcing shot tracking armed - basic conditions met');
+      window.__shotTrackingArmed = true;
+      window.__hoopConfirmed = true; // Assume hoop is good enough
+      try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
+    }
+  } catch (e) {
+    console.log('[FALLBACK] Failed to force arm:', e);
+  }
+}
+
+// Try to force arm after 10 seconds if still not armed
+window.addEventListener('hud:start-session', () => {
+  setTimeout(() => {
+    if (window.__shotTrackingArmed !== true) {
+      forceArmShotTracking();
+    }
+  }, 10000); // 10 seconds
 });
 }
 

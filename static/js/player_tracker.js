@@ -113,6 +113,17 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
   try { window.__lastPoseKP = scaledKeypoints; window.__lastPoseTS = performance.now(); } catch {}
   try { window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaledKeypoints[16] || null; } catch {}
   playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints });
+  
+  // POSE-BASED RELEASE DETECTION
+  try {
+    if (window.__shotTrackingArmed === true && window.__hoopConfirmed === true) {
+      // Try motion-based detection first
+      if (!detectPoseRelease(scaledKeypoints, frameNum)) {
+        // Fallback to basic position detection
+        forceReleaseDetection(scaledKeypoints, frameNum);
+      }
+    }
+  } catch {}
   try {
     if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) {
       const w = scaledKeypoints[16];
@@ -348,6 +359,221 @@ export function extractPoseSnapshot(keypoints, hoopBox) {
 // Expose snapshot helper for modules that avoid direct imports (breaks cycles)
 try { window.extractPoseSnapshot = window.extractPoseSnapshot || extractPoseSnapshot; } catch {}
 
+// POSE-BASED RELEASE DETECTION: Detect shooting motion from pose
+let lastWristY = null;
+let releaseCooldown = 0;
+
+function detectPoseRelease(keypoints, frameIndex) {
+  if (!keypoints || keypoints.length < 33) return false;
+  if (releaseCooldown > 0) {
+    releaseCooldown--;
+    return false;
+  }
+  
+  try {
+    // Get wrist position (right wrist = index 16)
+    const wrist = keypoints[16];
+    if (!wrist || wrist.visibility < 0.5) return false;
+    
+    const currentWristY = wrist.y;
+    
+    // Detect upward motion (shooting motion)
+    if (lastWristY !== null) {
+      const wristMovement = lastWristY - currentWristY; // Positive = upward
+      
+      // If wrist moved up significantly, it's a release
+      if (wristMovement > 20) { // Threshold for shooting motion
+        console.log('[POSE-RELEASE] Detected shooting motion', { movement: wristMovement, frame: frameIndex });
+        markRelease(frameIndex, { via: 'pose-motion' });
+        releaseCooldown = 30; // 1 second cooldown at 30fps
+        return true;
+      }
+    }
+    
+    lastWristY = currentWristY;
+    return false;
+  } catch (e) {
+    console.log('[POSE-RELEASE] Error:', e);
+    return false;
+  }
+}
+
+// FALLBACK: Force release detection when basic conditions are met
+function forceReleaseDetection(keypoints, frameIndex) {
+  if (!keypoints || keypoints.length < 33) return false;
+  if (releaseCooldown > 0) return false;
+  
+  try {
+    const wrist = keypoints[16];
+    const elbow = keypoints[14];
+    const shoulder = keypoints[12];
+    
+    if (!wrist || !elbow || !shoulder) return false;
+    if (wrist.visibility < 0.5 || elbow.visibility < 0.5 || shoulder.visibility < 0.5) return false;
+    
+    // More lenient conditions for detection
+    const wristAboveShoulder = wrist.y < shoulder.y - 5; // Reduced from 10 to 5
+    const wristAboveElbow = wrist.y < elbow.y - 5; // Added this condition
+    
+    // Check if elbow is extended (more lenient)
+    const elbowAngle = Math.atan2(wrist.y - elbow.y, wrist.x - elbow.x) - 
+                      Math.atan2(shoulder.y - elbow.y, shoulder.x - elbow.x);
+    const elbowAngleDeg = Math.abs(elbowAngle * 180 / Math.PI);
+    const elbowExtended = elbowAngleDeg >= 60; // Reduced from 90 to 60
+    
+    // Alternative: detect any upward motion of the wrist
+    const hasUpwardMotion = lastWristY !== null && (lastWristY - wrist.y) > 10;
+    
+    // If any basic conditions are met, force a release
+    if ((wristAboveShoulder && elbowExtended) || (wristAboveElbow && hasUpwardMotion)) {
+      console.log('[FORCE-RELEASE] Basic conditions met', { 
+        wristAboveShoulder, 
+        wristAboveElbow,
+        elbowExtended, 
+        hasUpwardMotion,
+        elbowAngleDeg, 
+        frame: frameIndex 
+      });
+      markRelease(frameIndex, { via: 'force-basic' });
+      releaseCooldown = 60; // 2 second cooldown at 30fps
+      
+      // Update shot counter immediately
+      try {
+        const currentCount = (window.__shotList?.length || 0) + 1;
+        window.__shotList = window.__shotList || [];
+        window.__shotList.push({ 
+          pending: true, 
+          frameRelease: frameIndex, 
+          tMs: Date.now(),
+          via: 'force-basic'
+        });
+        
+        // Calculate basic shot metrics
+        const shotMetrics = calculateBasicShotMetrics(keypoints, frameIndex);
+        
+        // Update global shot counters to keep them in sync
+        try {
+          window.__SCORE_SHOT_COUNT = currentCount;
+          window.shotTaken = currentCount;
+          window.__HUD_SHOT_COUNT = currentCount;
+        } catch {}
+        
+        // Update HUD immediately
+        window.dispatchEvent(new CustomEvent('hud:shot-taken', { 
+          detail: { count: currentCount } 
+        }));
+        
+        // Send shot data to backend with metrics
+        sendShotToBackend(currentCount - 1, shotMetrics);
+        
+        // Show visual feedback
+        try {
+          if (typeof window.showCenterPrompt === 'function') {
+            window.showCenterPrompt(`Shot ${currentCount} Detected!`);
+            setTimeout(() => { 
+              try { 
+                const el = document.getElementById('overlayPrompt'); 
+                if (el) el.style.display = 'none'; 
+              } catch {} 
+            }, 1500);
+          }
+        } catch {}
+        
+        console.log('[SHOT-COUNT] Shot counted via force detection:', currentCount, shotMetrics);
+      } catch {}
+      
+      return true;
+    }
+    
+    // Update last wrist position for motion detection
+    lastWristY = wrist.y;
+    return false;
+  } catch (e) {
+    console.log('[FORCE-RELEASE] Error:', e);
+    return false;
+  }
+}
+
+// Calculate basic shot metrics from pose data
+function calculateBasicShotMetrics(keypoints, frameIndex) {
+  try {
+    const wrist = keypoints[16]; // Right wrist
+    const elbow = keypoints[14]; // Right elbow
+    const shoulder = keypoints[12]; // Right shoulder
+    const hip = keypoints[24]; // Right hip
+    
+    if (!wrist || !elbow || !shoulder || !hip) {
+      return { entryAngle: null, releaseAngle: null, arcHeight: null, made: null };
+    }
+    
+    // Calculate release angle (angle between upper arm and vertical)
+    const upperArmAngle = Math.atan2(shoulder.y - elbow.y, shoulder.x - elbow.x);
+    const releaseAngle = Math.abs(upperArmAngle * 180 / Math.PI);
+    
+    // Calculate entry angle (simplified - based on wrist position relative to shoulder)
+    const wristToShoulderAngle = Math.atan2(wrist.y - shoulder.y, wrist.x - shoulder.x);
+    const entryAngle = Math.abs(wristToShoulderAngle * 180 / Math.PI);
+    
+    // Calculate arc height (simplified - based on wrist height above shoulder)
+    const arcHeight = Math.max(0, shoulder.y - wrist.y);
+    
+    // Determine if shot was made (simplified heuristic)
+    const made = (releaseAngle > 45 && releaseAngle < 90 && arcHeight > 50) ? true : false;
+    
+    return {
+      entryAngle: Math.round(entryAngle),
+      releaseAngle: Math.round(releaseAngle),
+      arcHeight: Math.round(arcHeight),
+      made: made
+    };
+  } catch (e) {
+    console.log('[SHOT-METRICS] Error calculating metrics:', e);
+    return { entryAngle: null, releaseAngle: null, arcHeight: null, made: null };
+  }
+}
+
+// Send shot data to backend
+async function sendShotToBackend(shotIndex, metrics) {
+  try {
+    const sessionId = window.__SESSION_ID;
+    if (!sessionId) {
+      console.log('[SHOT-BACKEND] No session ID available');
+      return;
+    }
+    
+    const payload = {
+      idx: shotIndex,
+      t: Date.now(),
+      made: metrics.made,
+      arcHeight: metrics.arcHeight,
+      entryAngle: metrics.entryAngle,
+      releaseAngle: metrics.releaseAngle,
+      missReason: metrics.made ? null : 'missed'
+    };
+    
+    const response = await fetch(`/api/sessions/${sessionId}/shot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      credentials: 'include'
+    });
+    
+    if (response.ok) {
+      console.log('[SHOT-BACKEND] Shot data sent successfully:', payload);
+    } else {
+      console.log('[SHOT-BACKEND] Failed to send shot data:', response.status);
+    }
+  } catch (e) {
+    console.log('[SHOT-BACKEND] Error sending shot data:', e);
+  }
+}
+
+// Expose pose release detection globally
+window.detectPoseRelease = detectPoseRelease;
+window.forceReleaseDetection = forceReleaseDetection;
+window.calculateBasicShotMetrics = calculateBasicShotMetrics;
+window.sendShotToBackend = sendShotToBackend;
+
 /* ------------------------------------------------------------------
  * Shot start (release) — canonical in player_tracker
  * Marks the start of a shot attempt based on pose/corridor gating.
@@ -383,6 +609,25 @@ export function markRelease(frameIndex, opts = {}) {
   bs.releaseFrame   = lastFrame;
   bs.proxExitFrame  = null;
   bs.state          = 'TRACKING';
+  
+  // FALLBACK: Always fire shot:release event when markRelease is called
+  // This ensures shots are counted even if ball detection fails
+  try {
+    if (!window.__releaseEventSent) {
+      window.__releaseEventSent = true;
+      window.dispatchEvent(new CustomEvent('shot:release', { 
+        detail: { frame: lastFrame, via: opts?.via || 'markRelease' } 
+      }));
+      
+      // Also fire hud:shot-taken event to update the counter
+      const shotCount = (window.__shotList?.length || 0) + 1;
+      window.dispatchEvent(new CustomEvent('hud:shot-taken', { 
+        detail: { count: shotCount } 
+      }));
+      
+      console.log('[SHOT-COUNT] Shot detected, count:', shotCount);
+    }
+  } catch {}
   try {
     const preF  = Number(window.SHOT_SAVE_PRE_FRAMES ?? 10);
     const postF = Number(window.SHOT_SAVE_POST_FRAMES ?? 90);

@@ -562,6 +562,53 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
       s.summarySignaled = false;
     }
 
+    // FALLBACK: If we have a release but no summary after a reasonable time, force one
+    if (s.releaseSignaled && !s.summarySignaled && __shotInProgress) {
+      const timeSinceRelease = frameIndex - (ballStateRef?.releaseFrame || frameIndex);
+      if (timeSinceRelease > 60) { // 2 seconds at 30fps
+        // Force finalize the shot
+        __shotInProgress = false;
+        __awaitingReset = true;
+        s._postExitFrames = 0;
+        
+        if (ballStateRef.state !== 'FROZEN') { 
+          try { freezeShot?.(null); } catch {} 
+        }
+        
+        try { ballStateRef.releaseFrame = null; ballStateRef.state = 'IDLE'; } catch {}
+        
+        let shotRecord = null;
+        const frozen = ballStateRef.shots?.at?.(-1);
+        const trailForLog = (frozen?.trail?.length >= 3) ? frozen.trail : (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
+        
+        if (!window.DEFER_FE_SUMMARY) {
+          if (trailForLog) {
+            try {
+              shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null;
+            } catch {}
+          }
+          if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
+        }
+        
+        if (!s.summarySignaled) {
+          s.summarySignaled = true;
+          if (!window.DEFER_FE_SUMMARY) {
+            try {
+              if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'fallback-timeout', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
+              window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));
+            } catch {}
+          }
+          try { if (!window.__SESSION_ACTIVE) window.stopFrameAnalysis?.(); } catch {}
+          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
+          setTimeout(() => { __awaitingReset = false; s._postExitFrames = 0; }, unlockMs);
+        }
+        
+        try { window.dispatchEvent(new CustomEvent('shot:end', { detail: { frame: frameIndex } })); } catch {}
+        try { window.dispatchEvent(new CustomEvent('fbf:stop', { detail: { frame: frameIndex } })); } catch {}
+        stopFBFAt(frameIndex);
+      }
+    }
+
 
     s._lastInProx = nowInProx;
     s._lastY      = last.y;
