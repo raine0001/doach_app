@@ -5,21 +5,175 @@ try { window.__appJsLoaded = true; } catch {}
 
 import { initOverlay, drawLiveOverlay, sendFrameToDetect,
          syncOverlayToVideo, updateDebugOverlay, ensureOverlayCss,
-         installOverlayTracer, removeOverlayTracer } from './fix_overlay_display.js';
-import { analyzeVideoFrameByFrame as runAnalyzer } from './analyzer.js';
+         installOverlayTracer, removeOverlayTracer } from './fix_overlay_display.js?v=20250915';
+import { analyzeVideoFrameByFrame as runAnalyzer } from './analyzer.js?v=20250915';
 import { resetShotStats, checkShotConditions, detectNetMotion, 
          drawNetMotionStatus, bufferDetectedObjects, scoringTick, 
-         isBallInProximityZone } from './shot_logger.js';
-import { playerState, resetPlayerTracker, updatePlayerTracker, initPoseDetector } from './player_tracker.js';
-import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, filterObjectsToLockedHoop } from './hoop_tracker.js';
-import { createPlaybackControls, initHUDForVideo } from './video_ui.js';
-import { ballState, updateBall, resetAll, markRelease, stepFBFArc, fillArcGaps} from './ball_tracker.js';
+         isBallInProximityZone } from './shot_logger.js?v=20250915';
+import { playerState, resetPlayerTracker, updatePlayerTracker, initPoseDetector } from './player_tracker.js?v=20250915';
+import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, filterObjectsToLockedHoop } from './hoop_tracker.js?v=20250915';
+import { createPlaybackControls, initHUDForVideo } from './video_ui.js?v=20250915';
+import { ballState, updateBall, resetAll, markRelease, stepFBFArc, fillArcGaps} from './ball_tracker.js?v=20250915';
 // Load shot arc FSM (release/exit timing); available for incremental adoption
-import { resetShotFSM as _arcReset, updateShotArcTick as _arcTick, proxFromHoop } from './shot_arc.js';
-import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.js';
-import { mountPrefs } from './ui_prefs.js';
-import { initReleaseConfig, releaseGate } from './release_gate.js';
+import { resetShotFSM as _arcReset, updateShotArcTick as _arcTick, proxFromHoop } from './shot_arc.js?v=20250915';
+import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.js?v=20250915';
+import { mountPrefs } from './ui_prefs.js?v=20250915';
+import { initReleaseConfig, releaseGate } from './release_gate.js?v=20250915';
 
+
+// ------------ iOS mobile safety/bootstrap (detector + audio unlock) ----------
+(function installIOSMobileSafety(){
+  try {
+    const ua = navigator.userAgent || '';
+    const iOS = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    if (!iOS) return;
+
+    // Prefer server detector on iOS (WebGL/worker limitations).
+    // But only force it if a backend is reachable; otherwise fall back to local worker.
+    const defaultToServer = () => {
+      if (typeof window.__forceServerDetect === 'undefined') window.__forceServerDetect = true;
+      if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = false;
+    };
+    const defaultToWorker = () => {
+      window.__forceServerDetect = false; window.__LOCAL_DETECTOR = true;
+    };
+    defaultToServer();
+    // Pose-first: do not require ball proximity on iOS by default
+    try { if (typeof window.REL_REQUIRE_PROX === 'undefined') window.REL_REQUIRE_PROX = false; } catch {}
+    try {
+      const ctl = new AbortController(); const tid = setTimeout(()=>ctl.abort(), 800);
+      fetch('/healthz', { credentials: 'include', signal: ctl.signal })
+        .then(r => { clearTimeout(tid); if (!r || !r.ok) defaultToWorker(); })
+        .catch(() => { try { clearTimeout(tid); } catch {}; defaultToWorker(); });
+    } catch { defaultToWorker(); }
+    // Keep sampling dense enough for trail building
+    window.DETECT_EVERY = 1;
+    window.__BG_FPS = Number(window.__BG_FPS || 10);
+    window.ROI_SUPERSAMPLE = Number(window.ROI_SUPERSAMPLE || 1.6);
+
+    // Ensure inline video playback on iOS Safari
+    try {
+      const v = document.getElementById('videoPlayer');
+      if (v) { v.setAttribute('playsinline',''); v.setAttribute('webkit-playsinline',''); v.muted = true; }
+    } catch {}
+
+    // One‑time audio unlock on first user gesture (enables TTS/coach voice)
+    function unlockAudioOnce(){
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          const ctx = new AC();
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          gain.gain.value = 0.0001; // silent tick
+          osc.connect(gain).connect(ctx.destination);
+          osc.start(); setTimeout(() => { try { osc.stop(); ctx.close(); } catch {} }, 50);
+        }
+      } catch {}
+      try { window.removeEventListener('touchend', unlockAudioOnce); } catch {}
+      try { window.removeEventListener('click', unlockAudioOnce); } catch {}
+    }
+    try { window.addEventListener('touchend', unlockAudioOnce, { once:true, passive:true }); } catch {}
+    try { window.addEventListener('click',    unlockAudioOnce, { once:true }); } catch {}
+
+    // Pose-first defaults: make arm/ready bypass default on iOS so pose-only release always works
+    try { window.REL_BYPASS_READY = true; } catch {}
+    try { window.REL_REQUIRE_PROX = false; } catch {}
+    try { window.REL_REQUIRE_HOOP = false; } catch {}
+    try { if (typeof window.POSE_STREAK_NEED === 'undefined') window.POSE_STREAK_NEED = 1; } catch {}
+    // Enforce strict all‑four parity at emit time so HUD and counts match
+    try { window.REL_STRICT_ALLFOUR = true; } catch {}
+    // Let release events pass the capture-phase gate on iOS; safeEmitRelease does strict checks
+    try { window.IOS_PASS_RELEASE = true; } catch {}
+    // Disable any live pre-release tips (only speak on shot:summary)
+    try { window.PREF_LIVE_TIPS = false; } catch {}
+    // Do not let server poller drive counts on iOS; merge metrics only
+    try { window.DISABLE_SERVER_COUNT = true; } catch {}
+    // Let coach speak on per-shot summaries in iOS server mode
+    try { window.DOACH_ONLY_REALTIME = false; } catch {}
+
+    // Auto-arm fallback after hoop lock (iOS timers/RVFC can delay the countdown)
+    try {
+      window.addEventListener('hoop:locked', () => {
+        try { window.__hoopConfirmed = true; } catch {}
+        // Immediately arm + mark ready/warm on iOS after hoop lock
+        try { window.__shotTrackingArmed = true; } catch {}
+        try { window.__POSE_WARMUP_OK = true; } catch {}
+        try { window.__readyForScoring = true; } catch {}
+      }, { passive:true });
+    } catch {}
+
+    // iOS Gate Watchdog — emit release if pose gate stays green (RVFC can be throttled)
+    try {
+      if (!window.__iosGateWatch) {
+        window.__iosGateWatch = setInterval(() => {
+          try {
+            if (window.__sessionEnded === true || window.__sessionCapped === true) return;
+            const armed = (window.__shotTrackingArmed === true);
+            const confirmed = (window.__hoopConfirmed === true);
+            if (!armed || !confirmed) return;
+            if (window.__releaseEventSent === true) return;
+            const th = Number((window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 1.0);
+            // Prefer the score snapshot computed by the overlay (stable on iOS)
+            let scoreNow = null;
+            try { scoreNow = Number(window.__LAST_GATE?.detail?.tests?.score ?? null); } catch {}
+            if (!Number.isFinite(scoreNow)) {
+              const hist = (window.playerState?.frameHistory || []).slice(-5);
+              if (!hist.length) return;
+              const g = (typeof window.releaseGate === 'function') ? (window.releaseGate(hist) || { released:false, tests:{} }) : { released:false, tests:{} };
+              scoreNow = Number(g.tests?.score || 0);
+              if (!Number.isFinite(scoreNow) && window.REL_BYPASS_GATE === true) scoreNow = th; // explicit bypass
+            }
+            if (Number.isFinite(scoreNow) && scoreNow >= th - 1e-6) {
+              const f = Number(window.__AN_IDX || (window.playerState?.lastFrame) || Date.now()|0);
+              // Build a gate object from the latest overlay snapshot for strict parity
+              let tests = null;
+              try { tests = (window.__LAST_GATE && window.__LAST_GATE.detail && window.__LAST_GATE.detail.tests) ? window.__LAST_GATE.detail.tests : null; } catch {}
+              const gate = { released: true, tests: tests || {} };
+              try { window.safeEmitRelease?.(f, 'ios-gate-watch', { gate }); } catch {}
+            }
+          } catch {}
+        }, 140);
+      }
+    } catch {}
+
+    // Also start the sampler immediately on hoop lock to keep polling the gate
+    try { window.addEventListener('hoop:locked', () => { try { window.startPoseReleaseSampler?.(); } catch {} }, { passive:true }); } catch {}
+
+    // iOS Gate Tick Poster — send gate ticks to server even if RVFC/bg loops are throttled
+    try {
+      if (!window.__iosGatePoster) {
+        window.__iosGatePoster = setInterval(() => {
+          try {
+            const sid = (window.__SESSION_ID || null);
+            if (!sid) return;
+            const hist = (window.playerState?.frameHistory || []).slice(-5);
+            if (!hist.length || typeof window.releaseGate !== 'function') return;
+            const gate = window.releaseGate(hist) || { released:false, tests:{} };
+            const sc = Number(gate?.tests?.score || 0);
+            const base = (typeof window.__API_BASE === 'string') ? window.__API_BASE : '';
+            const frameIdx = Number(window.__AN_IDX || Date.now()|0);
+            const payload = { frame: frameIdx, t: Date.now(), released: !!gate.released, score: sc, tests: gate.tests, armed: !!window.__shotTrackingArmed, ready: !!window.__readyForScoring };
+            fetch(base + `/api/sessions/${sid}/gate_tick`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' })
+              .then(r => r && r.ok ? r.json() : null)
+              .then(j => { if (j) { try { window.__GATE_SRV = { ts: Date.now(), released: !!j.released, idx: (j?.idx!=null?j.idx:null), cooldown: !!j?.cooldown }; } catch {} } })
+              .catch(()=>{});
+            // If server gate still not deciding after ~2s, try server-side pose on latest observer frame
+            try {
+              const lastSrv = window.__GATE_SRV?.ts || 0;
+              if (!lastSrv || (Date.now() - lastSrv) > 2000) {
+                fetch(base + `/api/sessions/${sid}/server_gate_once`, { method:'POST', headers:{'Content-Type':'application/json'}, body: '{}', credentials:'include' })
+                  .then(r => r && r.ok ? r.json() : null)
+                  .then(j => { if (j) { try { window.__GATE_SRV = { ts: Date.now(), released: !!j.released, idx: (j?.idx!=null?j.idx:null), cooldown: false }; } catch {} } })
+                  .catch(()=>{});
+              }
+            } catch {}
+          } catch {}
+        }, 150);
+      }
+    } catch {}
+  } catch {}
+})();
 
 // pose detection global settings
 window.POSE_REQUIRE_PLAYER_BOX = true;   // must see a 'player'/'person' box
@@ -28,7 +182,6 @@ window.POSE_MIN_H              = 110;    // min pose height (px)
 window.POSE_MIN_AREA_FRAC      = 0.006;  // min area vs frame (0.6%)
 window.POSE_BELOW_RIM_MIN      = 80;     // ankles must be ≥80px BELOW rim y
 window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to accept
-
 
 
 // =========================== Pose Release Pipeline ===========================
@@ -146,51 +299,71 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
           if (Number.isFinite(cap) && taken >= cap) { try { window.autoEndSessionAndSummarize?.(); } catch {} return false; }
         } catch {}
 
-        // Basic preconditions
+        // Basic preconditions (allow iOS bypass to auto-arm)
+        const bypassGate  = (window.REL_BYPASS_GATE === true);
+        const bypassReady = (window.REL_BYPASS_READY === true);
+        const H = window.getLockedHoopBox?.();
+        const needHoop = (window.REL_REQUIRE_HOOP !== false);
+        if (needHoop && !H) return false;
+        if (!window.__shotTrackingArmed && bypassReady) { try { window.__shotTrackingArmed = true; } catch {} }
+        if (!window.__hoopConfirmed && bypassReady) { try { window.__hoopConfirmed = true; } catch {} }
         const armed = (window.__shotTrackingArmed === true);
         const confirmed = (window.__hoopConfirmed === true);
-        const H = window.getLockedHoopBox?.();
-        if (!armed || !confirmed || !H) return false;
+        if (!armed || !confirmed) return false;
 
         // Cooldown + “already fired” guard
         const now = performance.now();
         const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
         const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
-        if (since < cd || window.__releaseEventSent) return false;
+        if (since < cd || window.__releaseEventSent) { if (window.DOACH_RELEASE_TRACE) console.log('[REL:block]', 'cooldown_or_sent', { since: Math.round(since), cd, sent: !!window.__releaseEventSent }); return false; }
 
-        // Require wrist-drop reset since the previous release
-        if (window.__RESET_SEEN_BELOW === false) return false;
+        // Require wrist-drop reset since the previous release (skip if bypassed)
+        if (window.__RESET_SEEN_BELOW === false && !bypassGate) { if (window.DOACH_RELEASE_TRACE) console.log('[REL:block]', 'need_wrist_reset'); return false; }
 
         // Canonical gate approval (pose-first authority lives in release_gate.js)
-        const hist = (window.playerState?.frameHistory || []).slice(-5);
-        let approved = false, t = {};
-        if (typeof window.releaseGate === 'function') {
-          const g = window.releaseGate(hist) || { released:false, tests:{} };
-          approved = !!g.released; t = g.tests || {};
+        // Pose gate approval (skip entirely if bypassGate)
+        let eventGate = null; // will include the tests we used for the event
+        if (!bypassGate) {
+          const hist = (window.playerState?.frameHistory || []).slice(-5);
+          let approved = false, t = {};
+          const gateHint = (opts && opts.gate && typeof opts.gate === 'object') ? opts.gate : null;
+          if (gateHint) {
+            approved = !!gateHint.released; t = gateHint.tests || {};
+          } else if (typeof window.releaseGate === 'function') {
+            const g = window.releaseGate(hist) || { released:false, tests:{} };
+            approved = !!g.released; t = g.tests || {};
+          }
+          // Strict parity (4/4) using available tests (either hint or fresh gate) when enabled
+          if (approved) {
+            try {
+              if (window.REL_STRICT_ALLFOUR === true) {
+                const useUp = (window.REL_SCORE_USE_UPTREND === true);
+                const wA=0.26,wB=0.26,wC=0.26,wD=0.26, tot=wA+wB+wC+wD;
+                const sc = (t.wristAboveElbow?wA:0)+(t.elbowExtended?wB:0)+(t.alignOK?wC:0)+((useUp?t.wristUpTrend:t.wristAboveShoulder)?wD:0);
+                if (!(Number.isFinite(sc) && sc >= (tot - 1e-6))) { if (window.DOACH_RELEASE_TRACE) console.log('[REL:block]', 'parity', { sc, tot }); approved = false; }
+              }
+            } catch {}
+          }
+          if (!approved) { if (window.DOACH_RELEASE_TRACE) console.log('[REL:block]', 'gate_not_approved'); return false; }
+          eventGate = { released: true, tests: t };
         }
-        if (!approved) return false;
-
-        // Optional: strict HUD parity (0.26 weights all-four) to match your HUD visuals
-        try {
-          const useUp = (window.REL_SCORE_USE_UPTREND === true);
-          const wA=0.26,wB=0.26,wC=0.26,wD=0.26, tot=wA+wB+wC+wD;
-          const sc = (t.wristAboveElbow?wA:0)+(t.elbowExtended?wB:0)+(t.alignOK?wC:0)+((useUp?t.wristUpTrend:t.wristAboveShoulder)?wD:0);
-          if (!(Number.isFinite(sc) && sc >= (tot - 1e-6))) return false;
-        } catch {}
 
         // Proximity (compute if not provided)
         let prox = opts?.prox || null;
         try {
-          if (!prox && typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function') {
+          if (!prox && H && typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function') {
             prox = window.proxFromHoop(window.canonHoop(H));
           }
         } catch {}
 
         // Mark + dispatch (canonical)
         (window.__markReleasePose || window.markRelease)?.(frame, { ...opts, prox, via, requirePose: true });
-        window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
+        try { window.__localReleaseSeen = true; } catch {}
+        const gateDetail = (opts && opts.gate) ? opts.gate : (eventGate || null);
+        window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via, gate: gateDetail } }));
         window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
-        window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));
+        window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via, gate: gateDetail } }));
+        if (window.DOACH_RELEASE_TRACE) console.log('[REL:event]', { frame, via, tests: gateDetail?.tests || null });
         return true;
       } catch { return false; }
     };
@@ -201,9 +374,13 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
     window.__captureGateBound = true;
     window.addEventListener('shot:release', (e) => {
       try {
-        // Startup anti-ghost: require readiness + pose warmup before any release can pass
-        if (window.__readyForScoring !== true) { e.stopImmediatePropagation(); return; }
-        if (window.__POSE_WARMUP_OK !== true) { e.stopImmediatePropagation(); return; }
+        // On iOS, allow the event to pass through without extra capture-time gating
+        if (window.IOS_PASS_RELEASE === true) return;
+        // Startup anti-ghost: require readiness + pose warmup unless bypassed
+        if (window.REL_BYPASS_READY !== true) {
+          if (window.__readyForScoring !== true) { e.stopImmediatePropagation(); return; }
+          if (window.__POSE_WARMUP_OK !== true) { e.stopImmediatePropagation(); return; }
+        }
         // Hard-stop guard at session cap/end
         if (window.__sessionEnded === true || window.__sessionCapped === true) { e.stopImmediatePropagation(); return; }
         try {
@@ -217,23 +394,29 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
             try { window.__sessionCapped = true; } catch {}
             try { window.__capAwait = true; } catch {}
             try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
-            try {
-              window.__capTimer = setTimeout(() => {
-                try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
-              }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
-            } catch {}
+              try {
+                // Allow longer grace so FE summary can finalize at lower FPS
+                const grace = Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 3200));
+                window.__capTimer = setTimeout(() => {
+                  try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
+                }, grace);
+              } catch {}
             // swallow this event to avoid double counting while we await summary
             e.stopImmediatePropagation();
             return;
           }
         } catch {}
 
-        // Proximity sanity: reject releases not preceded by recent prox enter
+        // Proximity sanity (optional): require recent prox enter only when enabled.
+        // Pose-first on mobile may not have reliable ball prox; skip when disabled.
         try {
-          const f = Number(e?.detail?.frame);
-          const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
-          if (!Number.isFinite(f) || !Number.isFinite(enter) || (f - enter) > Number(window.REL_PROX_MAX_LAG_FRAMES || 90)) {
-            window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+          const requireProx = (window.REL_REQUIRE_PROX !== false); // default true unless explicitly disabled
+          if (requireProx) {
+            const f = Number(e?.detail?.frame);
+            const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
+            if (!Number.isFinite(f) || !Number.isFinite(enter) || (f - enter) > Number(window.REL_PROX_MAX_LAG_FRAMES || 90)) {
+              window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+            }
           }
         } catch {}
 
@@ -243,17 +426,25 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         const last= Number(window.__REL_LAST_FIRE_MS || 0);
         if (last && (now - last) < cd) { e.stopImmediatePropagation(); return; }
 
-        // Require hoop + armed
+        // Require hoop + armed (configurable): on iOS we allow no-hoop if user confirmed
         const H = window.getLockedHoopBox?.();
-        if (!H || window.__hoopConfirmed !== true || window.__shotTrackingArmed !== true) {
+        const needHoop = (window.REL_REQUIRE_HOOP !== false); // default true unless explicitly disabled
+        if ((needHoop && !H) || window.__hoopConfirmed !== true || window.__shotTrackingArmed !== true) {
           window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
         }
 
         // Pose-first: only keep releases approved by releaseGate (and 0.26 all-four)
         if (window.POSE_FIRST_ONLY === true) {
+          // Bypass gate completely when explicitly enabled (mobile debug aid)
+          if (window.REL_BYPASS_GATE === true) {
+            window.__poseGateStreak = Number(window.POSE_STREAK_NEED||2);
+            return; // allow event to propagate
+          }
           const hist = (window.playerState?.frameHistory || []).slice(-5);
           let ok = false, t = {};
-          if (typeof window.releaseGate === 'function') {
+          const hint = e?.detail?.gate;
+          if (hint && typeof hint === 'object') { ok = !!hint.released; t = hint.tests || {}; }
+          if (!ok && typeof window.releaseGate === 'function') {
             const g = window.releaseGate(hist) || { released:false, tests:{} };
             ok = !!g.released; t = g.tests || {};
           }
@@ -663,8 +854,10 @@ export async function startCamera() {
   stopCamera();
 
   v.setAttribute('playsinline', '');
+  v.setAttribute('webkit-playsinline', '');
   v.autoplay = true;
   v.muted = true;
+  try { v.controls = false; } catch {}
 
   // Build constraints with preferred deviceId when available
   const preferredId = await pickPreferredCameraId();
@@ -726,10 +919,12 @@ export async function startCamera() {
       }
     } catch (e2) {
       console.warn('[camera] gUM failed (fallback):', e2?.name, e2?.message);
-      const msg = (err?.name === 'NotAllowedError' || e2?.name === 'NotAllowedError')
+      const blocked = (err?.name === 'NotAllowedError' || e2?.name === 'NotAllowedError');
+      const msg = blocked
         ? 'Camera permission blocked — enable camera for this site in your browser settings and reload.'
         : 'No camera found or in use by another app. Check OS permissions and try again.';
-      window.showPrompt?.(msg);
+      try { window.showPrompt?.(msg); } catch {}
+      try { if (blocked) showCameraHelp(); } catch {}
       return false;
     }
   }
@@ -753,9 +948,17 @@ export async function startCamera() {
   
 
   try { await v.play(); } catch (e) {
-    console.warn('[camera] video.play() blocked — call from a user gesture.');
-    // Even if autoplay is blocked, stream is live — clear prompt so user can tap play
-    window.hidePrompt?.();
+    console.warn('[camera] video.play() blocked — waiting for user gesture');
+    // Attach a one‑time gesture to resume playback on iOS Safari
+    const resume = async () => {
+      try { await v.play(); } catch {}
+      try { document.removeEventListener('touchend', resume, true); } catch {}
+      try { document.removeEventListener('click', resume, true); } catch {}
+      try { hideCameraHelp(); } catch {}
+    };
+    document.addEventListener('touchend', resume, true);
+    document.addEventListener('click', resume, true);
+    showCameraHelp();
     return false;
   }
   try { window.hidePrompt?.(); } catch {}
@@ -804,6 +1007,36 @@ export function stopCamera() {
     v.srcObject = null;
   }
 }
+
+// --- Lightweight camera help overlay (iOS permission/autoplay guidance) ---
+function ensureCamHelpNode(){
+  let el = document.getElementById('camHelp');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'camHelp';
+  Object.assign(el.style, {
+    position:'absolute', inset:'0', display:'flex', alignItems:'center', justifyContent:'center',
+    background:'rgba(0,0,0,0.65)', color:'#fff', zIndex:10080, pointerEvents:'auto'
+  });
+  el.innerHTML = `
+    <div style="max-width:520px;padding:18px 20px;border-radius:12px;background:rgba(0,0,0,0.85);border:1px solid rgba(255,255,255,0.18);text-align:center">
+      <div style="font:700 18px system-ui;margin-bottom:8px">Enable Camera</div>
+      <div style="font:500 14px;opacity:.95;margin-bottom:12px">
+        On iPhone, tap <b>Allow</b> when prompted. If you blocked it before, open the <b>AA</b> site settings in Safari and allow Camera. Then tap below.
+      </div>
+      <div style="display:flex;gap:10px;justify-content:center">
+        <button id="camRetry" class="vc-btn">Try Again</button>
+        <button id="camFront" class="vc-btn">Use Front Camera</button>
+      </div>
+    </div>`;
+  const root = document.querySelector('.session-container') || document.body;
+  root.appendChild(el);
+  el.querySelector('#camRetry')?.addEventListener('click', async (e)=>{ e.stopPropagation(); try { hideCameraHelp(); } catch {}; try { stopCamera(); await startCamera(); } catch {} });
+  el.querySelector('#camFront')?.addEventListener('click', async (e)=>{ e.stopPropagation(); try { hideCameraHelp(); } catch {}; try { localStorage.setItem('doach_camera_facing','user'); localStorage.removeItem('doach_camera_id'); stopCamera(); await startCamera(); } catch {} });
+  return el;
+}
+function showCameraHelp(){ try { ensureCamHelpNode().style.display = 'flex'; } catch {} }
+function hideCameraHelp(){ try { const el = document.getElementById('camHelp'); if (el) el.style.display = 'none'; } catch {} }
 
 // Expose selected helpers to window for tests/automation
 try {
@@ -3154,8 +3387,16 @@ if (typeof window.clientToVideoXY !== 'function') {
 
           // Prefer unified releaseGate decision; if gate says released and we are armed, allow latch
           if (latched) {
-            try { if (window.__shotTrackingArmed !== true) latched = false; } catch {}
-            try { if (!H) latched = false; } catch {}
+            try {
+              if (window.__shotTrackingArmed !== true) {
+                if (window.REL_BYPASS_READY === true) { window.__shotTrackingArmed = true; }
+                else { latched = false; }
+              }
+            } catch {}
+            try {
+              const needHoop = (window.REL_REQUIRE_HOOP !== false);
+              if (needHoop && !H) latched = false;
+            } catch {}
           }
           if (latched) {
             try { window.__GATE_LATCH_FRAME = fidx; } catch {}
@@ -3164,9 +3405,10 @@ if (typeof window.clientToVideoXY !== 'function') {
             const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
             const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
             const shouldFire = since >= cd;
-            if (H) {
+            const needHoop = (window.REL_REQUIRE_HOOP !== false);
+            if (H || !needHoop) {
               const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
-                            ? window.proxFromHoop(window.canonHoop(H)) : null;
+                            ? (H ? window.proxFromHoop(window.canonHoop(H)) : null) : null;
               if (shouldFire && (!window.__releaseEventSent)) {
                 const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
                 if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }

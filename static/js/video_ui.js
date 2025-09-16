@@ -1,5 +1,5 @@
 // ✅ [video_ui.js] - Enhancements for DOACH Mobile/Full-Screen Integration
-import { setOverlayInteractive } from './fix_overlay_display.js';
+import { setOverlayInteractive } from './fix_overlay_display.js?v=20250915';
 import { speak } from './coach_voice.js';
 import { arcHeightLabel } from './shot_utils.js';
 import { enableHoopPickOnce } from './app.js';
@@ -8,6 +8,114 @@ import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './ho
 
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection; 
+
+// Optional API base for multi-origin deployments (e.g., www + api subdomain)
+function apiUrl(path){ const base = (typeof window.__API_BASE === 'string') ? window.__API_BASE : ''; return base + path; }
+
+// ───────────────────────────────────────────────────────────────
+// Mobile Debug Badge — iOS friendly, no-console diagnostics
+// ───────────────────────────────────────────────────────────────
+function isIOS(){
+  try {
+    const ua = navigator.userAgent || '';
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  } catch { return false; }
+}
+
+export function mountMobileDebugBadge(){
+  try {
+    const root = ensureHudRoot();
+    let box = document.getElementById('mobileDbg');
+    if (box) return box;
+    box = document.createElement('div');
+    box.id = 'mobileDbg';
+    Object.assign(box.style, {
+      position:'absolute', left:'10px', bottom:'76px', zIndex:10070,
+      background:'rgba(0,0,0,0.72)', color:'#fff', padding:'8px 10px', borderRadius:'10px',
+      font:'600 12px system-ui, -apple-system, Segoe UI', pointerEvents:'auto', width:'min(86vw, 420px)'
+    });
+    box.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+        <span id="mdgReady">Ready: -</span>
+        <span id="mdgArmed">Armed: -</span>
+        <span id="mdgWarm">Warm: -</span>
+        <span id="mdgDet">Det: -</span>
+      </div>
+      <div id="mdgGate" style="opacity:.9;margin-top:6px">Gate: -</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="vc-btn" id="mdgArm">Arm</button>
+        <button class="vc-btn" id="mdgConfirm">Confirm Hoop</button>
+        <button class="vc-btn" id="mdgRelax">Relax Gate</button>
+        <button class="vc-btn" id="mdgBypass">Bypass Gate</button>
+        <button class="vc-btn" id="mdgSpeak">Speak</button>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+        <button class="vc-btn" id="mdgTest">Test Release</button>
+        <button class="vc-btn" id="mdgSummary">Summary</button>
+        <button class="vc-btn" id="mdgHide">Hide</button>
+      </div>`;
+    root.appendChild(box);
+
+    const $ = (id) => box.querySelector('#'+id);
+    $('#mdgHide')?.addEventListener('click', ()=>{ box.style.display='none'; localStorage.setItem('doach_mobile_debug','0'); });
+    $('#mdgSpeak')?.addEventListener('click', ()=>{ try { window.coachSpeak?.('Ready when you are.'); } catch {} });
+    $('#mdgArm')?.addEventListener('click', ()=>{
+      try { window.__hoopConfirmed = true; } catch {}
+      try { window.__POSE_WARMUP_OK = true; } catch {}
+      try { window.__shotTrackingArmed = true; } catch {}
+      try { window.__readyForScoring = true; } catch {}
+    });
+    $('#mdgConfirm')?.addEventListener('click', ()=>{ try { window.__hoopConfirmed = true; } catch {} });
+    $('#mdgRelax')?.addEventListener('click', ()=>{
+      try { setReleaseKnobs?.({ streakNeed:1, yTol:10, shYTol:10, dxMax:105, dyMin:12 }); } catch {}
+      try { window.POSE_FIRST_ONLY = true; } catch {}
+      try { window.REL_REQUIRE_PROX = false; } catch {}
+    });
+    $('#mdgBypass')?.addEventListener('click', ()=>{ try { window.REL_BYPASS_GATE = !window.REL_BYPASS_GATE; window.REL_BYPASS_READY = window.REL_BYPASS_GATE; } catch {} });
+    $('#mdgSummary')?.addEventListener('click', ()=>{ try { renderFullShotTable(); } catch {} });
+    $('#mdgTest')?.addEventListener('click', ()=>{
+      try {
+        // Ensure basic preconditions
+        window.__hoopConfirmed = true; window.__shotTrackingArmed = true; window.__POSE_WARMUP_OK = true;
+        const f = Number(window.__AN_IDX || 0);
+        // Allow bypass if enabled; else try safe path
+        const ok = window.safeEmitRelease?.(f, 'mobile-debug') || false;
+        if (!ok && window.REL_BYPASS_GATE === true) {
+          (window.__markReleasePose || window.markRelease)?.(f, { via:'mobile-debug' });
+          window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame:f, via:'mobile-debug' } }));
+        }
+      } catch {}
+    });
+
+    function refresh(){
+      try {
+        const ready = !!window.__readyForScoring; const armed = !!window.__shotTrackingArmed; const warm = !!window.__POSE_WARMUP_OK;
+        $('#mdgReady').textContent = 'Ready: ' + (ready?'yes':'no');
+        $('#mdgArmed').textContent = 'Armed: ' + (armed?'yes':'no');
+        $('#mdgWarm').textContent  = 'Warm: '  + (warm?'yes':'no');
+        const src = (window.__detCache && window.__detCache._source) || '-';
+        $('#mdgDet').textContent   = 'Det: '   + src;
+        let gateTxt = 'Gate: -';
+        try {
+          const hist = (window.playerState?.frameHistory || []).slice(-5);
+          if (typeof window.releaseGate === 'function') {
+            const g = window.releaseGate(hist) || { released:false, tests:{} };
+            const t = g.tests||{}; const useUp = (window.REL_SCORE_USE_UPTREND === true);
+            const wA=0.26,wB=0.26,wC=0.26,wD=0.26, sc=(t.wristAboveElbow?wA:0)+(t.elbowExtended?wB:0)+(t.alignOK?wC:0)+((useUp?t.wristUpTrend:t.wristAboveShoulder)?wD:0);
+            gateTxt = `Gate: ${g.released?'OK':'no'}  score=${(sc||0).toFixed(2)}  streak=${window.__poseGateStreak||0}${window.REL_BYPASS_GATE?' (bypass)':''}`;
+          }
+        } catch {}
+        $('#mdgGate').textContent = gateTxt;
+      } catch {}
+      requestAnimationFrame(refresh);
+    }
+    // rAF + interval backstop for iOS
+    refresh();
+    try { clearInterval(box.__iv); } catch {}
+    box.__iv = setInterval(() => { try { refresh(); } catch {} }, 600);
+    return box;
+  } catch { return null; }
+}
 
 // ---------------------------------------------------------------
 // Connection banner: show backend origin and active session id
@@ -25,7 +133,8 @@ function mountConnectionBanner() {
         position: 'absolute', top: '8px', left: '10px',
         padding: '6px 8px', font: '600 11px system-ui',
         zIndex: 10080, pointerEvents: 'auto',
-        opacity: 0.95
+        opacity: 0.95,
+        maxWidth: '96vw', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'
       });
       root.appendChild(box);
     }
@@ -39,6 +148,9 @@ function mountConnectionBanner() {
       `&nbsp;&nbsp;<span style="opacity:.9">sid:</span> <span id="connSidVal" style="font-weight:700">${sid}</span>`,
       debugHref ? `&nbsp;<a id="connDbg" href="${debugHref}" target="_blank" style="text-decoration:none">debug</a>` : '',
       `&nbsp;<a id="connHealth" href="${healthHref}" target="_blank" style="text-decoration:none">health</a>`,
+      `&nbsp;<span id="connGateSrv" style="opacity:.9">srv: —</span>`,
+      `&nbsp;<button id="connMD" class="vc-btn" title="Mobile Debug" style="padding:0 6px">MD</button>`,
+      
       `&nbsp;<button id="connHide" class="vc-btn" title="Hide" style="padding:0 6px">×</button>`
     ].join('');
     box.innerHTML = html;
@@ -50,6 +162,12 @@ function mountConnectionBanner() {
         localStorage.setItem('doach_hide_conn_banner', '1');
         box.style.display = 'none';
       }, { once: true });
+      box.querySelector('#connMD')?.addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        try { localStorage.setItem('doach_mobile_debug', '1'); } catch {}
+        try { const md = window.mountMobileDebugBadge?.(); if (md) md.style.display = 'block'; } catch {}
+      });
+      // Force button handler removed to avoid fabricating rows
     } catch {}
 
     // Live update when SID changes
@@ -66,12 +184,145 @@ function mountConnectionBanner() {
           if (a) a.setAttribute('href', `/admin/session/${curSid}/debug`);
           box.style.display = ((localStorage.getItem('doach_hide_conn_banner') === '1') && (window.SHOW_CONN_BANNER !== true)) ? 'none' : 'block';
         }
+        // Update server gate status indicator
+        const el = box.querySelector('#connGateSrv');
+        if (el) {
+          const st = window.__GATE_SRV || null;
+          if (st && st.ts) {
+            const age = Math.max(0, Math.round((Date.now() - st.ts)/1000));
+            let txt = `srv:${st.released?'rel':'tick'}`;
+            if (st.idx != null) txt += `#${st.idx}`;
+            txt += ` ${age}s`;
+            el.textContent = txt;
+            el.style.color = st.released ? '#22c55e' : '#ccc';
+          } else {
+            el.textContent = 'srv: —'; el.style.color = '#ccc';
+          }
+        }
       } catch {}
     }, 800);
 
   } catch {}
 }
 window.mountConnectionBanner = mountConnectionBanner;
+
+// Ensure a backend session exists as soon as hoop locks (iOS server-gate needs SID)
+try {
+  window.addEventListener('hoop:locked', async () => {
+    try { if (typeof ensureSessionId === 'function') await ensureSessionId(); } catch {}
+    try { startServerShotPoll(); } catch {}
+  }, { passive:true });
+} catch {}
+
+// Also ensure a SID when the HUD session starts (belt & suspenders)
+try {
+  window.addEventListener('hud:start-session', async () => {
+    try { if (typeof ensureSessionId === 'function') await ensureSessionId(); } catch {}
+    try { startServerShotPoll(); } catch {}
+  }, { passive:true });
+} catch {}
+
+// ───────────────────────────────────────────────────────────────
+// Server-mode hydrator: poll backend rows and keep HUD/coach in sync on iOS
+// ───────────────────────────────────────────────────────────────
+let __srvPoll = null;
+async function pollServerShotsOnce(){
+  try {
+    const sid = (window.__SESSION_ID || null); if (!sid) return;
+    const r = await fetch(apiUrl(`/admin/session/${sid}/debug`), { credentials:'include' });
+    if (!r.ok) return; const j = await r.json();
+    const sdb = Array.isArray(j?.shotsDB) ? j.shotsDB : [];
+    const sjs = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots : [];
+    const rawCount = Math.max(sdb.length, sjs.length);
+    // Only treat rows with actual metrics as "taken" to avoid phantom counts
+    const hasMetrics = (row) => (
+      typeof row?.made === 'boolean' || row?.entryAngle != null || row?.releaseAngle != null || row?.arcHeight != null
+    );
+    const dbTaken = sdb.filter(hasMetrics).length;
+    const sjTaken = sjs.filter(hasMetrics).length;
+    const takenCount = Math.max(dbTaken, sjTaken);
+    if (!rawCount && !takenCount) return;
+
+    // Track previous raw count for diagnostics
+    window.__srvPrevShotsCount = Number(rawCount);
+
+    const list = (window.__shotList ||= []);
+    const localSeen = (window.__localReleaseSeen === true);
+    const disableCounts = (window.DISABLE_SERVER_COUNT === true);
+    // If we've seen a local release, do not let server grow the list beyond local count
+    const allowGrow = !localSeen;
+    const growTo = allowGrow ? takenCount : Math.min(takenCount, list.length);
+    if (!disableCounts && list.length < growTo) {
+      for (let i = list.length; i < growTo; i++) list.push({ pending: true, via: 'server-poll' });
+    }
+
+    // Keep canonical HUD counter in sync with takenCount
+    try {
+      const before = Number(window.__SCORE_SHOT_COUNT || 0);
+      const target = disableCounts ? before : (localSeen ? Math.max(before, list.length) : Math.max(before, takenCount));
+      if (target > before) {
+        window.__SCORE_SHOT_COUNT = target;
+        window.__SCORE_FLASH_UNTIL = performance.now() + Math.max(400, Number(window.SCORE_FLASH_MS || 1200));
+      }
+    } catch {}
+
+    // Emit synthetic summaries for rows that provide metrics
+    try {
+      window.__srvSummarySent ||= new Set();
+      for (const row of sdb) {
+        const i0 = Number(row?.idx);
+        if (!Number.isFinite(i0)) continue;
+        if (hasMetrics(row) && !window.__srvSummarySent.has(i0)) {
+          const uiIdx = Math.min(Math.max(1, i0 + 1), Math.max(list.length, takenCount));
+          const shot = (list[uiIdx-1] ||= {});
+          if (typeof row.made === 'boolean') shot.made = row.made;
+          if (row.arcHeight != null)  shot.arcHeight = row.arcHeight;
+          if (row.entryAngle != null) shot.entryAngle = row.entryAngle;
+          if (row.releaseAngle != null) shot.releaseAngle = row.releaseAngle;
+          try { window.dispatchEvent(new CustomEvent('shot:summary', { detail: { made: row.made ?? null, arcHeight: row.arcHeight ?? null, entryAngle: row.entryAngle ?? null, releaseAngle: row.releaseAngle ?? null } })); } catch {}
+          window.__srvSummarySent.add(i0);
+        }
+      }
+    } catch {}
+
+    // Update HUD numbers to reflect takenCount only
+    try {
+      const effTaken = localSeen ? list.length : takenCount;
+      const made = list.filter(s => s.made).length;
+      const acc  = effTaken ? Math.round((made / effTaken) * 100) : 0;
+      const start = (window.__sessionStart ||= Date.now());
+      const elapsedSec = Math.floor((Date.now() - start) / 1000);
+      window.updateSessionHUD?.({ taken: (disableCounts ? (list.length) : effTaken), made, accuracy: acc, elapsedSec });
+    } catch {}
+
+    // Auto-end when takenCount hits cap
+    try {
+      const cap = Number(window.SESSION_SIZE || 10);
+      const effTaken = localSeen ? list.length : takenCount;
+      if (!disableCounts && Number.isFinite(cap) && effTaken >= cap && window.__summaryShown !== true) {
+        window.__sessionCapped = true;
+        if (window.__capTimer) clearTimeout(window.__capTimer);
+        const grace = Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 3200));
+        window.__capTimer = setTimeout(() => { try { if (window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {} }, grace);
+      }
+    } catch {}
+  } catch {}
+}
+
+export function startServerShotPoll(){
+  try { if (__srvPoll) return; } catch {}
+  __srvPoll = setInterval(pollServerShotsOnce, 1400);
+}
+export function stopServerShotPoll(){ if (__srvPoll) { clearInterval(__srvPoll); __srvPoll = null; } }
+
+// Once we see a real local release, prefer local counts over server to avoid
+// early increments from server rows with looser thresholds.
+try {
+  if (!window.__srvLocalLatchWired) {
+    window.__srvLocalLatchWired = true;
+    window.addEventListener('shot:release', () => { try { window.__localReleaseSeen = true; } catch {} });
+  }
+} catch {}
 
 // Slow_arbiter.js — make sure it reads SLOW_RATE
 (function installSlowArbiter(){  
@@ -103,70 +354,20 @@ window.mountConnectionBanner = mountConnectionBanner;
     console.log('[video_ui] shot:release()');
   });
 
-  // HUD counters: reflect shot in-progress on release
+  // HUD counters: reflect shot in-progress on release (UI-only; avoid list duplication)
   try {
     if (!window.__hudReleaseWired) {
       window.__hudReleaseWired = true;
-  window.addEventListener('shot:release', (e) => {
+      window.addEventListener('shot:release', (e) => {
         try {
-          // Cap session at SESSION_SIZE shots
-          try {
-            const cap = Number(window.SESSION_SIZE || 10);
-            const cur = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
-            if (cur >= cap) return;
-          } catch {}
-          // Auto-create a backend session if missing
-          try { ensureSessionId(); } catch {}
-          // Ignore any release before hoop is confirmed/locked
-          if (window.__hoopConfirmed !== true) return;
-          if (!window.getLockedHoopBox?.()) return;
-          if (window.__shotTrackingArmed !== true) return;
-          // Require live pose before logging
-          try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
-          // UI cooldown only; trust the upstream release latch
-          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 3000);
-          const now = performance.now();
-          const lastUiMs = Number(window.__UI_LAST_RELEASE_MS || 0);
-          if (now - lastUiMs < unlockMs) return; // UI cooldown: ignore rapid repeats
-
-          // Trust upstream latch; UI enforces only armed + hoop + cooldown
-
-          // Ensure a pending shot record exists immediately on pose release
-          const list = (window.__shotList ||= []);
-          const rf = Number(e?.detail?.frame || 0);
-          const lastEntry = list.at?.(-1) || null;
-          const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
-          if (!same) {
-            const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-              ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-              : null;
-            list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
-            try { console.log('[HUD:add-pending]', { frame: rf, len: list.length }); } catch {}
-            try { window.__SHOT_IDX = (list.length - 1); } catch {}
-          }
-          window.__UI_LAST_RELEASE_MS = now;
-          const taken = list.length;
-          const made = (window.shotLog?.filter?.(s => s.made).length || 0);
-          const acc = taken ? Math.round((made / taken) * 100) : 0;
+          // Keep HUD numbers in sync without mutating __shotList here
+          const list = (window.__shotList || []);
+          const taken = Math.max(list.length, Number(window.__SCORE_SHOT_COUNT || 0));
+          const made  = (window.shotLog?.filter?.(s => s.made).length || 0);
+          const acc   = taken ? Math.round((made / taken) * 100) : 0;
           window.mountSessionHUD?.();
           window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
-          window.setSessionStatus?.('Shot ' + taken + ' in progress');
-          // Auto end at cap — wait for the last summary or fall back after a short grace
-          try {
-            const cap = Number(window.SESSION_SIZE || 10);
-            const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-            if (Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
-              try { window.__sessionCapped = true; } catch {}
-              try { window.__capAwait = true; } catch {}
-              // Do NOT stop camera/analyzer yet; allow final summary to emit
-              try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
-              try {
-                window.__capTimer = setTimeout(() => {
-                  try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
-                }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
-              } catch {}
-            }
-          } catch {}
+          window.setSessionStatus?.('Shot ' + Math.max(1, taken) + ' in progress');
         } catch {}
       });
     }
@@ -242,32 +443,19 @@ window.mountConnectionBanner = mountConnectionBanner;
 
     window.addEventListener('shot:release', (e) => {
       try {
-        // Ignore any release before hoop is confirmed/locked
-        if (window.__hoopConfirmed !== true) return;
-        if (!window.getLockedHoopBox?.()) return;
-        // Ensure a pending shot record exists immediately on pose release
-        const list = (window.__shotList ||= []);
-        const rf = Number(e?.detail?.frame || 0);
-        const lastEntry = list.at?.(-1) || null;
-        const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
-        if (!same) {
-          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-            : null;
-          list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
-          try { window.__SHOT_IDX = (list.length - 1); } catch {}
-        }
-        const taken = list.length;
-        const made = (window.shotLog?.filter?.(s => s.made).length || 0);
-        const acc  = taken ? Math.round((made / taken) * 100) : 0;
+        // UI-only refresh; canonical list/counters are updated elsewhere
+        const list = (window.__shotList || []);
+        const taken = Math.max(list.length, Number(window.__SCORE_SHOT_COUNT || 0));
+        const made  = (window.shotLog?.filter?.(s => s.made).length || 0);
+        const acc   = taken ? Math.round((made / taken) * 100) : 0;
         window.mountSessionHUD?.();
         window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
-        window.setSessionStatus?.('Shot ' + taken + ' in progress');
+        window.setSessionStatus?.('Shot ' + Math.max(1, taken) + ' in progress');
 
         // HARD STOP at cap: lock session and present summary
         try {
           const cap = Number(window.SESSION_SIZE || 10);
-          const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
+          const count = Math.max(taken, Number(window.__SCORE_SHOT_COUNT || 0));
           if (Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
             try { window.__sessionCapped = true; } catch {}
             try { window.__sessionEnded = true; } catch {}
@@ -722,7 +910,7 @@ window.startObserverStreaming = function startObserverStreaming(fps = 2){
           if (!blob) return;
           const fd = new FormData();
           fd.append('image', blob, 'frame.jpg');
-          await fetch(`/api/sessions/${sid}/observer_frame`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
+          await fetch(apiUrl(`/api/sessions/${sid}/observer_frame`), { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
         }, 'image/jpeg', 0.65);
       } catch {}
     }, period);
@@ -735,7 +923,7 @@ window.stopObserverStreaming = function stopObserverStreaming(){ if (__observerT
 async function ensureSessionId(){
   try {
     if (window.__SESSION_ID) return window.__SESSION_ID;
-    const r = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ device: navigator.userAgent }), credentials:'include' });
+    const r = await fetch(apiUrl('/api/sessions/start'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ device: navigator.userAgent }), credentials:'include' });
     if (!r.ok) return null;
     const j = await r.json();
     window.__SESSION_ID = j?.id || null; window.__SHOT_IDX = 0;
@@ -1325,7 +1513,7 @@ window.recordShotSummary = async function recordShotSummary(summary) {
         releaseAngle: (summary?.releaseAngle ?? null),
         missReason: (summary?.missReason ?? null)
       };
-      fetch(`/api/sessions/${sid}/shot`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+      fetch(apiUrl(`/api/sessions/${sid}/shot`), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
     }
   } catch {}
 };
@@ -1455,6 +1643,12 @@ export function initHUDForVideo(videoEl) {
   videoEl?.addEventListener('loadeddata', () => {
     ensureHudRoot();
     try { mountConnectionBanner(); } catch {}
+    // Do not auto-show mobile debug HUD; only show when explicitly requested
+    try {
+      const q = new URLSearchParams(location.search||'');
+      const want = (q.get('mobiledebug')==='1') || (localStorage.getItem('doach_mobile_debug')==='1');
+      if (want) { localStorage.setItem('doach_mobile_debug','1'); mountMobileDebugBadge(); }
+    } catch {}
     startHoopPromptLoop();
     showCenterCountdownAndPrompt();
     setOverlayInteractive(true);
@@ -1464,6 +1658,12 @@ export function initHUDForVideo(videoEl) {
   if (videoEl?.readyState >= 2) {
     ensureHudRoot();
     try { mountConnectionBanner(); } catch {}
+    // Do not auto-show mobile debug HUD by default
+    try {
+      const q = new URLSearchParams(location.search||'');
+      const want = (q.get('mobiledebug')==='1') || (localStorage.getItem('doach_mobile_debug')==='1');
+      if (want) { localStorage.setItem('doach_mobile_debug','1'); mountMobileDebugBadge(); }
+    } catch {}
     startHoopPromptLoop();
     showCenterCountdownAndPrompt();
     setOverlayInteractive(true);
@@ -1532,7 +1732,7 @@ export function initHUDForVideo(videoEl) {
                 if (sid && blob && blob.size) {
                   const fd = new FormData();
                   fd.append('file', blob, `shot_${idxHint}.webm`);
-                  await fetch(`/api/sessions/${sid}/shot_video?index=${idxHint}`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
+          await fetch(apiUrl(`/api/sessions/${sid}/shot_video?index=${idxHint}`), { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
                 }
               } catch {}
               finally { try { window.__liveRec = null; } catch {} resolve(); }
@@ -1588,7 +1788,7 @@ export function initHUDForVideo(videoEl) {
       }
     } catch {}
     // End server session to update totals
-    try { const sid = window.__SESSION_ID; if (sid) await fetch(`/api/sessions/${sid}/end`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}', credentials:'include' }).catch(()=>{}); } catch {}
+    try { const sid = window.__SESSION_ID; if (sid) await fetch(apiUrl(`/api/sessions/${sid}/end`), { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}', credentials:'include' }).catch(()=>{}); } catch {}
     // Show summary table (ensure above blackout)
     try {
       const modal = renderFullShotTable();
@@ -2360,7 +2560,7 @@ window.addEventListener('shot:summary', () => {
             hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
             gate: (window.__LAST_GATE || null)
           };
-          await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+          await fetch(apiUrl('/api/release_mark'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
         } catch {}
       })();
 
@@ -2445,7 +2645,7 @@ window.addEventListener('shot:summary', () => {
             hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
             gate: (window.__LAST_GATE || null)
           };
-          await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
+          await fetch(apiUrl('/api/release_mark'), { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
         } catch {}
       })();
       // Auto end at cap
