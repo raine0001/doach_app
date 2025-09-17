@@ -28,9 +28,9 @@ Thumbs.db
 playwright-report/
 test-results/
 
-# ── Runtime/training artifacts
+# ── Runtime / training artifacts
 uploads/
-static/videos/       # your upload dir
+static/videos/       # user uploads
 frame_cache/
 frames/
 datasets/
@@ -40,47 +40,27 @@ weights/
 logs/
 videos/
 data/
-node_modules/
 artifacts/
-__pycache__/
-*.log
-.venv
-.vscode/
 sessions/
 tests/
 tools/
 
-# ── Big binaries (block by default; use LFS if you need them)
+# ── Big binaries (block by default; use Git LFS if you really need them)
 *.zip
 *.webm
 *.mp4
 *.onnx
 *.pt
 
-# ── CI (uncomment to ignore actions; keep commented if you use them)
-.github/workflows/
+# ── CI (uncomment if you don’t want workflows in the repo)
+# .github/workflows/
 
-# ── Project-specific (optional)
- playwright.config.js
- playwright.config.ts
- prepare_gpt_yolo_dataset.py
- train.py
- skipped_frames.txt
- PA_app.py
- ACCEPTANCE_CRITERIA.md
- skipped_frames.json
-
-
-# ── Secrets
-.env
-.env.*.local
-
-
-.env
-.env.*.local
-playwright-report/
-test-results/
-
-
-NUL
-
+# ── Project-specific (verify with team)
+playwright.config.js
+playwright.config.ts
+prepare_gpt_yolo_dataset.py
+train.py
+skipped_frames.txt
+skipped_frames.json
+PA_app.py
+ACCEPTANCE_CRITERIA.md
