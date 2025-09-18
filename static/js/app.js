@@ -140,10 +140,19 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         // Hard stop at session cap/end
         if (window.__sessionEnded === true || (window.__sessionCapped === true && window.__sessionContinue !== true)) return false;
         try {
-          const cap   = Number(window.SESSION_SIZE || 10);
+          const capSrc = (typeof window.getSessionCap === 'function')
+            ? window.getSessionCap()
+            : (window.SESSION_SIZE ?? 10);
+          const cap   = Number(capSrc);
           const taken = Array.isArray(window.__shotList) ? window.__shotList.length : Number(window.__SCORE_SHOT_COUNT || 0);
           // Block when we've already logged cap attempts; the current (cap-th) release occurs when taken == cap-1
-          if (Number.isFinite(cap) && taken >= cap && window.__sessionContinue !== true) { try { window.autoEndSessionAndSummarize?.(); } catch {} return false; }
+          if (window.__sessionContinue === true) {
+            try { window.__sessionCapped = false; } catch {}
+            try { window.__capAwait = false; } catch {}
+          } else if (Number.isFinite(cap) && taken >= cap) {
+            try { window.autoEndSessionAndSummarize?.(); } catch {}
+            return false;
+          }
         } catch {}
 
         // Basic preconditions
@@ -208,12 +217,18 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         if (window.__sessionEnded === true || (window.__sessionCapped === true && window.__sessionContinue !== true)) { e.stopImmediatePropagation(); return; }
         if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
           try {
-            const cap   = Number(window.SESSION_SIZE || 10);
+            const capSrc = (typeof window.getSessionCap === 'function')
+              ? window.getSessionCap()
+              : (window.SESSION_SIZE ?? 10);
+            const cap   = Number(capSrc);
             const taken = Math.max(
               Array.isArray(window.__shotList) ? window.__shotList.length : 0,
               Number(window.__SCORE_SHOT_COUNT || 0)
             );
-            if (Number.isFinite(cap) && taken >= cap && window.__sessionContinue !== true) {
+            if (window.__sessionContinue === true) {
+              try { window.__sessionCapped = false; } catch {}
+              try { window.__capAwait = false; } catch {}
+            } else if (Number.isFinite(cap) && taken >= cap) {
               // Do NOT end immediately; wait for final summary with a grace timer
               try { window.__sessionCapped = true; } catch {}
               try { window.__capAwait = true; } catch {}

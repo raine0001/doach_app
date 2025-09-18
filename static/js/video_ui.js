@@ -7,7 +7,10 @@ import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './ho
 
 
 window.getLockedHoopBox = getLockedHoopBox;
-window.handleHoopSelection = handleHoopSelection; \r\ntry { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = true; } catch {}\r\nconst shouldEnforceSessionCap = () => window.__sessionContinue !== true;\r\n\r\n// ---------------------------------------------------------------
+window.handleHoopSelection = handleHoopSelection;
+try { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = true; } catch {}
+const shouldEnforceSessionCap = () => window.__sessionContinue !== true;
+
 // Connection banner: show backend origin and active session id
 // ---------------------------------------------------------------
 function mountConnectionBanner() {
@@ -311,6 +314,7 @@ window.setFBFRate = (fps) => {
 
 const SESSION_SIZE_DEFAULT = 10;  // default cap if nothing else provided
 function getSessionCap() {
+  if (window.__sessionContinue === true) return Infinity;
   // Query-string override (?cap=3)
   try {
     const q = new URLSearchParams(location.search || '');
@@ -1335,10 +1339,17 @@ window.recordShotSummary = async function recordShotSummary(summary) {
   } catch {}
 
   // End-of-session prompt at 10 shots; reuse central prompt logic
-  if (taken === getSessionCap() && !window.__sessionContinue && !window.__sessionCapPrompted) {
+  const capNow = getSessionCap();
+  if (shouldEnforceSessionCap() && taken === capNow && !window.__sessionCapPrompted) {
     window.__sessionCapPrompted = true;
-    try { window.dispatchEvent(new Event('doach:show-cap-prompt')); } catch {}
-    try { window.autoEndSessionAndSummarize?.(); } catch {}
+    try { window.dispatchEvent(new CustomEvent('doach:show-cap-prompt', { detail: { cap: capNow, taken } })); } catch {}
+    if (window.__sessionContinue === true) {
+      window.__sessionCapPrompted = false;
+      try { window.__sessionCapped = false; } catch {}
+      try { window.__capAwait = false; } catch {}
+    } else {
+      try { window.autoEndSessionAndSummarize?.(); } catch {}
+    }
   }
 
   // Persist summary to backend even if no shot:summary event fired
@@ -2593,6 +2604,7 @@ window.addEventListener('shot:summary', () => {
     }
   } catch {}
 });
+
 
 
 
