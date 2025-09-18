@@ -13,17 +13,17 @@ export function initReleaseConfig() {
   const cfg = Object.assign({
     yTol:            IN_PROBE ? 10  : 14,   // px (wrist above elbow)
     shYTol:          IN_PROBE ? 8   : 10,   // px (wrist above shoulder)
-    elbowExtMin:     IN_PROBE ? 110 : 135,  // deg (counts in posture)
-    elbowStrictMin:  IN_PROBE ? 130 : 145,  // deg (strict latch rule)
+    elbowExtMin:     IN_PROBE ? 130 : 145,  // deg (counts in posture)
+    elbowStrictMin:  IN_PROBE ? 120 : 135,  // deg (strict latch rule)
     dxMax:           IN_PROBE ? 105 : 60,   // px (vertical-ish)
     dyMin:           IN_PROBE ? 12  : 18,   // px (vertical-ish)
     extMargin:       10,                    // px (extension margin)
     upDy:            IN_PROBE ? 4   : 6,    // px (uptrend per sample)
     // Using 0.26 per-component weights yields ~1.04 when all four are satisfied
-    scoreThresh:     1.0,                 // require all-four by default
+    scoreThresh:      .99,                 // require all-four by default
     hudScoreTrip:    0.78,                 // HUD pulse/log threshold (diagnostic/UI only)
     streakNeed:      IN_PROBE ? 1   : 2,
-    cooldownMs:      1400,
+    cooldownMs:      1100,
   }, (window.REL_CFG || {}));
   // Leave HUD trip independent; callers may set equal at runtime via setReleaseKnobs
 
@@ -252,5 +252,12 @@ try {
   if (typeof window.initReleaseConfig !== 'function') window.initReleaseConfig = initReleaseConfig;
 } catch {}
 
-setReleaseKnobs({ hudScoreTrip: getReleaseKnobs().scoreThresh });  // e.g., both ~1.0
+try {
+  initReleaseConfig();
+} catch {}
+try {
+  const base = getReleaseKnobs();
+  const trip = Number(base.scoreThresh);
+  if (Number.isFinite(trip)) setReleaseKnobs({ hudScoreTrip: trip });  // e.g., both ~1.0
+} catch {}
 

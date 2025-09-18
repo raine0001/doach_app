@@ -1043,6 +1043,54 @@ def api_coach():
 
     return jsonify({"text": text, "latency_ms": dt_ms})
 
+@app.post("/api/coach/finalize")
+def api_coach_finalize():
+    data = request.get_json(force=True, silent=True) or {}
+    sid = (data.get('sid') or '').strip() or None
+    shot_idx_raw = data.get('shot_idx')
+    text = (data.get('text') or '').strip()
+    provider = data.get('provider') or 'client-final'
+    model = data.get('model') or 'coach-final'
+    latency_ms = int(data.get('latency_ms') or 0)
+    if not sid or text == '' or shot_idx_raw is None:
+        return jsonify({'error': 'sid, shot_idx, and text are required'}), 400
+    try:
+        shot_idx = int(shot_idx_raw)
+    except (TypeError, ValueError):
+        return jsonify({'error': 'shot_idx must be an integer'}), 400
+    try:
+        db = _db_get()
+        if not db:
+            return jsonify({'ok': False, 'warning': 'database unavailable', 'text': text})
+        from sqlalchemy import select
+        with db['Session']() as sdb:
+            FB = db.get('CoachFeedbackRow')
+            if FB is not None:
+                row = sdb.execute(select(FB).where(FB.sid == sid, FB.shot_idx == shot_idx).order_by(FB.id.desc())).scalars().first()
+                if row:
+                    row.text = text
+                    row.provider = provider
+                    if model: row.model = model
+                    if latency_ms: row.latency_ms = latency_ms
+                else:
+                    sdb.add(FB(sid=sid, shot_idx=shot_idx, provider=provider, model=model, latency_ms=latency_ms, text=text))
+            Shot = db.get('ShotRow')
+            if Shot is not None:
+                sr = sdb.execute(select(Shot).where(Shot.sid == sid, Shot.idx == shot_idx)).scalar_one_or_none()
+                if sr is None:
+                    sr = Shot(sid=sid, idx=shot_idx, data={})
+                    sdb.add(sr)
+                try:
+                    payload = dict(sr.data or {})
+                    payload['coach_summary'] = text
+                    sr.data = payload
+                except Exception:
+                    sr.data = {'coach_summary': text}
+            sdb.commit()
+        return jsonify({'ok': True})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 #-----------app routes --------------
 @app.route('/frames/<video_name>/<frame_file>')
 def serve_frame(video_name, frame_file):
@@ -1291,7 +1339,8 @@ def admin_users():
         if db:
             from sqlalchemy import select, func
             with db['Session']() as s:
-                U = db['User']; SR = db['SessionRow']
+                U = db['User']
+                SR = db['SessionRow']
                 rows = s.execute(select(U)).scalars().all()
                 for u in rows:
                     cnt = s.execute(select(func.count(SR.sid)).where(SR.user_id==u.user_id)).scalar_one() or 0

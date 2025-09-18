@@ -29,6 +29,11 @@ function ensureBallLatches() {
 }
 
 
+function shouldDeferSummaries() {
+  try { if (window.SESSION_MANAGER_OWNS_ENDING === true) return false; } catch {}
+  return window.DEFER_FE_SUMMARY === true;
+}
+
 const updateCoachNotes = (...args) => window.updateCoachNotes?.(...args);
 
 // ===== State =====
@@ -439,7 +444,7 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
         (frozen?.trail?.length >= 3) ? frozen.trail :
         (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
 
-      if (!window.DEFER_FE_SUMMARY) {
+      if (!shouldDeferSummaries()) {
         if (trailForLog) {
           try {
             shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null;
@@ -466,7 +471,7 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
             shotRecord.clip = { start, end };
           }
         } catch {}
-        if (!window.DEFER_FE_SUMMARY) {
+        if (!shouldDeferSummaries()) {
           try {
             if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'exit-finalize', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
             window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));
@@ -515,7 +520,7 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
         const trailForLog =
           (frozen?.trail?.length >= 3) ? frozen.trail :
           (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
-        if (!window.DEFER_FE_SUMMARY) {
+        if (!shouldDeferSummaries()) {
           if (trailForLog) { try { shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null; } catch {} }
           if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
         }
@@ -537,7 +542,7 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
               shotRecord.clip = { start, end };
             }
           } catch {}
-          if (!window.DEFER_FE_SUMMARY) {
+          if (!shouldDeferSummaries()) {
             try {
               if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'auto-gap', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
               window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));

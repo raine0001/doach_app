@@ -389,7 +389,10 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
       const a = Math.acos(Math.max(-1, Math.min(1, dot/den))) * 180 / Math.PI;
       // 180° = fully straight
       elbowAngleDeg = a;
-      elbowExtended = elbowAngleDeg >= Number(window.REL_ELBOW_EXT_MIN || 155);
+      const extMin = Number.isFinite(window.REL_ELBOW_EXT_MIN)
+        ? window.REL_ELBOW_EXT_MIN
+        : (Number(window.REL_CFG?.elbowExtMin) || 145);
+      const elbowExtended = Number.isFinite(elbowAngleDeg) && (elbowAngleDeg >= extMin);
     }
     const dx = Math.abs((wr?.x ?? 0) - (sh?.x ?? 0));
     const dy = Math.abs((sh?.y ?? 0) - (wr?.y ?? 0));
@@ -398,8 +401,11 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
     const dSW = Math.hypot((wr?.x ?? 0) - (sh?.x ?? 0), (wr?.y ?? 0) - (sh?.y ?? 0));
     const armExtended = dSW > (dSE + Number(window.REL_EXT_MARGIN || 10));
     const alignOK = nearlyVertical || armExtended;
-    const strictOK = (elbowAngleDeg >= (window.REL_ELBOW_STRICT_MIN || 165)) && wristAboveShoulder;
-
+    const strictMin = Number.isFinite(window.REL_ELBOW_STRICT_MIN)
+      ? window.REL_ELBOW_STRICT_MIN
+      : (Number(window.REL_CFG?.elbowStrictMin) || 135);
+    const strictOK = (Number.isFinite(elbowAngleDeg) && elbowAngleDeg >= strictMin) && wristAboveShoulder;
+    
     // Draw
     const hair = 1 / Math.min(sx, sy);
     ctx.save();
@@ -439,24 +445,24 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
     line(`strict: angle≥${window.REL_ELBOW_STRICT_MIN}° & wr>sh ${strictOK?'✓':'✗'}`, strictOK);
     line(`align: ${(alignOK?'✓':'✗')}  dx=${dx|0} dy=${dy|0}`, alignOK);
     // Compute live gate/score for HUD. Prefer __LAST_GATE (set each tick by the sampler) to avoid drift.
-    let score = 0, th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 0.26);
+    let scoreGate = 0, th = Number((window.REL_CFG?.hudScoreTrip) ?? window.REL_HUD_SCORE_TRIP ?? (window.REL_CFG?.scoreThresh) ?? window.REL_SCORE_THRESH ?? 0.26);
     try {
       const last = (window.__LAST_GATE && window.__LAST_GATE.detail && window.__LAST_GATE.detail.tests) ? window.__LAST_GATE.detail.tests : null;
       if (last && typeof last.score !== 'undefined') {
-        score = Number(last.score || 0);
+        scoreGate = Number(last.score || 0);
         if (window.DOACH_VERBOSE === true && window.DOACH_RELEASE_TRACE === true) {
-          try { console.log('[HUD:gate:last]', { frame: window.__LAST_GATE?.detail?.frame, score, th, tests: last }); } catch {}
+          try { console.log('[HUD:gate:last]', { frame: window.__LAST_GATE?.detail?.frame, score: scoreGate, th, tests: last }); } catch {}
         }
       } else {
         const base = (window.playerState?.frameHistory || []).slice(-5);
         const hist = base.length ? base : (Array.isArray(kps) && kps.length >= 33 ? [{ keypoints: kps }] : []);
         if (typeof window.releaseGate === 'function') {
           const g = window.releaseGate(hist) || { tests:{} };
-          score = Number(g?.tests?.score || 0);
+          scoreGate = Number(g?.tests?.score || 0);
           if (window.DOACH_VERBOSE === true && window.DOACH_RELEASE_TRACE === true) {
             try {
               const lastF = hist.at?.(-1)?.frame ?? null;
-              console.log('[HUD:gate]', { frame:lastF, score, th, tests: g.tests||{}, reason: g.reason, released: g.released, histLen: hist.length });
+              console.log('[HUD:gate]', { frame:lastF, score: scoreGate, th, tests: g.tests||{}, reason: g.reason, released: g.released, histLen: hist.length });
             } catch {}
           }
         }
@@ -485,13 +491,12 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
         (alignOK         ? wC : 0) +
         ((useUp ? wristUpTrend : wristAboveShoulder) ? wD : 0);
       allFour26 = Number.isFinite(scoreLocal26) && Number.isFinite(tot26) && (scoreLocal26 >= (tot26 - 1e-6));
-      // Prefer showing the local score if gate score is missing
-      if (!(score > 0) && Number.isFinite(scoreLocal26)) score = scoreLocal26;
+      // Local score only affects HUD display when gate score is missing
       // if (window.DOACH_RELEASE_TRACE === true) {
       //   try { console.log('[HUD:score-local-26]', { score: +(scoreLocal26||0).toFixed?.(3), tot: +(tot26||0).toFixed?.(3), allFour26 }); } catch {}
       // }
     } catch {}
-    const scoreDisp = Number.isFinite(scoreLocal26) ? scoreLocal26 : score;
+    const scoreDisp = Number.isFinite(scoreLocal26) ? scoreLocal26 : scoreGate;
     line(`score: ${(scoreDisp||0).toFixed(2)} (≥${th})`, (scoreDisp||0) >= th);
 
     // Shot count (HUD-local) (DISABLED by default). Enable with window.HUD_LOCAL_PULSE = true.
@@ -500,12 +505,12 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
       const cdMs   = Number(window.HUD_SHOT_COOLDOWN_MS ?? 2000);
       const nowMs  = performance.now();
       const lastMs = Number(window.__HUD_LAST_SHOT_MS || 0);
-      if (Number(score) >= tripTh - 1e-6 && (nowMs - lastMs >= cdMs)) {
+      if (Number(scoreGate) >= tripTh - 1e-6 && (nowMs - lastMs >= cdMs)) {
         window.__HUD_SHOT_COUNT = (window.__HUD_SHOT_COUNT || 0) + 1;
         window.__HUD_LAST_SHOT_MS = nowMs;
         try { window.shotTaken = Number(window.__HUD_SHOT_COUNT); } catch {}
         try { window.dispatchEvent(new CustomEvent('hud:shot-taken', { detail: { count: Number(window.__HUD_SHOT_COUNT) } })); } catch {}
-        try { window.dispatchEvent(new CustomEvent('hud:score-trip', { detail: { frame: (playerState?.frameIndex || null), score: Number(score) } })); } catch {}
+        try { window.dispatchEvent(new CustomEvent('hud:score-trip', { detail: { frame: (playerState?.frameIndex || null), score: Number(scoreGate) } })); } catch {}
         try {
           const msg = `Shot ${window.__HUD_SHOT_COUNT}`;
           if (typeof window.showCenterPrompt === 'function') {
@@ -514,7 +519,7 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
           }
         } catch {}
         if (window.DOACH_RELEASE_TRACE === true) {
-          try { console.log('[HUD:shot-count]', { count: window.__HUD_SHOT_COUNT, th: tripTh, score: Number(score).toFixed?.(3) }); } catch {}
+          try { console.log('[HUD:shot-count]', { count: window.__HUD_SHOT_COUNT, th: tripTh, score: Number(scoreGate).toFixed?.(3) }); } catch {}
         }
       }
     } catch {} }
@@ -704,8 +709,18 @@ export function drawLiveOverlay(objects = [], playerState) {
     } catch {}
     // Re-draw HUD after coach clear
     drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy);
-    return;
-  }
+    // 👇 Live camera needs background scoring to produce shot:summary
+    try {
+      const H = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
+      const hasTrail = (window.ballState?.trail?.length || 0) > 0;
+      if (H && (hasTrail || (window.lastDetectedFrame?.objects?.length || 0) > 0)) {
+        const fidx = Number(window.__AN_IDX || 0);
+        window.scoringTick?.(fidx);
+        window.checkShotConditions?.(window.ballState, H, fidx);
+      }
+    } catch {}
+     return;
+   }
 
   // Arc-only user mode: render just the ball arc, nothing else
   if (mode === 'arc-only') {

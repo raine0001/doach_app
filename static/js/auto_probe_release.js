@@ -1,4 +1,6 @@
-// auto_probe_release.js — attach live camera release diagnostics automatically
+// auto_probe_release.js — attach live camera release diagnostics automatically - listener for ?probe=release
+// Intended for use in release testing and form analysis
+// Enables local pose detector, quick coach sampler, and release tracing
 (function installAutoProbe(){
   try {
     const qp = new URLSearchParams(location.search||'');

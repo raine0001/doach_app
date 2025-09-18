@@ -1,5 +1,7 @@
 // session_manager.js — Demo Mode FBF sessions (clean arcs + stable accuracy)
 
+import { speak, listenForEndSession } from '/static/js/coach_voice.js';
+
 async function postJSON(url, body) {
   const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}), credentials:'include' });
   if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
@@ -9,9 +11,6 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
   const fd = new FormData(); fd.append(field, blob, filename);
   const r = await fetch(url, { method:'POST', body: fd, credentials:'include' }); if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
 }
-
-import { speak, listenForEndSession } from '/static/js/coach_voice.js';
-import { ensureHudRoot } from '/static/js/video_ui.js';
 
 (function installDemoSession(){
   const btnStart = document.getElementById('btnStartSession');

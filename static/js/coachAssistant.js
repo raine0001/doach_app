@@ -592,7 +592,8 @@ window.addEventListener('shot:summary', (e) => {
         // Pending list length (attempts started)
         if (Array.isArray(window.__shotList)) vals.push(window.__shotList.length);
         // Canonical event-driven counter (shot:release)
-        if (Number.isFinite(Number(window.__SCORE_SHOT_COUNT))) vals.push(Number(window.__SCORE_SHOT_COUNT));
+        if (Number.isFinite(Number(window.__SCORE_SHOT_COUNT))) vals.push(Number(window.__SCORE_SHOT_COUNT));        
+        if (Number.isFinite(Number(window.__SESSION_SHOT_COUNT))) vals.push(Number(window.__SESSION_SHOT_COUNT));
         // Finalized shots in logger (may lag a bit)
         if (Array.isArray(window.shotLog)) vals.push(window.shotLog.length);
         // Legacy HUD/local
@@ -617,6 +618,49 @@ window.addEventListener('shot:summary', (e) => {
     }
 
     const llmMode = (window.DOACH && window.DOACH.llmMode) || 'off';
+
+    const inferShotIdx0 = () => {
+      try { if (Number.isFinite(Number(shot?.coachIdx))) return Number(shot.coachIdx); } catch {}
+      try { if (Number.isFinite(Number(shot?.idx))) return Number(shot.idx); } catch {}
+      try { if (Number.isFinite(Number(shot?.__idx))) return Number(shot.__idx) - 1; } catch {}
+      try { if (Number.isFinite(Number(window.__SHOT_IDX))) return Number(window.__SHOT_IDX); } catch {}
+      try {
+        const n = getShotNumber?.(); // 1-based if available
+        if (Number.isFinite(n) && n > 0) return n - 1;
+      } catch {}
+      try {
+        const len = (window.__shotList?.length || 0);
+        if (len > 0) return Math.max(0, len - 1);
+      } catch {}
+      return 0;
+    };
+
+    const sendCoachFinalize = (finalLine) => {
+      try {
+        const sid = window.__SESSION_ID || null;
+        if (!sid || !finalLine) return;
+        const idxFinal = Number(inferShotIdx0());
+        if (!Number.isFinite(idxFinal)) return;
+        const payload = {
+          sid,
+          shot_idx: idxFinal,
+          text: finalLine,
+          model: window.DOACH?.model || 'coach-final',
+          provider: window.DOACH?.llmMode || 'final'
+        };
+        queueMicrotask(() => {
+          try {
+            fetch('/api/coach/finalize', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(payload),
+              credentials:'include'
+            }).catch(() => {});
+          } catch {}
+        });
+      } catch {}
+    };
+
     // If AI is explicitly off, fall back to local rule-based line immediately
     if (llmMode === 'off') {
       try {
@@ -627,6 +671,7 @@ window.addEventListener('shot:summary', (e) => {
           try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:speak:off]', { via, out }); } catch {}
           try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
           try { coachSpeak(out); } catch {}
+          sendCoachFinalize(out);
         } else { postDisconnected(); }
       } catch { postDisconnected(); }
       return;
@@ -635,18 +680,6 @@ window.addEventListener('shot:summary', (e) => {
       const ctrl = new AbortController();
       const ms = Math.max(1200, Number(window.COACH_AI_TIMEOUT_MS || 2500));
       const t = setTimeout(() => { try { ctrl.abort(); } catch {} }, ms);
-      const inferShotIdx0 = () => {
-        try { if (Number.isFinite(Number(window.__SHOT_IDX))) return Number(window.__SHOT_IDX); } catch {}
-        try {
-          const n = getShotNumber?.(); // 1-based if available
-          if (Number.isFinite(n) && n > 0) return n - 1;
-        } catch {}
-        try {
-          const len = (window.__shotList?.length || 0);
-          if (len > 0) return Math.max(0, len - 1);
-        } catch {}
-        return 0;
-      };
       const body = {
         prompt: `You are a concise basketball shooting coach. Using only these metrics, give 1 or 2 short specific release cues. Metrics: ${JSON.stringify(snap)}`,
         model: (window.DOACH && window.DOACH.model) || 'gpt-4o-mini',
@@ -669,6 +702,7 @@ window.addEventListener('shot:summary', (e) => {
           window.__lastCoachText = out;
           try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
           try { coachSpeak(out); } catch {}
+          sendCoachFinalize(out);
         } catch {}
         return;
       }
@@ -681,6 +715,7 @@ window.addEventListener('shot:summary', (e) => {
           try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:speak:fallback-local]', { via, out }); } catch {}
           try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
           try { coachSpeak(out); } catch {}
+          sendCoachFinalize(out);
           return;
         }
       } catch {}
@@ -696,6 +731,7 @@ window.addEventListener('shot:summary', (e) => {
           try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:speak:error-local]', { via, out }); } catch {}
           try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
           try { coachSpeak(out); } catch {}
+          sendCoachFinalize(out);
           return;
         }
       } catch {}
@@ -1586,6 +1622,46 @@ window.addEventListener('shot:summary', (e) => {
     // Choose how to use the LLM
     const mode = (window.DOACH?.llmMode || 'polish').toLowerCase();
     let text = localText;
+    const inferShotIdx0 = () => {
+      try { if (Number.isFinite(Number(shot?.coachIdx))) return Number(shot.coachIdx); } catch {}
+      try { if (Number.isFinite(Number(shot?.idx))) return Number(shot.idx); } catch {}
+      try { if (Number.isFinite(Number(shot?.__idx))) return Number(shot.__idx) - 1; } catch {}
+      try { if (Number.isFinite(Number(window.__SHOT_IDX))) return Number(window.__SHOT_IDX); } catch {}
+      try {
+        const n = getShotNumber?.(); // 1-based if available
+        if (Number.isFinite(n) && n > 0) return n - 1;
+      } catch {}
+      try {
+        const len = (window.__shotList?.length || 0);
+        if (len > 0) return Math.max(0, len - 1);
+      } catch {}
+      return 0;
+    };
+    const sendCoachFinalize = (finalLine) => {
+      try {
+        const sid = window.__SESSION_ID || null;
+        if (!sid || !finalLine) return;
+        const idxFinal = Number(inferShotIdx0());
+        if (!Number.isFinite(idxFinal)) return;
+        const payload = {
+          sid,
+          shot_idx: idxFinal,
+          text: finalLine,
+          model: window.DOACH?.model || 'coach-final',
+          provider: window.DOACH?.llmMode || 'final'
+        };
+        queueMicrotask(() => {
+          try {
+            fetch('/api/coach/finalize', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify(payload),
+              credentials:'include'
+            }).catch(() => {});
+          } catch {}
+        });
+      } catch {}
+    };
 
     if (mode !== 'off' && window.DOACH?.chatEndpoint) {
       try {

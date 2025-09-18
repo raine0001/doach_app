@@ -2,7 +2,7 @@
 
 // Avoid circular import; use window.poseDetectSerial if present
 async function poseDetectSerial(buffer) {
-  try { return await (window.poseDetectSerial?.(buffer) || null); } catch { return null; }
+  try { return await (window.poseDetectSerial?.(buffer) || null); } catch (e) { return null; }
 }
 
 // Tracker for player pose + motion per frame (MediaPipe compatible)
@@ -100,26 +100,26 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
   if (Number.isFinite(playerState.lastFrame) && frameNum < playerState.lastFrame) {
     // In release-only probe, drop regressing updates from other producers entirely
     if (window.__RELEASE_ONLY === true) {
-      try { if (window.POSE_DEBUG === true) console.log('[pose:skip-regress]', { was: __frameIdx, last: playerState.lastFrame }); } catch {}
+      try { if (window.POSE_DEBUG === true) console.log('[pose:skip-regress]', { was: __frameIdx, last: playerState.lastFrame }); } catch (e) {}
       return;
     }
     const df = playerState.lastFrame - frameNum;
     frameNum = playerState.lastFrame + 1; // monotonic forward
-    try { if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) console.log('[pose:clamp-regress]', { was: __frameIdx, clampTo: frameNum, delta: df }); } catch {}
+    try { if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) console.log('[pose:clamp-regress]', { was: __frameIdx, clampTo: frameNum, delta: df }); } catch (e) {}
   }
 
   playerState.keypoints = scaledKeypoints;
   playerState.lastFrame = frameNum;
-  try { window.__lastPoseKP = scaledKeypoints; window.__lastPoseTS = performance.now(); } catch {}
-  try { window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaledKeypoints[16] || null; } catch {}
+  try { window.__lastPoseKP = scaledKeypoints; window.__lastPoseTS = performance.now(); } catch (e) {}
+  try { window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaledKeypoints[16] || null; } catch (e) {}
   playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints });
-  try {
-    if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) {
-      const w = scaledKeypoints[16];
-      console.log('[pose:update]', { frame: __frameIdx, n: scaledKeypoints.length, wrist: w ? { x: Math.round(w.x), y: Math.round(w.y), v: (w.visibility??w.score??1) } : null, norm: looksNormalized });
-    }
-    window.__POSE_UPDATES = (window.__POSE_UPDATES||0) + 1;
-  } catch {}
+  
+  // Pose debug logging
+  if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) {
+    const w = scaledKeypoints[16];
+    console.log('[pose:update]', { frame: __frameIdx, n: scaledKeypoints.length, wrist: w ? { x: Math.round(w.x), y: Math.round(w.y), v: (w.visibility??w.score??1) } : null, norm: looksNormalized });
+  }
+  window.__POSE_UPDATES = (window.__POSE_UPDATES||0) + 1;
   if (playerState.frameHistory.length > 90)
     playerState.frameHistory = playerState.frameHistory.slice(-90);
 
@@ -242,73 +242,11 @@ export function isPoseInReleasePosition(pose) {
   return passed >= 2;
 }
 
-// // Robust pose release scorer (0..1). Combines posture + short-term trend.
-// export function poseReleaseScore(pose, hist = []) {
-//   const k = pose?.keypoints || pose; if (!Array.isArray(k) || k.length < 33) return { score: 0, tests: {} };
-
-//   function scoreSide(side) {
-//     const isRight = (side === 'R');
-//     const S = isRight ? LANDMARKS.RIGHT_SHOULDER : LANDMARKS.LEFT_SHOULDER;
-//     const E = isRight ? LANDMARKS.RIGHT_ELBOW    : LANDMARKS.LEFT_ELBOW;
-//     const W = isRight ? LANDMARKS.RIGHT_WRIST    : LANDMARKS.LEFT_WRIST;
-//     const sh = k[S], el = k[E], wr = k[W];
-//     if (!isVisible(sh) || !isVisible(el) || !isVisible(wr)) return { score: 0, tests: { visible: false, side } };
-
-//     const yTol = Number(window.REL_Y_TOL);
-//     const wristAboveElbow = wr.y < (el.y - yTol);
-
-//     const elbowAngleDeg = (() => {
-//       const v1x = sh.x - el.x, v1y = sh.y - el.y;
-//       const v2x = wr.x - el.x, v2y = wr.y - el.y;
-//       const dot = (v1x*v2x + v1y*v2y);
-//       const den = (Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y) + 1e-6);
-//       const a = Math.acos(Math.max(-1, Math.min(1, dot/den))) * 180 / Math.PI;
-//       return a;
-//     })();
-//     const elbowExtended = elbowAngleDeg >= Number(window.REL_ELBOW_EXT_MIN);
-
-//     const dx = Math.abs(wr.x - sh.x), dy = Math.abs(sh.y - wr.y);
-//     const nearlyVertical = (dx < Number(window.REL_DX_MAX)) && (dy > Number(window.REL_DY_MIN));
-//     const dSE = Math.hypot(el.x - sh.x, el.y - sh.y);
-//     const dSW = Math.hypot(wr.x - sh.x, wr.y - sh.y);
-//     const armExtended = dSW > (dSE + Number(window.REL_EXT_MARGIN));
-
-//     // Upward wrist trend from the short history (matching wrist index)
-//     const h = Array.isArray(hist) ? hist.slice(-3) : [];
-//     let wristUp = false;
-//     try {
-//       if (h.length >= 2) {
-//         const w0 = h[h.length-2]?.keypoints?.[W]?.y;
-//         const w1 = h[h.length-1]?.keypoints?.[W]?.y;
-//         if (Number.isFinite(w0) && Number.isFinite(w1)) wristUp = (w1 < (w0 - Number(window.REL_UP_DY)));
-//       }
-//     } catch {}
-
-//     const wA = Number(window.REL_W_WRIST || 0.30);
-//     const wB = Number(window.REL_W_ELBOW || 0.30);
-//     const wC = Number(window.REL_W_ALIGN || 0.20);
-//     const wD = Number(window.REL_W_UPTREND || 0.20);
-//     let s = 0;
-//     s += wristAboveElbow ? wA : 0;
-//     s += elbowExtended   ? wB : 0;
-//     s += (nearlyVertical || armExtended) ? wC : 0;
-//     s += wristUp ? wD : 0;
-
-//     const tests = { side, wristAboveElbow, elbowExtended, nearlyVertical, armExtended, wristUp, elbowAngleDeg, dx, dy, dSW, dSE };
-//     return { score: Math.max(0, Math.min(1, s)), tests };
-//   }
-
-//   const r = scoreSide('R');
-//   const l = scoreSide('L');
-//   const best = (l.score > r.score) ? l : r;
-//   return best;
-// }
-
 try {
   window.isPoseReleaseLikely = window.isPoseReleaseLikely || isPoseReleaseLikely;
   window.isPoseInReleasePosition = window.isPoseInReleasePosition || isPoseInReleasePosition;
   window.drawWristTrail = window.drawWristTrail || drawWristTrail;
-} catch {}
+} catch (e) {}
 
 // used when selected hoop is reselected
 export async function forceSafePose(buffer, _videoElement, __frameIdx) {
@@ -346,59 +284,100 @@ export function extractPoseSnapshot(keypoints, hoopBox) {
 }
 
 // Expose snapshot helper for modules that avoid direct imports (breaks cycles)
-try { window.extractPoseSnapshot = window.extractPoseSnapshot || extractPoseSnapshot; } catch {}
+try { window.extractPoseSnapshot = window.extractPoseSnapshot || extractPoseSnapshot; } catch (e) {}
+
+function calculateBasicShotMetrics(shot = null) {
+  try {
+    if (shot && typeof shot === 'object') {
+      return {
+        arcHeight: shot.arcHeight ?? null,
+        entryAngle: shot.entryAngle ?? null,
+        releaseAngle: shot.releaseAngle ?? null,
+        releaseFrame: shot.releaseFrame ?? null
+      };
+    }
+  } catch (e) {}
+  return { arcHeight: null, entryAngle: null, releaseAngle: null, releaseFrame: null };
+}
+
+function sendShotToBackend(shot = null) {
+  try {
+    console.log('[SHOT-BACKEND] stub send', shot);
+  } catch (e) {}
+  return Promise.resolve(false);
+}
+
+// Expose helpers globally
+window.calculateBasicShotMetrics = calculateBasicShotMetrics;
+window.sendShotToBackend = sendShotToBackend;
 
 /* ------------------------------------------------------------------
- * Shot start (release) — canonical in player_tracker
+ * Shot start (release) � canonical in player_tracker
  * Marks the start of a shot attempt based on pose/corridor gating.
  * Keeps state on window.ballState and resets the live arc buffer.
  * ------------------------------------------------------------------ */
 export function markRelease(frameIndex, opts = {}) {
-  try { window.__readyForScoring = true; } catch {}
+  try { window.__readyForScoring = true; } catch (e) {}
+
+  const fromSafe = opts?.__fromSafe === true;
+
+  if (!fromSafe) {
+    try {
+      if (typeof window.safeEmitRelease === 'function') {
+        const via = opts?.via || 'legacy';
+        return window.safeEmitRelease(frameIndex, via, opts) === true;
+      }
+    } catch (e) {}
+    const hist = (window.playerState?.frameHistory || []).slice(-5);
+    const gate = (typeof window.releaseGate === 'function')
+      ? (window.releaseGate(hist) || { released:false })
+      : { released:false };
+    if (!gate.released) return false;
+  }
 
   const bs = (window.ballState ||= {});
-  // Idempotent: do nothing if already tracking this attempt
-  if (bs.state === 'TRACKING' && Number.isFinite(bs.releaseFrame)) return;
+  if (bs.state === 'TRACKING' && Number.isFinite(bs.releaseFrame)) return true;
 
   const lastFrame = Number.isFinite(frameIndex)
     ? frameIndex
     : (bs.trail?.at?.(-1)?.frame ?? (playerState.lastFrame ?? 0));
 
-  // Optional: require a valid pose when marked as pose-derived
   try {
     const via = String(opts?.via || '').toLowerCase();
     const requirePose = (opts?.requirePose === true) || via.startsWith('pose');
     if (requirePose) {
       const kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length >= 33) ? playerState.keypoints : null;
       if (!kps) {
-        if (window.DOACH_SHOT_DEBUG) console.warn('[player_tracker] markRelease skipped — requirePose but no keypoints', { via, frame: lastFrame });
-        return;
+        if (window.DOACH_SHOT_DEBUG) console.warn('[player_tracker] markRelease skipped - requirePose but no keypoints', { via, frame: lastFrame });
+        return false;
       }
     }
-  } catch {}
+  } catch (e) {}
 
   if (window.DOACH_SHOT_DEBUG) {
-    console.log('[player_tracker] markRelease', { frame: lastFrame, via: opts?.via || 'unknown' });
+    console.log('[player_tracker] markRelease', { frame: lastFrame, via: opts?.via || 'unknown', fromSafe });
   }
+
   bs.releaseFrame   = lastFrame;
   bs.proxExitFrame  = null;
   bs.state          = 'TRACKING';
+
   try {
     const preF  = Number(window.SHOT_SAVE_PRE_FRAMES ?? 10);
     const postF = Number(window.SHOT_SAVE_POST_FRAMES ?? 90);
     bs.saveStartFrame  = Math.max(0, lastFrame - preF);
     bs.saveEndFrameMax = lastFrame + postF;
-  } catch {}
+  } catch (e) {}
+
   try {
     const lastPt = (window.ballState?.trail?.at?.(-1) || null);
     if (lastPt && Number.isFinite(lastPt.x) && Number.isFinite(lastPt.y)) {
       bs.releasePos = { x: lastPt.x, y: lastPt.y };
-      bs._releaseDrawUntil = lastFrame + 8; // draw marker for a short window
-    try { window.__overlayArcDrawnCount = 0; } catch {}
+      bs._releaseDrawUntil = lastFrame + 8;
+      try { window.__overlayArcDrawnCount = 0; } catch (e) {}
     }
-  } catch {}
+  } catch (e) {}
 
-  // Stamp proximity enter immediately if release point is inside hoop ROI
   try {
     const H = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
     if (H && bs.releasePos && bs.proxEnterFrame == null) {
@@ -416,46 +395,32 @@ export function markRelease(frameIndex, opts = {}) {
       if (inside) bs.proxEnterFrame = lastFrame;
       bs._lastInProx = inside;
     }
-  } catch {}
+  } catch (e) {}
 
-  // Test-mode: ensure prox enter is stamped quickly to advance gates
   try {
     if (window.__TEST_MODE) {
       const bs2 = (window.ballState ||= {});
       if (bs2.proxEnterFrame == null) bs2.proxEnterFrame = bs.releaseFrame + 1;
       bs2._lastInProx = true;
     }
-  } catch {}
+  } catch (e) {}
 
-  // Seed per-attempt arc buffer with recent motion for context
   const arc = (window.ballArc ||= { trail: [], prox: null });
   const src = Array.isArray(window.ballState?.trail) ? window.ballState.trail : [];
   arc.trail = src.filter(p => (p.frame ?? -1) <= lastFrame).slice(-8).map(p => ({ x: p.x, y: p.y, frame: p.frame }));
   if (opts?.prox) arc.prox = opts.prox;
 
-  // Optional pose snapshot at release
   try {
     if (playerState?.keypoints?.length) {
       bs.releasePose = extractPoseSnapshot(playerState.keypoints, window.getLockedHoopBox?.());
     }
-  } catch {}
+  } catch (e) {}
 
-  // Fire a pose:release event if this was a pose-driven latch and not already fired
-  try {
-    const via = String(opts?.via || '').toLowerCase();
-    if (via.includes('pose')) {
-      const detail = { frame: lastFrame, via: opts?.via || 'pose' };
-      window.dispatchEvent(new CustomEvent('pose:release', { detail }));
-    }
-  } catch {}
+  return true;
 }
-
-// Global proxy so older import paths can forward here safely
-try { window.__markReleasePose = markRelease; } catch {}
-
 // load MediaPipe landmarker Pose model
 export async function initPoseDetector() {
-  try { if (window.poseDetector) return window.poseDetector; } catch {}
+  try { if (window.poseDetector) return window.poseDetector; } catch (e) {}
   const vision = await window.FilesetResolver.forVisionTasks(
     'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/wasm'
   );
@@ -479,7 +444,7 @@ export async function initPoseDetector() {
       minPosePresenceConfidence: Number.isFinite(window.POSE_MIN_PRES) ? Number(window.POSE_MIN_PRES) : (loConf ? 0.35 : 0.5),
       minTrackingConfidence: Number.isFinite(window.POSE_MIN_TRACK) ? Number(window.POSE_MIN_TRACK) : (loConf ? 0.35 : 0.5)
     });
-    try { window.__POSE_DELEGATE = useCPU ? 'CPU' : 'GPU'; window.__POSE_MODEL = modelKind || 'lite'; } catch {}
+    try { window.__POSE_DELEGATE = useCPU ? 'CPU' : 'GPU'; window.__POSE_MODEL = modelKind || 'lite'; } catch (e) {}
   } catch (e) {
     console.warn('[pose] local model missing; falling back to CDN task', e);
     const useCPU = (typeof navigator !== 'undefined' && (navigator.webdriver === true)) || (window.__TEST_MODE === true) || /[?&]probe=release/.test(location.search||'');
@@ -495,7 +460,7 @@ export async function initPoseDetector() {
       minPosePresenceConfidence: Number.isFinite(window.POSE_MIN_PRES) ? Number(window.POSE_MIN_PRES) : (loConf ? 0.35 : 0.5),
       minTrackingConfidence: Number.isFinite(window.POSE_MIN_TRACK) ? Number(window.POSE_MIN_TRACK) : (loConf ? 0.35 : 0.5)
     });
-    try { window.__POSE_DELEGATE = useCPU ? 'CPU' : 'GPU'; window.__POSE_MODEL = 'lite-cdn'; } catch {}
+    try { window.__POSE_DELEGATE = useCPU ? 'CPU' : 'GPU'; window.__POSE_MODEL = 'lite-cdn'; } catch (e) {}
   }
 
   window.poseDetector = poseDetector;
@@ -595,4 +560,10 @@ export function drawPoseSkeleton(ctx, keypoints) {
   connect(24, 26, right);
   connect(26, 28, right);
 }
+
+
+
+
+
+
 

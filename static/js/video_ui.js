@@ -1,4 +1,4 @@
-// ✅ [video_ui.js] - Enhancements for DOACH Mobile/Full-Screen Integration
+﻿// âœ… [video_ui.js] - Enhancements for DOACH Mobile/Full-Screen Integration
 import { setOverlayInteractive } from './fix_overlay_display.js';
 import { speak } from './coach_voice.js';
 import { arcHeightLabel } from './shot_utils.js';
@@ -7,9 +7,7 @@ import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './ho
 
 
 window.getLockedHoopBox = getLockedHoopBox;
-window.handleHoopSelection = handleHoopSelection; 
-
-// ---------------------------------------------------------------
+window.handleHoopSelection = handleHoopSelection; \r\ntry { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = true; } catch {}\r\nconst shouldEnforceSessionCap = () => window.__sessionContinue !== true;\r\n\r\n// ---------------------------------------------------------------
 // Connection banner: show backend origin and active session id
 // ---------------------------------------------------------------
 function mountConnectionBanner() {
@@ -31,15 +29,15 @@ function mountConnectionBanner() {
     }
 
     const origin = (location && location.origin) ? location.origin : (location.protocol + '//' + location.host);
-    const sid = (window.__SESSION_ID || '—');
-    const debugHref = (sid && sid !== '—') ? `/admin/session/${sid}/debug` : null;
+    const sid = (window.__SESSION_ID || 'â€”');
+    const debugHref = (sid && sid !== 'â€”') ? `/admin/session/${sid}/debug` : null;
     const healthHref = '/healthz';
     const html = [
       `<span style="opacity:.9">Connected:</span> <span style="font-weight:700">${origin}</span>`,
       `&nbsp;&nbsp;<span style="opacity:.9">sid:</span> <span id="connSidVal" style="font-weight:700">${sid}</span>`,
       debugHref ? `&nbsp;<a id="connDbg" href="${debugHref}" target="_blank" style="text-decoration:none">debug</a>` : '',
       `&nbsp;<a id="connHealth" href="${healthHref}" target="_blank" style="text-decoration:none">health</a>`,
-      `&nbsp;<button id="connHide" class="vc-btn" title="Hide" style="padding:0 6px">×</button>`
+      `&nbsp;<button id="connHide" class="vc-btn" title="Hide" style="padding:0 6px">Ã—</button>`
     ].join('');
     box.innerHTML = html;
     box.style.display = hidden ? 'none' : 'block';
@@ -57,7 +55,7 @@ function mountConnectionBanner() {
     box.__lastSid = sid;
     box.__upd = setInterval(() => {
       try {
-        const curSid = (window.__SESSION_ID || '—');
+        const curSid = (window.__SESSION_ID || 'â€”');
         if (curSid !== box.__lastSid) {
           box.__lastSid = curSid;
           const val = box.querySelector('#connSidVal');
@@ -73,7 +71,7 @@ function mountConnectionBanner() {
 }
 window.mountConnectionBanner = mountConnectionBanner;
 
-// Slow_arbiter.js — make sure it reads SLOW_RATE
+// Slow_arbiter.js â€” make sure it reads SLOW_RATE
 (function installSlowArbiter(){  
   // Fully opt-in only. Unless explicitly enabled, do nothing.
   if (window.ENABLE_SLOWMO !== true) { return; }
@@ -91,7 +89,7 @@ window.mountConnectionBanner = mountConnectionBanner;
     const v = getV(); if (!v) return;
     if (v.playbackRate !== r) { try { v.playbackRate = r; } catch {} }
     desired = r;
-    // console.log('[Slow]', why, '→', r);
+    // console.log('[Slow]', why, 'â†’', r);
   }
 
   window.addEventListener('shot:release', (e) => {
@@ -109,11 +107,11 @@ window.mountConnectionBanner = mountConnectionBanner;
       window.__hudReleaseWired = true;
   window.addEventListener('shot:release', (e) => {
         try {
-          // Cap session at SESSION_SIZE shots
+          // Cap session at cap_DEFAULT shots
           try {
-            const cap = Number(window.SESSION_SIZE || 10);
+            const cap = getSessionCap();
             const cur = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
-            if (cur >= cap) return;
+            if (shouldEnforceSessionCap() && cur >= cap) return;
           } catch {}
           // Auto-create a backend session if missing
           try { ensureSessionId(); } catch {}
@@ -151,22 +149,23 @@ window.mountConnectionBanner = mountConnectionBanner;
           window.mountSessionHUD?.();
           window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
           window.setSessionStatus?.('Shot ' + taken + ' in progress');
-          // Auto end at cap — wait for the last summary or fall back after a short grace
-          try {
-            const cap = Number(window.SESSION_SIZE || 10);
-            const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-            if (Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
-              try { window.__sessionCapped = true; } catch {}
-              try { window.__capAwait = true; } catch {}
-              // Do NOT stop camera/analyzer yet; allow final summary to emit
-              try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
-              try {
-                window.__capTimer = setTimeout(() => {
-                  try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
-                }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
-              } catch {}
-            }
-          } catch {}
+          if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
+            try {
+              const cap = getSessionCap();
+              const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
+              if (shouldEnforceSessionCap() && Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
+                try { window.__sessionCapped = true; } catch {}
+                try { window.__capAwait = true; } catch {}
+                // Do NOT stop camera/analyzer yet; allow final summary to emit
+                try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
+                try {
+                  window.__capTimer = setTimeout(() => {
+                    try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
+                  }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
+                } catch {}
+              }
+            } catch {}
+          }
         } catch {}
       });
     }
@@ -175,13 +174,15 @@ window.mountConnectionBanner = mountConnectionBanner;
   window.addEventListener('shot:summary', () => {
     capTo = 0;
     setRate(1, 'summary');
-    try {
-      if (window.__capAwait && window.__summaryShown !== true) {
-        window.__capAwait = false;
-        try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
-        setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
-      }
-    } catch {}
+    if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
+      try {
+        if (window.__capAwait && window.__summaryShown !== true) {
+          window.__capAwait = false;
+          try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
+          setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
+        }
+      } catch {}
+    }
   });
 
   // On end-session, speak and open summary table automatically
@@ -210,7 +211,7 @@ window.mountConnectionBanner = mountConnectionBanner;
     requestAnimationFrame(tick);
   })();
 
-  // media hygiene — any manual interaction cancels slow-mo
+  // media hygiene â€” any manual interaction cancels slow-mo
   const v = getV();
   if (v) {
     v.addEventListener('play',    () => setRate(1, 'play'));
@@ -265,10 +266,11 @@ window.mountConnectionBanner = mountConnectionBanner;
         window.setSessionStatus?.('Shot ' + taken + ' in progress');
 
         // HARD STOP at cap: lock session and present summary
+        if (window.SESSION_MANAGER_OWNS_ENDING === true) return;
         try {
-          const cap = Number(window.SESSION_SIZE || 10);
+          const cap = getSessionCap();
           const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-          if (Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
+          if (shouldEnforceSessionCap() && Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
             try { window.__sessionCapped = true; } catch {}
             try { window.__sessionEnded = true; } catch {}
             try { window.__SESSION_ACTIVE = false; } catch {}
@@ -282,10 +284,11 @@ window.mountConnectionBanner = mountConnectionBanner;
 
     // End on final summary as a backstop (ensures table even if release-path end was skipped)
     window.addEventListener('shot:summary', () => {
+      if (window.SESSION_MANAGER_OWNS_ENDING === true) return;
       try {
-        const cap   = Number(window.SESSION_SIZE || 10);
+        const cap   = getSessionCap();
         const taken = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-        if (Number.isFinite(cap) && taken >= cap && window.__summaryShown !== true) {
+        if (shouldEnforceSessionCap() && Number.isFinite(cap) && taken >= cap && window.__summaryShown !== true) {
           // Lock and present now
           try { window.__sessionCapped = true; } catch {}
           try { window.__sessionEnded = true; } catch {}
@@ -306,7 +309,31 @@ window.setFBFRate = (fps) => {
   console.log('[video_ui] slow-mo fps =', window.FRAMEbyFRAME_RATE);
 };
 
-const SESSION_SIZE = 10;  // # of shots in a session
+const SESSION_SIZE_DEFAULT = 10;  // default cap if nothing else provided
+function getSessionCap() {
+  // Query-string override (?cap=3)
+  try {
+    const q = new URLSearchParams(location.search || '');
+    const qp = q.get('cap');
+    const parsed = Number(qp);
+    if (qp != null && qp !== '' && Number.isFinite(parsed) && parsed > 0) return parsed;
+  } catch {}
+
+  // Global values (SESSION_CAP, SESSION_SIZE, etc.)
+  const env = Number(window.__SESSION_CAP ?? window.SESSION_CAP ?? window.SESSION_SIZE ?? window.TEST_SESSION_SIZE);
+  if (Number.isFinite(env) && env > 0) return env;
+
+  // LocalStorage override
+  let ls = null;
+  try { ls = Number(localStorage.getItem('doach.sessionCap')); } catch {}
+  if (Number.isFinite(ls) && ls > 0) return ls;
+
+  // Fallback default
+  return SESSION_SIZE_DEFAULT;
+}
+try { window.getSessionCap = getSessionCap; } catch {}
+
+let __capEnforceTimer = null;
 
 export function moveUploadToSidebar() {
   const chooseBtn = document.getElementById('videoInput');
@@ -314,7 +341,7 @@ export function moveUploadToSidebar() {
 
   if (chooseBtn && menuContainer) {
     const label = document.createElement('label');
-    label.innerHTML = '📂 <strong>Upload Video</strong>';
+    label.innerHTML = 'ðŸ“‚ <strong>Upload Video</strong>';
     label.style.cursor = 'pointer';
     label.className = 'sidebar-upload-btn';
     label.appendChild(chooseBtn);
@@ -323,7 +350,7 @@ export function moveUploadToSidebar() {
   }
 }
 
-// ───────── Single-frame step (RVFC/arbiter-safe) ─────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€ Single-frame step (RVFC/arbiter-safe) â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 // Keep a tiny state so any old callers don't crash
 let __framePlay = { on:false, timer:null, cleanup:null, fps:12, video:null };
@@ -373,7 +400,7 @@ export async function stepFrame(video, dir = +1){
   }
 }
 
-// Legacy FBF shell (kept only so old callers won’t crash)
+// Legacy FBF shell (kept only so old callers wonâ€™t crash)
 export function startFramePlay(/* video, fps */){
   console.log('[video_ui] startFramePlay() ignored (RVFC/arbiter active)');
   cancelFramePlay();
@@ -442,12 +469,12 @@ export function setSessionStatus(text = '') {
     });
     root.appendChild(badge);
   }
-  badge.textContent = text || 'SESSION IN PROGRESS…';
+  badge.textContent = text || 'SESSION IN PROGRESSâ€¦';
   badge.style.display = text === null ? 'none' : 'block';
 }
 
 // -----------------------------------------------------------------//
-// ───────── Playback controls UI (mounted inside hudRoot) ─────────//
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€ Playback controls UI (mounted inside hudRoot) â”€â”€â”€â”€â”€â”€â”€â”€â”€//
 // -----------------------------------------------------------------//
 export function createPlaybackControls(video) {
   window.__videoEl = video;
@@ -502,31 +529,31 @@ export function createPlaybackControls(video) {
   };
 
   // ---- buttons ----
-  const bHome  = mk('⏪','Go to start',    () => { cancelFramePlay(); video.pause(); video.currentTime = 0; });
-  const bPause = mk('⏸','Pause',          () => { cancelFramePlay(); video.pause(); });
-  const bPlay  = mk('▶','Play', () => {
+  const bHome  = mk('âª','Go to start',    () => { cancelFramePlay(); video.pause(); video.currentTime = 0; });
+  const bPause = mk('â¸','Pause',          () => { cancelFramePlay(); video.pause(); });
+  const bPlay  = mk('â–¶','Play', () => {
     if (!requireHoopOrPrompt()) return;
     cancelFramePlay(); try { video.playbackRate = 1.0; } catch {}
     video.play();
   });
-  const bAuto  = mk('🎞','Auto-step', () => {
+  const bAuto  = mk('ðŸŽž','Auto-step', () => {
     if (!requireHoopOrPrompt()) return;
     if (__framePlay.on) { cancelFramePlay(); bAuto.dataset.active='0'; }
     else { startFramePlay(video, Number(window.FRAMEbyFRAME_RATE) || 1.0); video.pause(); bAuto.dataset.active='1'; }
   });
-  const bNext  = mk('⏭','Next',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,+1); });
-  const bPrev  = mk('⏮','Prev',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,-1); });
+  const bNext  = mk('â­','Next',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,+1); });
+  const bPrev  = mk('â®','Prev',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,-1); });
 
   [bPrev,bHome,bPlay,bPause,bAuto,bNext].forEach(b => container.appendChild(b));
   root.appendChild(container);
 
   // keep things tidy
   video.addEventListener('ended', () => { cancelFramePlay(); bAuto.dataset.active = '0'; });
-  video.addEventListener('play',  () => { if (__framePlay.on) video.pause(); }); // don’t fight auto-step
+  video.addEventListener('play',  () => { if (__framePlay.on) video.pause(); }); // donâ€™t fight auto-step
 
   // lift the rest of the HUD too (metrics + status)
   mountSessionHUD();
-  setSessionStatus('SESSION IN PROGRESS…');
+  setSessionStatus('SESSION IN PROGRESSâ€¦');
 
   // handy toggle for HTML
   window.togglePlay = () => {
@@ -550,7 +577,7 @@ export function showShotSummaryOverlay(summary) {
 
   const arcLabel = (() => { try { return arcHeightLabel(summary); } catch { return 'good'; } })();
   div.innerHTML = `
-    <strong>${summary.made ? '✅ Made' : '❌ Missed'} Shot</strong><br>
+    <strong>${summary.made ? 'âœ… Made' : 'âŒ Missed'} Shot</strong><br>
     Arc: ${arcLabel}<br>
     Entry Angle: ${summary.entryAngle}&#176;<br>
     Release Angle: ${summary.releaseAngle}&#176;<br>
@@ -566,7 +593,7 @@ window.__hoopConfirmed = false;
 
 function requireHoopOrPrompt() {
   if (isHoopReady()) return true;
-  showPromptMessage('📍 Tap the hoop to begin setup', 3000);
+  showPromptMessage('ðŸ“ Tap the hoop to begin setup', 3000);
   if (!window.__hoopPickArmed) {
     window.__hoopPickArmed = true;
     window.enableHoopPickOnce?.();   // arm picker again if needed
@@ -577,7 +604,7 @@ function requireHoopOrPrompt() {
 window.isHoopReady = isHoopReady;
 window.requireHoopOrPrompt = requireHoopOrPrompt;
 
-// ── Unified prompt system (uses #overlayPrompt if present, else #promptBar) ──
+// â”€â”€ Unified prompt system (uses #overlayPrompt if present, else #promptBar) â”€â”€
 
 function hasCenter(h) {
   return Number.isFinite(h?.cx ?? h?.x) && Number.isFinite(h?.cy ?? h?.y);
@@ -593,7 +620,7 @@ function isValidHoopBox(h) {
 }
 
 function isHoopReady() {
-  const h = window.getLockedHoopBox?.();  // 👈 use window.*
+  const h = window.getLockedHoopBox?.();  // ðŸ‘ˆ use window.*
   const ready = !!window.__hoopConfirmed && isValidHoopBox(h);
   try {
     if (window.DOACH_HOOP_GATE_LOG === true) {
@@ -654,7 +681,7 @@ function startHoopPromptLoop() {
 
   const tick = () => {
     if (!isHoopReady()) {
-      showPromptMessage('📍 Tap the hoop to begin setup', 3000);
+      showPromptMessage('ðŸ“ Tap the hoop to begin setup', 3000);
       if (!window.__hoopPickArmed) {
         window.__hoopPickArmed = true;
         window.enableHoopPickOnce?.();
@@ -663,15 +690,15 @@ function startHoopPromptLoop() {
   };
 
   tick();
-  window.__hoopPromptTimer = setInterval(tick, 1500); // keep “pulsing” until confirmed
+  window.__hoopPromptTimer = setInterval(tick, 1500); // keep â€œpulsingâ€ until confirmed
 }
 
 window.enableHoopPickOnce = enableHoopPickOnce;
 
 
-// ───────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Video UI / HUD utilities
-// ───────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 /** Ensure an absolute overlay root that sits on top of the video */
 export function ensureHudRoot() {
@@ -786,14 +813,14 @@ export async function mountCameraSwitcher() {
       padding: '8px 10px', font: '600 12px system-ui',
       pointerEvents: 'auto', zIndex: 10005, cursor: 'pointer'
     });
-    btn.textContent = 'Back  🔁';
+    btn.textContent = 'Back  ðŸ”';
     root.appendChild(btn);
   }
 
   const refresh = () => {
     try {
       const lab = currentFacingLabel();
-      btn.textContent = (lab === 'Back' ? 'Back' : 'Front') + '  🔁';
+      btn.textContent = (lab === 'Back' ? 'Back' : 'Front') + '  ðŸ”';
     } catch {}
   };
   refresh();
@@ -861,7 +888,7 @@ export async function mountCameraSwitcher() {
 }
 try { if (!window.mountCameraSwitcher) window.mountCameraSwitcher = mountCameraSwitcher; } catch {}
 
-/** Top-center session status line (“SESSION IN PROGRESS…”) */
+/** Top-center session status line (â€œSESSION IN PROGRESSâ€¦â€) */
 /** Bottom HUD bar (metrics + End Session) */
 export function mountSessionHUD() {
   const root = ensureHudRoot();
@@ -876,8 +903,8 @@ export function mountSessionHUD() {
     });
 
     bar.innerHTML = `
-      <button id="hudMute" class="vc-btn" title="Mute/Unmute">🔇</button>
-      <button id="hudCamFlip" class="vc-btn" title="Flip Camera">📷↺</button>
+      <button id="hudMute" class="vc-btn" title="Mute/Unmute">ðŸ”‡</button>
+      <button id="hudCamFlip" class="vc-btn" title="Flip Camera">ðŸ“·â†º</button>
 
       <div class="hud-metric" id="mShots"><div class="num">0/10</div><div class="label">Shots Taken</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
@@ -894,7 +921,7 @@ export function mountSessionHUD() {
     const applyMute = (muted) => {
       // button reflects CURRENT state
       muteBtn.setAttribute('data-muted', muted ? '1' : '0');
-      muteBtn.textContent = muted ? '🔇' : '🔊';
+      muteBtn.textContent = muted ? 'ðŸ”‡' : 'ðŸ”Š';
       // keep any legacy floating cam toggle hidden; HUD contains the control now
       try { const legacy = document.getElementById('camToggleBtn'); if (legacy) legacy.style.display = 'none'; } catch {}
 
@@ -1006,7 +1033,10 @@ try { if (typeof window.updateSessionHUD !== "function") window.updateSessionHUD
     const cur = Number(taken || 0);
     taken = Math.max(cur, canonTaken, hudTaken);
   } catch {}
-  if (elShots) elShots.textContent = `${taken}/${SESSION_SIZE}`;
+  if (elShots) {
+    const capDisplay = getSessionCap();
+    elShots.textContent = `${taken}/${capDisplay}`;
+  }
   // Makes/Accuracy hidden in simplified HUD; keep code paths no-op for future use
   if (elMakes) elMakes.textContent = `${made}`;
   if (elAcc)   elAcc.textContent   = `${Math.round(accuracy)}%`;
@@ -1018,7 +1048,7 @@ try {
   if (!window.speakShotNumber) {
     window.speakShotNumber = function speakShotNumber(){
       try {
-        const cap = Number(window.SESSION_SIZE || 10);
+        const cap = getSessionCap();
         const cnt = Number(window.__HUD_SHOT_COUNT || window.shotTaken || 0);
         speak(`You are on shot ${Math.max(0,cnt)} of ${cap}.`);
       } catch {}
@@ -1112,12 +1142,12 @@ function renderFullShotTable() {
   modal.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
-        <span>📋 Shot Summary (${list.length}/${SESSION_SIZE})</span>
-        <span id=\"sessFinalBadge\" style=\"display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;\">Finalizing…</span>
+        <span>ðŸ“‹ Shot Summary (${list.length}/${getSessionCap()})</span>
+        <span id=\"sessFinalBadge\" style=\"display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;\">Finalizingâ€¦</span>
       </div>
       <div>
-        <button id="exportCSV" class="vc-btn" title="Export CSV">⬇︎ CSV</button>
-        <button id="closeFull" class="vc-btn">✖</button>
+        <button id="exportCSV" class="vc-btn" title="Export CSV">â¬‡ï¸Ž CSV</button>
+        <button id="closeFull" class="vc-btn">âœ–</button>
       </div>
     </div>
     <div id=\"sessReviewLine\" style=\"display:none;opacity:.95;margin:4px 0 10px;line-height:1.35\"></div>
@@ -1127,7 +1157,7 @@ function renderFullShotTable() {
       </colgroup>
       <thead>
         <tr>
-          <th>#</th><th>Result</th><th>Arc</th><th>Entry°</th><th>Release°</th><th>Doach Summary</th><th>Correct</th>
+          <th>#</th><th>Result</th><th>Arc</th><th>EntryÂ°</th><th>ReleaseÂ°</th><th>Doach Summary</th><th>Correct</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -1146,16 +1176,16 @@ function renderFullShotTable() {
     if (i === __bestIdx) tr.setAttribute('data-best', '1');
     tr.innerHTML = `
       <td class="num">${i+1}</td>
-      <td class="result" title="${i===__bestIdx ? 'Best shot' : ''}">${s.made ? (i===__bestIdx ? '⭐️ ✅' : '✅') : '❌'}</td>
-      <td class="arc">${Math.round(s.arcHeight ?? 0) || '–'}</td>
-      <td class="entry">${s.entryAngle ?? '–'}</td>
-      <td class="release">${s.releaseAngle ?? '–'}</td>
-      <td class="coach">${coach ? esc(coach) : '—'}</td>
+      <td class="result" title="${i===__bestIdx ? 'Best shot' : ''}">${s.made ? (i===__bestIdx ? 'â­ï¸ âœ…' : 'âœ…') : 'âŒ'}</td>
+      <td class="arc">${Math.round(s.arcHeight ?? 0) || 'â€“'}</td>
+      <td class="entry">${s.entryAngle ?? 'â€“'}</td>
+      <td class="release">${s.releaseAngle ?? 'â€“'}</td>
+      <td class="coach">${coach ? esc(coach) : 'â€”'}</td>
       <td class="fix">
         <div style="display:flex;gap:6px">
-          <button class="vc-btn btn-make"  title="Mark Make" data-id="${i+1}">✅</button>
-          <button class="vc-btn btn-miss"  title="Mark Miss" data-id="${i+1}">❌</button>
-          <button class="vc-btn btn-ai"    title="AI Review" data-id="${i+1}">🤖</button>
+          <button class="vc-btn btn-make"  title="Mark Make" data-id="${i+1}">âœ…</button>
+          <button class="vc-btn btn-miss"  title="Mark Miss" data-id="${i+1}">âŒ</button>
+          <button class="vc-btn btn-ai"    title="AI Review" data-id="${i+1}">ðŸ¤–</button>
         </div>
       </td>`;
 
@@ -1168,7 +1198,7 @@ function renderFullShotTable() {
         replay.className = 'vc-btn btn-replay';
         replay.title = 'Replay';
         replay.dataset.id = String(i + 1);
-        replay.textContent = '▶';
+        replay.textContent = 'â–¶';
         if (aiBtn) bar.insertBefore(replay, aiBtn); else bar.appendChild(replay);
       }
     } catch {}
@@ -1181,7 +1211,7 @@ function renderFullShotTable() {
         setTxt('entry',   'pending');
         setTxt('release', 'pending');
         const coachEl = tr.querySelector('.coach');
-        if (coachEl && (!coachEl.textContent || coachEl.textContent === 'â€”')) coachEl.textContent = 'pending';
+        if (coachEl && (!coachEl.textContent || coachEl.textContent === 'Ã¢â‚¬â€')) coachEl.textContent = 'pending';
       }
     } catch {}
     tb.appendChild(tr);
@@ -1247,6 +1277,8 @@ window.recordShotSummary = async function recordShotSummary(summary) {
     idx  = list.push(summary);      // 1-based index
     summary.__idx = idx;            // keep the index on the object for later
   }
+  summary.idx = Math.max(0, idx - 1);
+  summary.coachIdx = summary.idx;
 
   // If the full table is open, update existing pending row or append now
   const modal = document.getElementById('fullShotModal');
@@ -1270,18 +1302,18 @@ window.recordShotSummary = async function recordShotSummary(summary) {
         // Inject buttons (including Replay)
         try {
           const bar = tr.querySelector('td.fix > div');
-          const mk = document.createElement('button'); mk.className='vc-btn btn-make'; mk.title='Mark Make'; mk.dataset.id=String(idx); mk.textContent='✅'; bar.appendChild(mk);
-          const ms = document.createElement('button'); ms.className='vc-btn btn-miss'; ms.title='Mark Miss'; ms.dataset.id=String(idx); ms.textContent='❌'; bar.appendChild(ms);
-          const rp = document.createElement('button'); rp.className='vc-btn btn-replay'; rp.title='Replay'; rp.dataset.id=String(idx); rp.textContent='▶'; bar.appendChild(rp);
-          const ai = document.createElement('button'); ai.className='vc-btn btn-ai'; ai.title='AI Review'; ai.dataset.id=String(idx); ai.textContent='🤖'; bar.appendChild(ai);
+          const mk = document.createElement('button'); mk.className='vc-btn btn-make'; mk.title='Mark Make'; mk.dataset.id=String(idx); mk.textContent='âœ…'; bar.appendChild(mk);
+          const ms = document.createElement('button'); ms.className='vc-btn btn-miss'; ms.title='Mark Miss'; ms.dataset.id=String(idx); ms.textContent='âŒ'; bar.appendChild(ms);
+          const rp = document.createElement('button'); rp.className='vc-btn btn-replay'; rp.title='Replay'; rp.dataset.id=String(idx); rp.textContent='â–¶'; bar.appendChild(rp);
+          const ai = document.createElement('button'); ai.className='vc-btn btn-ai'; ai.title='AI Review'; ai.dataset.id=String(idx); ai.textContent='ðŸ¤–'; bar.appendChild(ai);
         } catch {}
       }
       // Update existing row cells
-      try { const c = tr.querySelector('.coach'); if (c) { c.textContent = summary.doach ? esc(summary.doach) : '—'; c.title = esc(summary.doach||''); } } catch {}
-      try { const e = tr.querySelector('.result');  if (e) e.textContent = summary.made ? '✅' : '❌'; } catch {}
-      try { const e = tr.querySelector('.arc');     if (e) e.textContent = (Math.round(summary.arcHeight ?? 0) || '–'); } catch {}
-      try { const e = tr.querySelector('.entry');   if (e) e.textContent = (summary.entryAngle ?? '–'); } catch {}
-      try { const e = tr.querySelector('.release'); if (e) e.textContent = (summary.releaseAngle ?? '–'); } catch {}
+      try { const c = tr.querySelector('.coach'); if (c) { c.textContent = summary.doach ? esc(summary.doach) : 'â€”'; c.title = esc(summary.doach||''); } } catch {}
+      try { const e = tr.querySelector('.result');  if (e) e.textContent = summary.made ? 'âœ…' : 'âŒ'; } catch {}
+      try { const e = tr.querySelector('.arc');     if (e) e.textContent = (Math.round(summary.arcHeight ?? 0) || 'â€“'); } catch {}
+      try { const e = tr.querySelector('.entry');   if (e) e.textContent = (summary.entryAngle ?? 'â€“'); } catch {}
+      try { const e = tr.querySelector('.release'); if (e) e.textContent = (summary.releaseAngle ?? 'â€“'); } catch {}
     }
   }
 
@@ -1303,7 +1335,7 @@ window.recordShotSummary = async function recordShotSummary(summary) {
   } catch {}
 
   // End-of-session prompt at 10 shots; reuse central prompt logic
-  if (taken === SESSION_SIZE && !window.__sessionContinue && !window.__sessionCapPrompted) {
+  if (taken === getSessionCap() && !window.__sessionContinue && !window.__sessionCapPrompted) {
     window.__sessionCapPrompted = true;
     try { window.dispatchEvent(new Event('doach:show-cap-prompt')); } catch {}
     try { window.autoEndSessionAndSummarize?.(); } catch {}
@@ -1339,14 +1371,14 @@ function wireFullShotModalActions() {
   const tbody = modal.querySelector('tbody');
   if (!tbody) return;
 
-  // Update one table row’s UI after a correction
+  // Update one table rowâ€™s UI after a correction
   function refreshRowUI(idx) {
     const list = window.__shotList || [];
     const s = list[idx - 1];
     const tr = modal.querySelector(`tr[data-shot-idx="${idx}"]`);
     if (!s || !tr) return;
 
-    tr.querySelector('.result').textContent = s.made ? '✅' : '❌';
+    tr.querySelector('.result').textContent = s.made ? 'âœ…' : 'âŒ';
 
     // Recompute accuracy badge and HUD numbers from current list
     const { taken, made, acc } = computeTotals(list);
@@ -1419,10 +1451,10 @@ export function showShotBanner(summary, ms = 2500) {
   const acc  = list.length ? Math.round((made / list.length) * 100) : 0;
 
   el.innerHTML = `
-    <strong>${summary.made ? '✅ Made' : '❌ Missed'} Shot</strong><br>
+    <strong>${summary.made ? 'âœ… Made' : 'âŒ Missed'} Shot</strong><br>
     Arc Height: ${Math.round(summary.arcHeight || 0)}px<br>
-    Entry Angle: ${summary.entryAngle ?? '–'}°<br>
-    Release Angle: ${summary.releaseAngle ?? '–'}°<br>
+    Entry Angle: ${summary.entryAngle ?? 'â€“'}Â°<br>
+    Release Angle: ${summary.releaseAngle ?? 'â€“'}Â°<br>
     Accuracy: ${acc}% (${made}/${list.length})`;
   el.style.display = 'block';
   clearTimeout(el.__t);
@@ -1475,7 +1507,7 @@ export function initHUDForVideo(videoEl) {
   try { mountConnectionBanner(); } catch {}
   // Always ensure the bottom HUD is present for both uploads and live camera
   try { mountSessionHUD(); } catch {}
-  try { setSessionStatus('SESSION IN PROGRESS…'); } catch {}
+  try { setSessionStatus('SESSION IN PROGRESSâ€¦'); } catch {}
 
   // Keep elapsed time ticking during session while HUD is mounted
   try {
@@ -1569,7 +1601,8 @@ export function initHUDForVideo(videoEl) {
 
     // Ensure the shot list has placeholders so the table reflects session cap
     try {
-      const cap = Number(window.SESSION_SIZE || 10);
+      const cap = getSessionCap();
+      console.log('[finalize] ensuring placeholders up to cap', { cap });
       const curLen = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
       const scoreCnt = Number(window.__SCORE_SHOT_COUNT || 0);
       const logCnt = Array.isArray(window.shotLog) ? window.shotLog.length : 0;
@@ -1604,7 +1637,7 @@ export function initHUDForVideo(videoEl) {
             const issues = (typeof window.summarizePoseIssues === 'function')
               ? (window.summarizePoseIssues(s, golden) || [])
               : [];
-            const line = issues.length ? issues.slice(0,2).join(' ') : 'Solid form. Hold your follow‑through.';
+            const line = issues.length ? issues.slice(0,2).join(' ') : 'Solid form. Hold your followâ€‘through.';
             s.doach = line;
             try {
               const cell = modal.querySelector(`tbody tr[data-shot-idx="${i+1}"] td.coach`) || null;
@@ -1648,7 +1681,7 @@ export function initHUDForVideo(videoEl) {
       try { window.__summaryShown = true; } catch {}
     } catch {}
     // Announce + trigger coach session summary
-    try { window.coachSpeak?.("That's your tenth shot — let's review the session."); } catch {}
+    try { window.coachSpeak?.("That's your tenth shot â€” let's review the session."); } catch {}
     try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
     try { window.__summaryShown = true; } catch {}
   }
@@ -1688,10 +1721,10 @@ async function hydrateAiFeedbackFromServer() {
       // Inform the user in the review line
       try {
         const line = modal?.querySelector('#sessReviewLine') || null;
-        if (line) { line.style.display = 'block'; line.textContent = 'Server offline — showing local summaries only.'; }
+        if (line) { line.style.display = 'block'; line.textContent = 'Server offline â€” showing local summaries only.'; }
       } catch {}
       const list = (window.__shotList || window.shotLog || []);
-      const need = Math.min(list.length, Number(window.SESSION_SIZE || list.length || 0));
+      const need = Math.min(list.length, getSessionCap());
       let present = 0, haveMade = 0;
       for (let i = 0; i < list.length && i < need; i++) {
         const idx = i + 1;
@@ -1711,7 +1744,7 @@ async function hydrateAiFeedbackFromServer() {
           badge.style.background = '#22c55e';
           badge.style.color = '#071607';
         } else {
-          badge.textContent = `Server offline… ${present}/${need || list.length || 0}`;
+          badge.textContent = `Server offlineâ€¦ ${present}/${need || list.length || 0}`;
           badge.style.background = '#ef4444';
           badge.style.color = '#0b0b0b';
         }
@@ -1851,7 +1884,7 @@ function updateShotCells(idx, shot) {
     if (!tr) return;
     const set = (sel, val) => { const el = tr.querySelector(sel); if (el) el.textContent = val; };
     // Result
-    if (typeof shot.made === 'boolean') set('.result', shot.made ? '✅' : '❌');
+    if (typeof shot.made === 'boolean') set('.result', shot.made ? 'âœ…' : 'âŒ');
     // Arc / Entry / Release
     if (shot.arcHeight != null) set('.arc', `${Math.round(shot.arcHeight)||0}`);
     if (shot.entryAngle != null) set('.entry', `${shot.entryAngle}`);
@@ -1866,7 +1899,7 @@ function updateFinalizationBadgeFromDebug(j) {
     const badge = modal.querySelector('#sessFinalBadge');
     if (!badge) return { present:0, haveMade:0, need:0, done:false };
     const list = window.__shotList || [];
-    const need = Math.min(list.length, Number(window.SESSION_SIZE || 10));
+    const need = Math.min(list.length, getSessionCap());
     const sdb = Array.isArray(j?.shotsDB) ? j.shotsDB : [];
     const sj  = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots : [];
     const presentIdx = new Set();
@@ -1895,7 +1928,7 @@ function updateFinalizationBadgeFromDebug(j) {
       badge.style.background = '#22c55e';
       badge.style.color = '#071607';
     } else {
-      badge.textContent = `Finalizing… ${present}/${need}`;
+      badge.textContent = `Finalizingâ€¦ ${present}/${need}`;
       badge.style.background = '#f59e0b';
       badge.style.color = '#111';
     }
@@ -1938,7 +1971,7 @@ function ensureShotTableStyles(){
         btn.id = 'replayBest';
         btn.className = 'vc-btn';
         btn.title = 'Replay Best Shot';
-        btn.textContent = 'Best ▶';
+        btn.textContent = 'Best â–¶';
         btn.addEventListener('click', () => { try { window.playShotReplay?.({ id: (__bestIdx + 1) }); } catch {} });
         actions.insertBefore(btn, actions.querySelector('#exportCSV'));
       }
@@ -2007,16 +2040,16 @@ function openShotReplay(shot) {
   box.innerHTML = '';
   const header = document.createElement('div');
   header.style.display = 'flex'; header.style.alignItems = 'center'; header.style.justifyContent='space-between'; header.style.margin='4px 6px 6px';
-  header.innerHTML = `<div style="font-weight:700">Replay — Shot ${shot.__idx || '?'} ${shot.made ? '✅' : '❌'}</div>
+  header.innerHTML = `<div style="font-weight:700">Replay â€” Shot ${shot.__idx || '?'} ${shot.made ? 'âœ…' : 'âŒ'}</div>
     <div>
-      <button id="replayToggle" class="vc-btn" style="margin-right:6px">⏯</button>
-      <button id="replayClose" class="vc-btn">✖</button>
+      <button id="replayToggle" class="vc-btn" style="margin-right:6px">â¯</button>
+      <button id="replayClose" class="vc-btn">âœ–</button>
     </div>`;
   box.appendChild(header);
 
   const info = document.createElement('div');
   info.style.font = '600 12px system-ui'; info.style.opacity = '0.85'; info.style.margin = '0 8px 6px';
-  info.textContent = `Arc ${Math.round(shot.arcHeight||0)}px · Entry ${shot.entryAngle??'–'}° · Release ${shot.releaseAngle??'–'}°`;
+  info.textContent = `Arc ${Math.round(shot.arcHeight||0)}px Â· Entry ${shot.entryAngle??'â€“'}Â° Â· Release ${shot.releaseAngle??'â€“'}Â°`;
   box.appendChild(info);
 
   const canvas = document.createElement('canvas');
@@ -2142,7 +2175,7 @@ async function showCenterCountdownAndPrompt(sec = 5) {
       });
     }
     name = (localStorage.getItem('firstname') || name || 'player');
-    const promptEl = showCenterPrompt('Get ready…');
+    const promptEl = showCenterPrompt('Get readyâ€¦');
     try { speak(`Hi ${name}, tap the hoop to begin the session.`); } catch {}
     for (let i = sec; i >= 1; i--) {
       promptEl.textContent = String(i);
@@ -2224,9 +2257,9 @@ try { if (typeof window.startShotTrackingCountdown !== 'function') window.startS
   window.addEventListener('video:Slow:on',  () => setRate(0.25));
   window.addEventListener('video:Slow:off', () => setRate(1));
 
-  // Hard guard: don’t allow slow-mo to linger
+  // Hard guard: donâ€™t allow slow-mo to linger
   (function tick(){
-    // if rate < 0.9 longer than configured slow-mo, bail out to 1×
+    // if rate < 0.9 longer than configured slow-mo, bail out to 1Ã—
     const maxMs = Math.max(2000, (Number(window.Slow_MS) || 1200) + 600);
     if (v.playbackRate < 0.9 && performance.now() - lastRateSetAt > maxMs) {
       setRate(1);
@@ -2236,7 +2269,7 @@ try { if (typeof window.startShotTrackingCountdown !== 'function') window.startS
 })();
 
 
-// Hard exit to 1× as soon as summary is received
+// Hard exit to 1Ã— as soon as summary is received
 window.addEventListener('shot:summary', () => {
   const v = document.getElementById('videoPlayer') || document.querySelector('video');
   if (v) { try { v.playbackRate = 1; } catch {} }
@@ -2303,8 +2336,8 @@ window.addEventListener('shot:summary', () => {
   // This is visual/log-only; summaries still come from the scorer.
   window.addEventListener('hud:score-trip', (e) => {
     try {
-      // Cap session at SESSION_SIZE
-      try { const cap = Number(window.SESSION_SIZE||10); const cur = (window.__shotList||[]).length; if (cur >= cap) return; } catch {}
+      // Cap session at cap_DEFAULT
+      try { const cap = getSessionCap(); const cur = (window.__shotList||[]).length; if (shouldEnforceSessionCap() && cur >= cap) return; } catch {}
       const list = (window.__shotList ||= []);
       // Prefer frame from event; fallback to latest sampler index or RELEASE_SCORE
       let rf = Number(e?.detail?.frame);
@@ -2365,7 +2398,7 @@ window.addEventListener('shot:summary', () => {
       })();
 
       // Auto end at cap
-      try { const cap = Number(window.SESSION_SIZE||10); if (taken >= cap) autoEndSessionAndSummarize(); } catch {}
+      try { const cap = getSessionCap(); if (shouldEnforceSessionCap() && taken >= cap) autoEndSessionAndSummarize(); } catch {}
 
       // If the full table is open, refresh so the new row appears as "pending"
       try {
@@ -2385,14 +2418,16 @@ window.addEventListener('shot:summary', () => {
       window.updateSessionHUD?.({ taken: cnt, elapsedSec });
       if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:update:mShots]', { taken: cnt });
       // Auto-end as soon as HUD count reaches cap
-      try {
-        const cap = Number(window.SESSION_SIZE || 10);
-        if (cnt >= cap && !window.__sessionCapped) {
-          window.__sessionCapped = true;
-          autoEndSessionAndSummarize();
-          return;
-        }
-      } catch {}
+      if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
+        try {
+          const cap = getSessionCap();
+          if (shouldEnforceSessionCap() && cnt >= cap && !window.__sessionCapped) {
+            window.__sessionCapped = true;
+            autoEndSessionAndSummarize();
+            return;
+          }
+        } catch {}
+      }
       // Ensure local list has a pending record for this HUD shot index
       try {
         // Require pose present
@@ -2449,7 +2484,7 @@ window.addEventListener('shot:summary', () => {
         } catch {}
       })();
       // Auto end at cap
-      try { const cap = Number(window.SESSION_SIZE||10); if (cnt >= cap) autoEndSessionAndSummarize(); } catch {}
+      try { const cap = getSessionCap(); if (shouldEnforceSessionCap() && cnt >= cap) autoEndSessionAndSummarize(); } catch {}
     } catch {}
   });
 })();
@@ -2498,7 +2533,7 @@ window.showCenterPrompt = showCenterPrompt;
       // Start admin observer streaming automatically for demos
       try { window.startObserverStreaming?.(2); } catch {}
 
-      // For the next ~2.5s after lock, actively sample pose at ~8–10 fps
+      // For the next ~2.5s after lock, actively sample pose at ~8â€“10 fps
       // so playerState keeps moving even if analyzer is spinning up.
       try { clearInterval(window.__forcePoseInterval); } catch {}
       const T0 = performance.now();
@@ -2526,3 +2561,44 @@ window.showCenterPrompt = showCenterPrompt;
     } catch {}
   }, { passive: true });
 })();
+
+window.addEventListener('session:ended', () => {
+  try {
+    if (__capEnforceTimer) {
+      clearTimeout(__capEnforceTimer);
+      __capEnforceTimer = null;
+    }
+  } catch {}
+});
+
+window.addEventListener('shot:summary', () => {
+  try {
+    const cap = getSessionCap();
+    if (!Number.isFinite(cap) || cap <= 0) return;
+    const count = Number(window.__SESSION_SHOT_COUNT || 0);
+    if (shouldEnforceSessionCap() && count >= cap) {
+      if (__capEnforceTimer) return;
+      const delay = Math.max(600, Number(window.CAP_SUMMARY_GRACE_MS || 1600));
+      __capEnforceTimer = setTimeout(() => {
+        __capEnforceTimer = null;
+        try {
+          if (window.__sessionEnded === true || window.__sessionCapped === true) return;
+          console.warn('[video_ui] cap fallback auto-end', { cap, count });
+          const maybe = autoEndSessionAndSummarize?.();
+          if (maybe && typeof maybe.catch === 'function') {
+            maybe.catch(() => {});
+          }
+        } catch {}
+      }, delay);
+    }
+  } catch {}
+});
+
+
+
+
+
+
+
+
+
