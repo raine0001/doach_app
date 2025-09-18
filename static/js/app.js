@@ -2,7 +2,7 @@
 // app.js with overlay drawing integrated
 // boot marker for E2E
 try { window.__appJsLoaded = true; } catch {}
-try { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = true; } catch {}
+try { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = false; } catch {}
 import { initOverlay, drawLiveOverlay, sendFrameToDetect,
          syncOverlayToVideo, updateDebugOverlay, ensureOverlayCss,
          installOverlayTracer, removeOverlayTracer } from './fix_overlay_display.js';
@@ -840,6 +840,10 @@ try {
     window.setPreferredCamera = async function setPreferredCamera(deviceId){
       try { localStorage.setItem('doach_camera_id', String(deviceId || '')); } catch {}
       try { stopCamera(); await startCamera(); } catch {}
+      try {
+        const facing = localStorage.getItem('doach_camera_facing') || null;
+        window.dispatchEvent(new CustomEvent('camera:facing-changed', { detail: { facing } }));
+      } catch {}
     };
   }
   if (typeof window.setPreferredFacing !== 'function') {
@@ -847,6 +851,7 @@ try {
       try { localStorage.setItem('doach_camera_facing', String(facing || 'environment')); } catch {}
       try { localStorage.removeItem('doach_camera_id'); } catch {}
       try { stopCamera(); await startCamera(); } catch {}
+      try { window.dispatchEvent(new CustomEvent('camera:facing-changed', { detail: { facing } })); } catch {}
     };
   }
   if (typeof window.flipCamera !== 'function') {
@@ -857,6 +862,7 @@ try {
         localStorage.setItem('doach_camera_facing', next);
         localStorage.removeItem('doach_camera_id');
         stopCamera(); await startCamera();
+        try { window.dispatchEvent(new CustomEvent('camera:facing-changed', { detail: { facing: next } })); } catch {}
       } catch (e) { console.warn('flipCamera failed', e); }
     };
   }
@@ -4044,7 +4050,3 @@ window.resetShots = window.resetShots || function () {
     }
   } catch {}
 })();
-
-
-
-

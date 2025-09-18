@@ -8,8 +8,18 @@ import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './ho
 
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection;
-try { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = true; } catch {}
+try { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = false; } catch {}
 const shouldEnforceSessionCap = () => window.__sessionContinue !== true;
+const ICON_AUDIO_ON = '\u{1F50A}';      // speaker with sound
+const ICON_AUDIO_OFF = '\u{1F507}';     // muted speaker
+const ICON_CAMERA_FRONT = '\u{1F4F8}';  // front/selfie camera
+const ICON_CAMERA_BACK = '\u{1F4F7}';   // rear camera
+const ICON_CAMERA_SWITCH = '\u{1F503}'; // camera switch arrows
+const SYMBOL_INFINITY = '\u{221E}';     // infinity symbol
+
+const formatCameraFacing = (label) => ((label === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + label;
+const formatHudCameraLabel = (label) => formatCameraFacing(label) + ' Camera';
+const formatCapDisplay = (cap) => (Number.isFinite(cap) && cap > 0) ? String(cap) : SYMBOL_INFINITY;
 
 // Connection banner: show backend origin and active session id
 // ---------------------------------------------------------------
@@ -817,17 +827,18 @@ export async function mountCameraSwitcher() {
       padding: '8px 10px', font: '600 12px system-ui',
       pointerEvents: 'auto', zIndex: 10005, cursor: 'pointer'
     });
-    btn.textContent = 'Back  ðŸ”';
+    btn.textContent = formatCameraFacing(currentFacingLabel());
     root.appendChild(btn);
   }
 
   const refresh = () => {
     try {
       const lab = currentFacingLabel();
-      btn.textContent = (lab === 'Back' ? 'Back' : 'Front') + '  ðŸ”';
+      btn.textContent = formatCameraFacing(lab) + ' ' + ICON_CAMERA_SWITCH;
     } catch {}
   };
   refresh();
+  try { window.addEventListener('camera:facing-changed', refresh); } catch {}
 
   let pressTimer = null, pop = null;
 
@@ -907,8 +918,8 @@ export function mountSessionHUD() {
     });
 
     bar.innerHTML = `
-      <button id="hudMute" class="vc-btn" title="Mute/Unmute">ðŸ”‡</button>
-      <button id="hudCamFlip" class="vc-btn" title="Flip Camera">ðŸ“·â†º</button>
+      <button id="hudMute" class="vc-btn" title="Mute/Unmute"></button>
+      <button id="hudCamFlip" class="vc-btn" title="Flip Camera"></button>
 
       <div class="hud-metric" id="mShots"><div class="num">0/10</div><div class="label">Shots Taken</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
@@ -921,11 +932,30 @@ export function mountSessionHUD() {
     const muteBtn = bar.querySelector('#hudMute');
     const camBtn  = bar.querySelector('#hudCamFlip');
 
+    const updateHudCamButton = () => {
+      if (!camBtn) return;
+      try {
+        camBtn.textContent = formatHudCameraLabel(currentFacingLabel());
+      } catch {
+        camBtn.textContent = 'Camera';
+      }
+    };
+    updateHudCamButton();
+    try { window.addEventListener('camera:facing-changed', updateHudCamButton); } catch {}
+
+    try {
+      const shotsNum = bar.querySelector('#mShots .num');
+      if (shotsNum) {
+        const capText = formatCapDisplay(getSessionCap());
+        shotsNum.textContent = `0/${capText}`;
+      }
+    } catch {}
+
     // --- unified apply function: UI, storage, prefs, event
     const applyMute = (muted) => {
       // button reflects CURRENT state
       muteBtn.setAttribute('data-muted', muted ? '1' : '0');
-      muteBtn.textContent = muted ? 'ðŸ”‡' : 'ðŸ”Š';
+      muteBtn.textContent = muted ? ICON_AUDIO_OFF + ' Voice Off' : ICON_AUDIO_ON + ' Voice On';
       // keep any legacy floating cam toggle hidden; HUD contains the control now
       try { const legacy = document.getElementById('camToggleBtn'); if (legacy) legacy.style.display = 'none'; } catch {}
 
@@ -970,7 +1000,11 @@ export function mountSessionHUD() {
         localStorage.setItem('doach_camera_facing', next);
         if (typeof window.setPreferredFacing === 'function') await window.setPreferredFacing(next);
         else if (typeof window.flipCamera === 'function') await window.flipCamera();
-      } catch (err) { console.warn('[hud] flip camera failed', err); }
+      } catch (err) {
+        console.warn('[hud] flip camera failed', err);
+      } finally {
+        updateHudCamButton();
+      }
     });
 
     // other HUD buttons (unchanged)
@@ -1038,7 +1072,7 @@ try { if (typeof window.updateSessionHUD !== "function") window.updateSessionHUD
     taken = Math.max(cur, canonTaken, hudTaken);
   } catch {}
   if (elShots) {
-    const capDisplay = getSessionCap();
+    const capDisplay = formatCapDisplay(getSessionCap());
     elShots.textContent = `${taken}/${capDisplay}`;
   }
   // Makes/Accuracy hidden in simplified HUD; keep code paths no-op for future use
@@ -1146,7 +1180,7 @@ function renderFullShotTable() {
   modal.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
-        <span>ðŸ“‹ Shot Summary (${list.length}/${getSessionCap()})</span>
+        <span>ðŸ“‹ Shot Summary (${list.length}/${formatCapDisplay(getSessionCap())})</span>
         <span id=\"sessFinalBadge\" style=\"display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;\">Finalizingâ€¦</span>
       </div>
       <div>
@@ -2604,13 +2638,3 @@ window.addEventListener('shot:summary', () => {
     }
   } catch {}
 });
-
-
-
-
-
-
-
-
-
-
