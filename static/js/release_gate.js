@@ -58,6 +58,11 @@ try { window.SESSION_MANAGER_OWNS_ENDING = true; } catch {}
 try { window.DEFER_FE_SUMMARY = false; } catch {}
 
 
+try { initReleaseConfig?.(); } catch {}
+try { window.SESSION_MANAGER_OWNS_ENDING = true; } catch {}
+try { window.DEFER_FE_SUMMARY = false; } catch {}
+
+
 export function getReleaseKnobs(){ return { ...(window.REL_CFG || {}) }; }
 export function setReleaseKnobs(patch){
   const cur = window.REL_CFG || {};
