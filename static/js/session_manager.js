@@ -4,7 +4,17 @@ import { speak, listenForEndSession } from '/static/js/coach_voice.js';
 
 async function postJSON(url, body) {
   const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}), credentials:'include' });
-  if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
+  const text = await r.text();
+  let data;
+  try { data = text ? JSON.parse(text) : {}; } catch { data = {}; }
+  if (!r.ok) {
+    const errMsg = data?.err || data?.error || data?.message || ('HTTP '+r.status);
+    const error = new Error(errMsg);
+    error.status = r.status;
+    error.response = data;
+    throw error;
+  }
+  return data;
 }
 
 async function uploadBlob(url, blob, filename='clip.webm', field='file') {
@@ -18,6 +28,7 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
   if (!btnStart || !btnEnd) return;
 
   let sessId = null; let shotIdx = 0; let rec = null; let recChunks = []; let recStream = null; let recCanvas = null;
+  let pendingChallengeSlug = null;
 
   function startRecorder() {
     try {
@@ -69,8 +80,19 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
         speak(`Hi ${name}, select the hoop, then shoot when ready.`);
       } catch {}
       try { window.enableHoopPickOnce?.(); window.showPrompt?.('Tap the hoop to lock it'); } catch {}
-      const res = await postJSON('/api/sessions/start', { device: navigator.userAgent });
+      const body = { device: navigator.userAgent };
+      const challengeSlug = pendingChallengeSlug || window.__pendingChallengeEvent || null;
+      if (challengeSlug) {
+        body.event = challengeSlug;
+        body.challenge = true;
+      }
+      const res = await postJSON('/api/sessions/start', body);
       sessId = res.id; shotIdx = 0; try { window.__SESSION_ID = sessId; window.__SHOT_IDX = shotIdx; } catch {}
+      if (challengeSlug) {
+        pendingChallengeSlug = null;
+        try { window.__pendingChallengeEvent = null; } catch {}
+        window.dispatchEvent(new CustomEvent('challenge:session-started', { detail: { slug: challengeSlug, payload: res.event||null, sessionId: sessId } }));
+      }
       try { document.querySelectorAll('.video-controls').forEach(el => el.remove()); } catch {}
       try { window.mountSessionHUD?.(); window.setSessionStatus?.('SESSION IN PROGRESS'); } catch {}
 
@@ -162,6 +184,11 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
       btnStart.disabled = true; btnEnd.disabled = false;
     } catch (e) {
       console.warn('startSession failed', e);
+      if (pendingChallengeSlug) {
+        window.dispatchEvent(new CustomEvent('challenge:session-start-error', { detail: { slug: pendingChallengeSlug, error: e } }));
+        pendingChallengeSlug = null;
+        try { window.__pendingChallengeEvent = null; } catch {}
+      }
     }
   }
 
@@ -178,4 +205,11 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
   // HUD integration: respond to bottom bar events
   window.addEventListener('hud:end-session', () => { try { endSession(); } catch {} });
   window.addEventListener('hud:start-session', () => { try { startSession(); } catch {} });
+
+  window.startChallengeSession = async function startChallengeSession(slug) {
+    if (!slug) return;
+    pendingChallengeSlug = slug;
+    try { window.__pendingChallengeEvent = slug; } catch {}
+    await startSession();
+  };
 })();

@@ -18,6 +18,7 @@ import base64
 from openai import OpenAI
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import UniqueConstraint, Index, String, Integer, Float, Boolean, Date, DateTime, Text, JSON as MyJSON
 import traceback
 import re
 import csv
@@ -29,7 +30,8 @@ import time
 from pathlib import Path
 import io
 import wave
-from datetime import datetime
+from datetime import date, datetime
+from collections import defaultdict
 import threading
 try:
     from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey
@@ -66,7 +68,7 @@ except Exception:
 # Simple trace flag (enable with DOACH_TRACE=1)
 try:
     _TRACE = os.getenv('DOACH_TRACE', '1')
-    TRACE_ON = not (_TRACE.lower() in ('0', 'false', 'no', 'off', ''))
+    TRACE_ON = _TRACE.lower() not in ('0', 'false', 'no', 'off', '')
 except Exception:
     TRACE_ON = True
 
@@ -287,9 +289,14 @@ def _new_session_id():
 
 @app.post('/api/sessions/start')
 def api_session_start():
-    b = request.get_json() or {}
+    b = request.get_json(silent=True) or {}
     sid = b.get('id') or _new_session_id()
     now = int(time.time()*1000)
+    event_slug = (b.get('event') or request.args.get('event') or '').strip()
+    user_id = session.get('user_id')
+    challenge_mode = bool(event_slug)
+    if challenge_mode and not user_id:
+        return jsonify({'ok': False, 'err': 'auth'}), 401
     sess = {
         'id': sid,
         'startedAt': now,
@@ -299,13 +306,31 @@ def api_session_start():
         'shots': [],
         'totals': { 'attempts': 0, 'made': 0, 'accuracy': 0 }
     }
-    _write_session(sid, sess)
+    if challenge_mode:
+        sess['event'] = event_slug
+        sess['challenge'] = True
+    event_payload = None
     try:
         _db_add_session(sid, now)
     except Exception as e:
         _trace('db add session error:', e)
-    _trace('api:sessions/start', {'sid': sid, 'device': sess.get('device')})
-    return jsonify({ 'id': sid, 'startedAt': now })
+    if challenge_mode:
+        try:
+            res = _db_event_start_challenge_session(sid, user_id, event_slug, now)
+        except Exception as e:
+            _db_delete_session_row(sid)
+            return jsonify({'ok': False, 'err': 'challenge start failed', 'detail': str(e)}), 500
+        if not res.get('ok'):
+            _db_delete_session_row(sid)
+            err = res.get('err') or 'challenge start failed'
+            return jsonify({'ok': False, 'err': err, **{k: v for k, v in res.items() if k not in {'ok', 'err'}}}), 400
+        event_payload = res
+    _write_session(sid, sess)
+    payload = { 'ok': True, 'id': sid, 'startedAt': now }
+    if event_payload:
+        payload['event'] = event_payload
+    _trace('api:sessions/start', {'sid': sid, 'device': sess.get('device'), 'challenge': bool(event_payload)})
+    return jsonify(payload)
 
 @app.post('/api/sessions/<sid>/shot')
 def api_session_add_shot(sid):
@@ -591,11 +616,65 @@ def _try_init_db():
             latency_ms = Column(Integer)
             text = Column(Text)
 
+
+        class Event(Base):
+            __tablename__ = 'events'
+            id           = Column(Integer, primary_key=True, autoincrement=True)
+            slug         = Column(String(80), unique=True, nullable=False)   # 'cav-camps-2025'
+            name         = Column(String(160), nullable=False)
+            start_date   = Column(Date, nullable=False)
+            end_date     = Column(Date, nullable=False)
+            daily_limit  = Column(Integer, nullable=False, default=1)        # 1 challenge session / day
+            min_shots    = Column(Integer, nullable=False, default=10)       # session must have >=10
+            tz           = Column(String(64), nullable=True)                  # optional IANA tz
+            created_at   = Column(DateTime, default=datetime.utcnow)
+
+        class EventRegistration(Base):
+            __tablename__ = 'event_registrations'
+            id           = Column(Integer, primary_key=True, autoincrement=True)
+            event_id     = Column(Integer, ForeignKey('events.id', ondelete='CASCADE'), nullable=False)
+            user_id      = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
+            registered_at= Column(DateTime, default=datetime.utcnow)
+            dob          = Column(Date)                                       # snapshot or from profile
+            age_group    = Column(String(16), nullable=False)                 # '<11','11-14','14-16','17-19','>19'
+            __table_args__ = (UniqueConstraint('event_id','user_id', name='uq_event_user'),)
+
+        class EventSession(Base):
+            __tablename__ = 'event_sessions'
+            id           = Column(Integer, primary_key=True, autoincrement=True)
+            event_id     = Column(Integer, ForeignKey('events.id', ondelete='CASCADE'), nullable=False)
+            user_id      = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), nullable=False)
+            session_id   = Column(String(64), ForeignKey('sessions.sid', ondelete='SET NULL'))
+            session_date = Column(Date, nullable=False)                       # event-local date (use UTC if no tz)
+            eligible     = Column(Boolean, nullable=False, default=True)
+            analyzed     = Column(Boolean, nullable=False, default=False)
+            makes        = Column(Integer)
+            attempts     = Column(Integer)
+            created_at   = Column(DateTime, default=datetime.utcnow)
+            __table_args__ = (
+                UniqueConstraint('event_id','user_id','session_date', name='uq_event_user_day'),
+                Index('ix_event_user', 'event_id','user_id'),
+            )
+
+        class EventUserStats(Base):
+            __tablename__ = 'event_user_stats'
+            event_id       = Column(Integer, ForeignKey('events.id', ondelete='CASCADE'), primary_key=True)
+            user_id        = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), primary_key=True)
+            total_makes    = Column(Integer, nullable=False, default=0)
+            total_attempts = Column(Integer, nullable=False, default=0)
+            best_session_mk= Column(Integer, nullable=False, default=0)
+            best_session_att=Column(Integer, nullable=False, default=0)
+            first4_avg_mk  = Column(Float)
+            last3_avg_mk   = Column(Float)
+            improvement    = Column(Float)                                    # last3 - first4
+            age_group      = Column(String(16), nullable=False)               # mirror from registration
+            updated_at     = Column(DateTime, default=datetime.utcnow)
+
         Base.metadata.create_all(engine)
         DBSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
         # attach to app for reuse
-        app.db = { 'engine': engine, 'Session': DBSessionLocal, 'User': User, 'SessionRow': SessionRow, 'ShotRow': ShotRow, 'PoseSnapshotRow': PoseSnapshotRow, 'CoachFeedbackRow': CoachFeedbackRow }
+        app.db = { 'engine': engine, 'Session': DBSessionLocal, 'User': User, 'SessionRow': SessionRow, 'ShotRow': ShotRow, 'PoseSnapshotRow': PoseSnapshotRow, 'CoachFeedbackRow': CoachFeedbackRow, 'Event': Event, 'EventRegistration': EventRegistration, 'EventSession': EventSession, 'EventUserStats': EventUserStats }
         print('✅ SQLAlchemy connected')
         return app.db
     except Exception as e:
@@ -618,6 +697,20 @@ def _db_add_session(sid, started_at):
             s.commit()
     except Exception as e:
         print('db_add_session:', e)
+
+
+def _db_delete_session_row(sid):
+    try:
+        db = getattr(app, 'db', None)
+        if not db:
+            return
+        with db['Session']() as s:
+            row = s.get(db['SessionRow'], sid)
+            if row:
+                s.delete(row)
+                s.commit()
+    except Exception as e:
+        print('db_delete_session:', e)
 
 def _db_add_shot(sid, idx, payload):
     try:
@@ -676,7 +769,7 @@ def _db_add_shot(sid, idx, payload):
                     total, makes = s.execute(
                         select(
                             func.count(ShotRow.id),
-                            func.sum(case((ShotRow.made == True, 1), else_=0)),
+                            func.sum(case((ShotRow.made, 1), else_=0)),
                         ).where(ShotRow.sid == sid)
                     ).one()
                     sess.shots_count = int(total or 0)
@@ -750,8 +843,68 @@ def _db_finalize_session(sid):
             if sess:
                 sess.ended_at = datetime.utcnow()
                 s.commit()
+        try:
+            _db_event_finalize_from_session(sid)
+        except Exception as evt_err:
+            print('db_finalize_session:event', evt_err)
     except Exception as e:
         print('db_finalize_session:', e)
+
+def _age_group_from_dob(dob: date, ref: date) -> str:
+    if not dob or not ref: 
+        return '>19'
+    years = (ref - dob).days // 365
+    if years < 11:
+        return '<11'
+    if years <= 14: 
+        return '11-14'
+    if years <= 16:
+        return '14-16'
+    if years <= 19:
+        return '17-19'
+    return '>19'
+
+def _event_local_date(dt_utc: datetime, tz_name: str|None) -> date:
+    # keep simple: use UTC if tz missing
+    try:
+        if tz_name:
+            import zoneinfo
+            return dt_utc.astimezone(zoneinfo.ZoneInfo(tz_name)).date()
+    except Exception:
+        pass
+    return dt_utc.date()
+
+def _db_event_register(user_id: int, event_slug: str, dob_iso: str|None=None):
+    db = getattr(app, 'db', None)
+    if not db: 
+        return {'ok': False, 'err':'db unavailable'}
+    with db['Session']() as s:
+        Event, EventRegistration = db['Event'], db['EventRegistration']
+        ev = s.query(Event).filter(Event.slug==event_slug).one_or_none()
+        if not ev: 
+            return {'ok': False, 'err':'event not found'}
+        dob = None
+        try:
+            if dob_iso: 
+                dob = datetime.strptime(dob_iso, '%Y-%m-%d').date()
+        except Exception:
+            pass
+        ag = _age_group_from_dob(dob, ev.start_date)
+        # upsert-ish
+        reg = s.query(EventRegistration).filter_by(event_id=ev.id, user_id=user_id).one_or_none()
+        if not reg:
+            reg = EventRegistration(event_id=ev.id, user_id=user_id, dob=dob, age_group=ag)
+            s.add(reg)
+        else:
+            if dob:
+                reg.dob = dob
+                reg.age_group = ag
+            elif not reg.age_group:
+                reg.age_group = ag
+        s.commit()
+        return {'ok': True, 'event_id': ev.id, 'age_group': reg.age_group}
+
+
 
 
 # ---------------------- Auth (register/login/logout) ---------------------
@@ -1070,8 +1223,10 @@ def api_coach_finalize():
                 if row:
                     row.text = text
                     row.provider = provider
-                    if model: row.model = model
-                    if latency_ms: row.latency_ms = latency_ms
+                    if model: 
+                        row.model = model
+                    if latency_ms: 
+                        row.latency_ms = latency_ms
                 else:
                     sdb.add(FB(sid=sid, shot_idx=shot_idx, provider=provider, model=model, latency_ms=latency_ms, text=text))
             Shot = db.get('ShotRow')
@@ -2663,6 +2818,560 @@ def copy_label_to_dataset():
 @app.get('/healthz')
 def healthz():
     return jsonify({'status': 'ok'})
+
+def _db_event_start_challenge_session(sid: str, user_id: int, event_slug: str, started_ms: int):
+    db = getattr(app, 'db', None)
+    if not db:
+        return {'ok': False, 'err': 'db unavailable'}
+    with db['Session']() as s:
+        Event = db['Event']
+        EventRegistration = db['EventRegistration']
+        EventSession = db['EventSession']
+        ev = s.query(Event).filter(Event.slug == event_slug).one_or_none()
+        if not ev:
+            return {'ok': False, 'err': 'event not found'}
+        reg = s.query(EventRegistration).filter_by(event_id=ev.id, user_id=user_id).one_or_none()
+        if not reg:
+            return {'ok': False, 'err': 'not registered'}
+        started = datetime.utcfromtimestamp(started_ms / 1000.0)
+        session_date = _event_local_date(started, ev.tz)
+        within_window = True
+        window_state = 'active'
+        try:
+            if ev.start_date and session_date < ev.start_date:
+                within_window = False
+                window_state = 'upcoming'
+            if ev.end_date and session_date > ev.end_date:
+                within_window = False
+                window_state = 'closed'
+        except Exception:
+            within_window = True
+            window_state = 'active'
+        if not within_window:
+            return {'ok': False, 'err': 'event inactive', 'window': window_state}
+        existing_today = (
+            s.query(EventSession)
+            .filter_by(event_id=ev.id, user_id=user_id, session_date=session_date)
+            .order_by(EventSession.id.asc())
+            .all()
+        )
+        daily_limit = int(getattr(ev, 'daily_limit', 1) or 1)
+        if daily_limit and len(existing_today) >= daily_limit:
+            return {
+                'ok': False,
+                'err': 'daily limit reached',
+                'limit': daily_limit,
+                'session_date': session_date.isoformat(),
+            }
+        es = EventSession(
+            event_id=ev.id,
+            user_id=user_id,
+            session_id=sid,
+            session_date=session_date,
+            eligible=True,
+            analyzed=False,
+        )
+        s.add(es)
+        s.commit()
+        return {
+            'ok': True,
+            'event_session_id': es.id,
+            'event_id': ev.id,
+            'slug': ev.slug,
+            'name': ev.name,
+            'session_date': session_date.isoformat(),
+            'eligible': es.eligible,
+            'daily_used': len(existing_today) + 1,
+            'daily_limit': daily_limit,
+        }
+
+
+def _db_event_finalize_from_session(sid: str):
+    """If this sid is a challenge session, mark analyzed and recompute user stats."""
+    db = getattr(app, 'db', None)
+    if not db:
+        return
+    with db['Session']() as s:
+        Event = db['Event']
+        EventRegistration = db['EventRegistration']
+        EventSession = db['EventSession']
+        EventUserStats = db['EventUserStats']
+        SessionRow = db['SessionRow']
+        sess = s.get(SessionRow, sid)
+        if not sess:
+            return
+        es = s.query(EventSession).filter_by(session_id=sid).one_or_none()
+        if not es:
+            return
+        ev = s.query(Event).filter_by(id=es.event_id).one_or_none()
+        if not ev:
+            return
+        es.makes = int(sess.makes or 0)
+        es.attempts = int(sess.shots_count or 0)
+        min_shots = int(getattr(ev, 'min_shots', 0) or 0)
+        eligible = True
+        if min_shots and (es.attempts or 0) < min_shots:
+            eligible = False
+        try:
+            if es.session_date:
+                if getattr(ev, 'start_date', None) and es.session_date < ev.start_date:
+                    eligible = False
+                if getattr(ev, 'end_date', None) and es.session_date > ev.end_date:
+                    eligible = False
+        except Exception:
+            pass
+        es.eligible = eligible
+        es.analyzed = True
+        s.flush()
+
+        rows = (
+            s.query(EventSession)
+            .filter_by(event_id=ev.id, user_id=es.user_id, eligible=True, analyzed=True)
+            .order_by(EventSession.session_date.asc(), EventSession.id.asc())
+            .all()
+        )
+        total_makes = sum((r.makes or 0) for r in rows)
+        total_attempts = sum((r.attempts or 0) for r in rows)
+        best_row = None
+        best_key = None
+        for r in rows:
+            makes = int(r.makes or 0)
+            attempts = int(r.attempts or 0)
+            accuracy = (makes / attempts) if attempts else 0.0
+            date_ord = r.session_date.toordinal() if getattr(r, 'session_date', None) else -10**9
+            key = (makes, accuracy, -date_ord)
+            if best_key is None or key > best_key:
+                best_key = key
+                best_row = r
+        best_mk = int(best_row.makes or 0) if best_row else 0
+        best_att = int(best_row.attempts or 0) if best_row else 0
+        first4 = rows[:4]
+        last3 = rows[-3:] if len(rows) >= 3 else rows[-len(rows):]
+
+        def _avg_makes(items):
+            return (sum((r.makes or 0) for r in items) / float(len(items))) if items else None
+
+        f4 = _avg_makes(first4)
+        l3 = _avg_makes(last3)
+        improvement = (l3 - f4) if (f4 is not None and l3 is not None) else None
+
+        stats = s.get(EventUserStats, (ev.id, es.user_id))
+        reg = s.query(EventRegistration).filter_by(event_id=ev.id, user_id=es.user_id).one_or_none()
+        if not stats:
+            stats = EventUserStats(
+                event_id=ev.id,
+                user_id=es.user_id,
+                age_group=(reg.age_group if reg else '>19'),
+            )
+            s.add(stats)
+        elif reg and reg.age_group and stats.age_group != reg.age_group:
+            stats.age_group = reg.age_group
+        stats.total_makes = total_makes
+        stats.total_attempts = total_attempts
+        stats.best_session_mk = best_mk
+        stats.best_session_att = best_att
+        stats.first4_avg_mk = f4
+        stats.last3_avg_mk = l3
+        stats.improvement = improvement
+        stats.updated_at = datetime.utcnow()
+        s.commit()
+
+
+
+
+def _build_event_leaderboard_entries(s, ev, category: str, age_group: str):
+    db = getattr(app, 'db', None)
+    if not db:
+        return []
+    EventUserStats = db['EventUserStats']
+    EventSession = db['EventSession']
+    User = db['User']
+
+    stats_rows = (
+        s.query(EventUserStats)
+        .filter(EventUserStats.event_id == ev.id, EventUserStats.age_group == age_group)
+        .all()
+    )
+    if not stats_rows:
+        return []
+
+    user_ids = [st.user_id for st in stats_rows]
+    users = {
+        u.user_id: u
+        for u in s.query(User).filter(User.user_id.in_(user_ids)).all()
+    }
+    sessions_by_user = defaultdict(list)
+    if user_ids:
+        session_rows = (
+            s.query(EventSession)
+            .filter(
+                EventSession.event_id == ev.id,
+                EventSession.user_id.in_(user_ids),
+                EventSession.eligible,
+                EventSession.analyzed,
+            )
+            .all()
+        )
+        for row in session_rows:
+            sessions_by_user[row.user_id].append(row)
+        for rows in sessions_by_user.values():
+            rows.sort(key=lambda r: (r.session_date, r.id))
+
+    entries = []
+    category = (category or 'overall').lower()
+    if category not in ('overall', 'best_session', 'improvement'):
+        category = 'overall'
+
+    for stats in stats_rows:
+        rows = sessions_by_user.get(stats.user_id, [])
+        user = users.get(stats.user_id)
+        handle = user.handle or user.email or f'user-{stats.user_id}' if user else f'user-{stats.user_id}'
+
+        entry = {
+            'user_id': stats.user_id,
+            'handle': handle,
+        }
+
+        if category == 'overall':
+            makes = int(stats.total_makes or 0)
+            attempts = int(stats.total_attempts or 0)
+            accuracy = (makes / attempts) if attempts else None
+            last_row = rows[-1] if rows else None
+            last_date = getattr(last_row, 'session_date', None)
+            entry.update({
+                'score': float(makes),
+                'makes': makes,
+                'attempts': attempts,
+                'accuracy': float(accuracy) if accuracy is not None else None,
+                'last_session_date': last_date.isoformat() if last_date else None,
+            })
+            sort_key = (
+                -makes,
+                -(accuracy if accuracy is not None else -1.0),
+                last_date or date.max,
+                stats.user_id,
+            )
+        elif category == 'best_session':
+            best_row = None
+            best_key = None
+            for row in rows:
+                makes = int(row.makes or 0)
+                attempts = int(row.attempts or 0)
+                accuracy = (makes / attempts) if attempts else None
+                date_ord = row.session_date.toordinal() if getattr(row, 'session_date', None) else -10**9
+                key = (makes, (accuracy if accuracy is not None else -1.0), -date_ord)
+                if best_key is None or key > best_key:
+                    best_key = key
+                    best_row = row
+            makes = int(getattr(best_row, 'makes', 0) or 0)
+            attempts = int(getattr(best_row, 'attempts', 0) or 0)
+            accuracy = (makes / attempts) if attempts else None
+            best_date = getattr(best_row, 'session_date', None)
+            entry.update({
+                'score': float(makes),
+                'makes': makes,
+                'attempts': attempts,
+                'accuracy': float(accuracy) if accuracy is not None else None,
+                'session_date': best_date.isoformat() if best_date else None,
+            })
+            sort_key = (
+                -makes,
+                -(accuracy if accuracy is not None else -1.0),
+                best_date or date.max,
+                stats.user_id,
+            )
+        else:
+            first_part = rows[:4]
+            last_part = rows[-3:] if len(rows) >= 3 else rows[-len(rows):]
+
+            def _avg(items):
+                return (sum((r.makes or 0) for r in items) / len(items)) if items else None
+
+            first_avg = _avg(first_part)
+            last_avg = _avg(last_part)
+            score = None
+            if first_avg is not None and last_avg is not None:
+                score = last_avg - first_avg
+            elif last_avg is not None and first_avg is None:
+                score = last_avg
+            elif last_avg is None and first_avg is not None:
+                score = -first_avg
+            last_row = rows[-1] if rows else None
+            last_date = getattr(last_row, 'session_date', None)
+            entry.update({
+                'score': float(score) if score is not None else None,
+                'first_avg': float(first_avg) if first_avg is not None else None,
+                'last_avg': float(last_avg) if last_avg is not None else None,
+                'first_count': len(first_part),
+                'last_count': len(last_part),
+                'sessions': len(rows),
+                'last_session_date': last_date.isoformat() if last_date else None,
+                'provisional_first': len(first_part) < 4,
+                'provisional_last': len(last_part) < 3,
+            })
+            score_val = score if score is not None else float('-inf')
+            last_avg_val = last_avg if last_avg is not None else float('-inf')
+            sort_key = (
+                -score_val,
+                -last_avg_val,
+                last_date or date.max,
+                stats.user_id,
+            )
+
+        entry['_sort'] = sort_key
+        entries.append(entry)
+
+    entries.sort(key=lambda e: e['_sort'])
+    for idx, entry in enumerate(entries, start=1):
+        entry['rank'] = idx
+        entry.pop('_sort', None)
+    return entries
+
+
+def _db_lb_top(event_slug: str, category: str, age_group: str, limit: int = 10):
+    db = getattr(app, 'db', None)
+    if not db:
+        return {'ok': False, 'err': 'db unavailable'}
+    with db['Session']() as s:
+        Event = db['Event']
+        ev = s.query(Event).filter_by(slug=event_slug).one_or_none()
+        if not ev:
+            return {'ok': False, 'err': 'event not found'}
+        category_norm = (category or 'overall').lower()
+        if category_norm not in ('overall', 'best_session', 'improvement'):
+            category_norm = 'overall'
+        entries = _build_event_leaderboard_entries(s, ev, category_norm, age_group)
+        if limit:
+            entries = entries[:limit]
+        return {'ok': True, 'event_id': ev.id, 'category': category_norm, 'age_group': age_group, 'top': entries}
+
+
+
+
+def _db_lb_my_rank(event_slug: str, category: str, user_id: int):
+    db = getattr(app, 'db', None)
+    if not db:
+        return {'ok': False, 'err': 'db unavailable'}
+    with db['Session']() as s:
+        Event = db['Event']
+        ev = s.query(Event).filter_by(slug=event_slug).one_or_none()
+        if not ev:
+            return {'ok': False, 'err': 'event not found'}
+        EventUserStats = db['EventUserStats']
+        me = s.query(EventUserStats).filter_by(event_id=ev.id, user_id=user_id).one_or_none()
+        if not me:
+            return {'ok': True, 'rank': None, 'score': None, 'age_group': None}
+        category_norm = (category or 'overall').lower()
+        if category_norm not in ('overall', 'best_session', 'improvement'):
+            category_norm = 'overall'
+        entries = _build_event_leaderboard_entries(s, ev, category_norm, me.age_group)
+        mine = next((row for row in entries if row.get('user_id') == user_id), None)
+        if not mine:
+            return {'ok': True, 'rank': None, 'score': None, 'age_group': me.age_group}
+
+        payload = {
+            'ok': True,
+            'rank': mine.get('rank'),
+            'score': mine.get('score'),
+            'age_group': me.age_group,
+        }
+        if category_norm == 'overall':
+            payload.update({
+                'makes': mine.get('makes', 0),
+                'attempts': mine.get('attempts', 0),
+                'accuracy': mine.get('accuracy'),
+                'last_session_date': mine.get('last_session_date'),
+            })
+        elif category_norm == 'best_session':
+            payload.update({
+                'makes': mine.get('makes', 0),
+                'attempts': mine.get('attempts', 0),
+                'accuracy': mine.get('accuracy'),
+                'session_date': mine.get('session_date'),
+            })
+        else:
+            payload.update({
+                'sessions': mine.get('sessions', 0),
+                'first_avg': mine.get('first_avg'),
+                'first_count': mine.get('first_count'),
+                'last_avg': mine.get('last_avg'),
+                'last_count': mine.get('last_count'),
+                'provisional_first': mine.get('provisional_first'),
+                'provisional_last': mine.get('provisional_last'),
+                'last_session_date': mine.get('last_session_date'),
+            })
+        return payload
+
+
+def _db_event_today_status(user_id: int, event_slug: str):
+    db = getattr(app, 'db', None)
+    if not db:
+        return {'ok': False, 'err': 'db unavailable'}
+    with db['Session']() as s:
+        Event = db['Event']
+        EventRegistration = db['EventRegistration']
+        EventSession = db['EventSession']
+        ev = s.query(Event).filter_by(slug=event_slug).one_or_none()
+        if not ev:
+            return {'ok': False, 'err': 'event not found'}
+        reg = s.query(EventRegistration).filter_by(event_id=ev.id, user_id=user_id).one_or_none()
+
+        today_local = _event_local_date(datetime.utcnow(), ev.tz)
+        window_state = 'active'
+        if getattr(ev, 'start_date', None) and today_local < ev.start_date:
+            window_state = 'upcoming'
+        elif getattr(ev, 'end_date', None) and today_local > ev.end_date:
+            window_state = 'closed'
+        within_window = window_state == 'active'
+
+        daily_limit = int(getattr(ev, 'daily_limit', 1) or 1)
+        if daily_limit <= 0:
+            daily_limit = 0  # treat <=0 as unlimited
+        min_shots = int(getattr(ev, 'min_shots', 0) or 0)
+
+        today_sessions = (
+            s.query(EventSession)
+            .filter_by(event_id=ev.id, user_id=user_id, session_date=today_local)
+            .order_by(EventSession.id.asc())
+            .all()
+        )
+        today_payload = []
+        for row in today_sessions:
+            today_payload.append({
+                'id': row.id,
+                'session_id': row.session_id,
+                'session_date': row.session_date.isoformat() if row.session_date else None,
+                'eligible': bool(row.eligible),
+                'analyzed': bool(row.analyzed),
+                'makes': int(row.makes or 0) if row.makes is not None else None,
+                'attempts': int(row.attempts or 0) if row.attempts is not None else None,
+                'created_at': row.created_at.isoformat() if getattr(row, 'created_at', None) else None,
+            })
+
+        submitted_today = any(r.get('analyzed') and r.get('eligible') for r in today_payload)
+        today_started = bool(today_payload)
+        remaining = None
+        if daily_limit:
+            remaining = max(0, daily_limit - len(today_payload))
+
+        can_start = bool(reg) and within_window
+        if daily_limit:
+            can_start = can_start and len(today_payload) < daily_limit
+
+        last_session = (
+            s.query(EventSession)
+            .filter_by(event_id=ev.id, user_id=user_id)
+            .order_by(EventSession.session_date.desc(), EventSession.id.desc())
+            .first()
+        )
+
+        return {
+            'ok': True,
+            'event_id': ev.id,
+            'slug': ev.slug,
+            'name': ev.name,
+            'tz': ev.tz,
+            'event_start': ev.start_date.isoformat() if getattr(ev, 'start_date', None) else None,
+            'event_end': ev.end_date.isoformat() if getattr(ev, 'end_date', None) else None,
+            'today_date': today_local.isoformat(),
+            'window_state': window_state,
+            'within_window': within_window,
+            'registered': bool(reg),
+            'age_group': getattr(reg, 'age_group', None) if reg else None,
+            'dob': reg.dob.isoformat() if reg and getattr(reg, 'dob', None) else None,
+            'registered_at': reg.registered_at.isoformat() if reg and getattr(reg, 'registered_at', None) else None,
+            'daily_limit': daily_limit,
+            'min_shots': min_shots,
+            'today_started': today_started,
+            'today_submitted': submitted_today,
+            'today_remaining': remaining,
+            'today_sessions': today_payload,
+            'can_start': can_start,
+            'last_session_date': last_session.session_date.isoformat() if last_session and getattr(last_session, 'session_date', None) else None,
+            'last_session_makes': int(last_session.makes or 0) if last_session and getattr(last_session, 'makes', None) is not None else None,
+            'last_session_attempts': int(last_session.attempts or 0) if last_session and getattr(last_session, 'attempts', None) is not None else None,
+        }
+
+
+@app.route('/api/events', methods=['GET'])
+def api_list_events():
+    db = getattr(app, 'db', None)
+    if not db:
+        return jsonify({'ok': False, 'err': 'db unavailable'}), 503
+    with db['Session']() as s:
+        Event = db['Event']
+        events = (
+            s.query(Event)
+            .order_by(Event.start_date.asc())
+            .all()
+        )
+        items = []
+        for ev in events:
+            items.append({
+                'slug': ev.slug,
+                'name': ev.name,
+                'start_date': ev.start_date.isoformat() if getattr(ev, 'start_date', None) else None,
+                'end_date': ev.end_date.isoformat() if getattr(ev, 'end_date', None) else None,
+                'daily_limit': ev.daily_limit,
+                'min_shots': ev.min_shots,
+                'tz': ev.tz,
+            })
+    return jsonify({'ok': True, 'events': items})
+
+
+@app.post('/api/events/<slug>/register')
+def api_event_register_route(slug):
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'ok': False, 'err': 'auth'}), 401
+    dob_iso = None
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        dob_iso = payload.get('dob')
+    except Exception:
+        dob_iso = None
+    res = _db_event_register(user_id, slug, dob_iso)
+    status = 200 if res.get('ok') else 400
+    return jsonify(res), status
+
+
+@app.get('/api/events/<slug>/status')
+def api_event_status(slug):
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'ok': False, 'err': 'auth'}), 401
+    res = _db_event_today_status(user_id, slug)
+    status = 200 if res.get('ok') else 400
+    return jsonify(res), status
+
+
+@app.get('/api/events/<slug>/leaderboard')
+def api_event_leaderboard(slug):
+    category = request.args.get('category', 'overall')
+    age = request.args.get('age', '>19')
+    res = _db_lb_top(slug, category, age)
+    status = 200 if res.get('ok') else 400
+    return jsonify(res), status
+
+
+@app.get('/api/events/<slug>/my_rank')
+def api_event_my_rank_route(slug):
+    user_id = session.get('user_id')
+    if not user_id:
+        return jsonify({'ok': False, 'err': 'auth'}), 401
+    category = request.args.get('category', 'overall')
+    res = _db_lb_my_rank(slug, category, user_id)
+    status = 200 if res.get('ok') else 400
+    return jsonify(res), status
+
+
+try:
+    for _rule in list(app.url_map.iter_rules()):
+        if getattr(_rule, 'rule', '').startswith('/api/events'):
+            print('[routes] available:', _rule)
+except Exception:
+    pass
+
 
 if __name__ == '__main__':
     # Single process, single thread — avoids Windows resets

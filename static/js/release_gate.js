@@ -255,6 +255,8 @@ try {
 try {
   initReleaseConfig();
 } catch {}
+try { window.SESSION_MANAGER_OWNS_ENDING = true; } catch {}
+try { window.DEFER_FE_SUMMARY = false; } catch {}
 try {
   const base = getReleaseKnobs();
   const trip = Number(base.scoreThresh);

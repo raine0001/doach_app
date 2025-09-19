@@ -94,6 +94,9 @@
         width:100%; text-align:left; background:transparent; border:0; color:#fff;
         padding:10px 12px; border-radius:8px; cursor:pointer; font:600 14px system-ui;
       }
+      .doach-submenu { list-style:none; margin:4px 0 0 16px; padding:0; display:flex; flex-direction:column; gap:4px; }
+      .doach-subitem { background:transparent; border:0; color:#cfd8e3; padding:6px 12px; border-radius:8px; font:500 12px system-ui; text-align:left; cursor:pointer; }
+      .doach-subitem:hover { background:rgba(255,255,255,.08); }
       .doach-item:hover { background:rgba(255,255,255,.08); }
       .doach-sidepanel {
         position: fixed; top:0; right:0; bottom:0; width:420px; z-index:10045;
@@ -125,6 +128,26 @@
         padding:10px 12px; border-radius: 999px; cursor:pointer; font:600 13px system-ui;
       }
       .doach-floating-mydoach:hover { background: rgba(0,0,0,.9); }
+      .challenge-overlay {
+        position:fixed; inset:0; z-index:10100; background:rgba(6,8,12,.82);
+        display:none; align-items:center; justify-content:center; padding:24px;
+      }
+      .challenge-overlay.open { display:flex; animation:challengeFade .22s ease-out both; }
+      .challenge-frame {
+        width:min(960px,95vw); max-height:90vh; display:flex; flex-direction:column;
+        background:rgba(10,12,18,.96); border:1px solid rgba(255,255,255,.12);
+        border-radius:14px; box-shadow:0 26px 80px rgba(0,0,0,.65);
+      }
+      .challenge-header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid rgba(255,255,255,.12); font:600 15px system-ui; }
+      .challenge-close { background:transparent; border:1px solid rgba(255,255,255,.18); color:#cfd8e3; padding:6px 10px; border-radius:8px; cursor:pointer; font:600 12px system-ui; }
+      .challenge-close:hover { background:rgba(255,255,255,.08); }
+      .challenge-scroll { flex:1; overflow:auto; padding:16px; display:flex; flex-direction:column; gap:12px; }
+      .challenge-note { font:500 12px system-ui; opacity:.72; }
+      .challenge-grid { display:flex; flex-direction:column; gap:8px; }
+      .challenge-table { width:100%; border-collapse:collapse; font:600 13px/1.35 system-ui; }
+      .challenge-table th { text-align:left; padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.2); font-weight:600; font-size:12px; }
+      .challenge-table td { padding:6px 8px; border-bottom:1px solid rgba(255,255,255,.08); font-weight:500; }
+      @keyframes challengeFade { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
     `;
     document.head.appendChild(css);
   }
@@ -220,6 +243,187 @@
     __panels.add(panel);
     return panel;
   }
+
+  function attachChallengeStartHandlers(btn, slug, eventName, onComplete) {
+    if (!btn || !slug) return;
+    if (btn.__challengeHandler) btn.removeEventListener('click', btn.__challengeHandler);
+    const prettyName = eventName || slug;
+    const handler = () => {
+      if (typeof window.startChallengeSession !== 'function') {
+        window.showPrompt?.('Session manager not ready yet.');
+        return;
+      }
+      const msg = `The ${prettyName} session can be completed 1x per day. Are you ready to start today's challenge session?`;
+      if (!window.confirm(msg)) return;
+      btn.disabled = true;
+      const cleanup = (cb) => {
+        btn.disabled = false;
+        window.removeEventListener('challenge:session-started', onStarted);
+        window.removeEventListener('challenge:session-start-error', onError);
+        if (typeof cb === 'function') cb();
+      };
+      const onStarted = (e) => {
+        if (!e?.detail || e.detail.slug !== slug) return;
+        cleanup(() => {
+          try { window.showPrompt?.('Challenge session started! Good luck.'); } catch {}
+          try { onComplete?.(true, e.detail); } catch {}
+        });
+      };
+      const onError = (e) => {
+        if (!e?.detail || e.detail.slug !== slug) return;
+        cleanup(() => {
+          try { onComplete?.(false, e.detail); } catch {}
+          const err = e.detail?.error;
+          window.showPrompt?.((err && err.message) || err || 'Unable to start session.');
+        });
+      };
+      window.addEventListener('challenge:session-started', onStarted);
+      window.addEventListener('challenge:session-start-error', onError);
+      try {
+        window.startChallengeSession(slug);
+      } catch (err) {
+        cleanup();
+        window.showPrompt?.((err && err.message) || err || 'Unable to start session.');
+      }
+    };
+    btn.__challengeHandler = handler;
+    btn.addEventListener('click', handler);
+  }
+
+  function formatChallengeDate(iso) {
+    if (!iso) return '—';
+    try { return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' }); }
+    catch { return String(iso); }
+  }
+
+  function challengeAction(ctx) {
+    if (!ctx || !ctx.status) return { visible: false };
+    const status = ctx.status;
+    const eventName = (ctx.event && (ctx.event.name || ctx.event.slug)) || ctx.slug;
+    const label = `Start Today’s ${eventName} Session`;
+    const action = { visible: true, eventName, label, enabled: true, reason: '' };
+    if (!status.registered) {
+      action.visible = false;
+      return action;
+    } else if (status.window_state === 'upcoming') {
+      action.enabled = false;
+      action.reason = status.event_start ? `Opens on ${formatChallengeDate(status.event_start)}.` : 'Challenge opens soon.';
+    } else if (status.window_state === 'closed') {
+      action.enabled = false;
+      action.reason = 'Challenge has ended.';
+    } else if (!status.can_start) {
+      action.enabled = false;
+      if (status.today_submitted) action.reason = 'You already submitted today.';
+      else if (status.today_started) action.reason = 'Session already in progress.';
+      else action.reason = 'Daily limit reached. Come back tomorrow.';
+    }
+    return action;
+  }
+
+  function configureChallengeButton(btn, ctx, onSuccess) {
+    if (!btn) return { visible: false };
+    const action = challengeAction(ctx);
+    if (!action.visible) {
+      btn.style.display = 'none';
+      if (btn.__challengeHandler) {
+        btn.removeEventListener('click', btn.__challengeHandler);
+        btn.__challengeHandler = null;
+      }
+      return action;
+    }
+    btn.style.display = 'inline-flex';
+    btn.textContent = action.label;
+    btn.title = action.reason || '';
+    if (action.enabled) {
+      btn.disabled = false;
+      attachChallengeStartHandlers(btn, ctx.slug, action.eventName, onSuccess);
+    } else {
+      btn.disabled = true;
+      if (btn.__challengeHandler) {
+        btn.removeEventListener('click', btn.__challengeHandler);
+        btn.__challengeHandler = null;
+      }
+    }
+    return action;
+  }
+
+  function syncChallengeCTA() {
+    const btn = document.getElementById('btnStartChallenge');
+    const note = document.getElementById('challengeBtnNote');
+    if (!btn) return;
+    const ctx = window.__challengeState;
+    const action = configureChallengeButton(btn, ctx, () => {
+      setTimeout(() => refreshChallengeState(ctx.slug), 300);
+    });
+    if (note) {
+      if (action && action.visible && !action.enabled && action.reason) {
+        note.textContent = action.reason;
+        note.style.display = 'block';
+      } else {
+        note.textContent = '';
+        note.style.display = 'none';
+      }
+    }
+    if (!action || !action.visible) {
+      if (note) note.style.display = 'none';
+    }
+  }
+
+  async function refreshChallengeState(slug) {
+    if (!slug) {
+      window.__challengeState = null;
+      syncChallengeCTA();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/events/${encodeURIComponent(slug)}/status`, { credentials: 'include' });
+      if (res.status === 401) {
+        window.__challengeState = null;
+        syncChallengeCTA();
+        return;
+      }
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        window.__challengeState = null;
+      } else {
+        const evt = (window.__challengeEvents || {})[slug];
+        window.__challengeState = { slug, event: evt, status: data };
+      }
+    } catch {
+      window.__challengeState = null;
+    }
+    syncChallengeCTA();
+  }
+
+  async function prefetchChallengeState() {
+    try {
+      const res = await fetch('/api/events', { credentials: 'include' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok || !Array.isArray(data.events)) {
+        window.__challengeState = null;
+        syncChallengeCTA();
+        return;
+      }
+      window.__challengeEvents = window.__challengeEvents || {};
+      for (const ev of data.events) {
+        window.__challengeEvents[ev.slug] = ev;
+      }
+      for (const ev of data.events) {
+        await refreshChallengeState(ev.slug);
+        if (window.__challengeState && window.__challengeState.status && window.__challengeState.status.registered) {
+          return;
+        }
+      }
+    } catch {
+      window.__challengeState = null;
+      syncChallengeCTA();
+    }
+  }
+
+  window.syncChallengeCTA = syncChallengeCTA;
+  window.__challengeEvents = window.__challengeEvents || {};
+  window.__challengeState = window.__challengeState || null;
+
 
   // ---------- Panels ----------
 async function openDiagnosticsPanel(){
@@ -404,7 +608,568 @@ async function openContentPanel(){
 
 
   function field(label, input){ return el('div', {class:'doach-field'}, el('label', {}, label), input); }
-  async function openMyDoachPanel(){
+  
+
+
+
+
+function ensureChallengeOverlay() {
+  if (openChallengesPanel.overlay) return openChallengesPanel.overlay;
+  const root = el('div', {
+    id: 'challengeOverlay',
+    class: 'challenge-overlay',
+    role: 'dialog',
+    'aria-modal': 'true',
+    'aria-hidden': 'true'
+  });
+  const frame = el('div', { class: 'challenge-frame' });
+  const titleEl = el('div', {}, 'Challenges');
+  const closeBtn = el('button', { class: 'challenge-close' }, 'Close');
+  const header = el('div', { class: 'challenge-header' }, titleEl, closeBtn);
+  const scroll = el('div', { class: 'challenge-scroll' });
+  frame.append(header, scroll);
+  root.append(frame);
+  document.body.appendChild(root);
+
+  function onKey(e) {
+    if (e.key === 'Escape') overlay.close();
+  }
+
+  const overlay = {
+    root,
+    body: scroll,
+    setTitle(txt) { titleEl.textContent = txt || 'Challenges'; },
+    open(txt) {
+      overlay.setTitle(txt);
+      root.style.display = 'flex';
+      requestAnimationFrame(() => root.classList.add('open'));
+      root.setAttribute('aria-hidden', 'false');
+      document.addEventListener('keydown', onKey);
+    },
+    close() {
+      root.classList.remove('open');
+      root.style.display = 'none';
+      root.setAttribute('aria-hidden', 'true');
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+
+  closeBtn.addEventListener('click', () => overlay.close());
+  root.addEventListener('click', (e) => { if (e.target === root) overlay.close(); });
+
+  openChallengesPanel.overlay = overlay;
+  return overlay;
+}
+
+async function openChallengesPanel(initialSlug) {
+  closeAllMenus('open-challenges');
+  const overlay = ensureChallengeOverlay();
+  overlay.open('Challenges');
+  const state = (openChallengesPanel.state ||= {
+    events: null,
+    selectedSlug: null,
+    category: 'overall',
+    age: '14-16',
+    ageSource: 'auto',
+    status: null,
+    statusAuth: true,
+    statusError: null,
+    requestId: 0,
+  });
+  if (initialSlug) {
+    state.selectedSlug = initialSlug;
+    if (state.ageSource !== 'manual') state.ageSource = 'auto';
+  }
+  const content = overlay.body;
+
+  const ageGroups = ['<11', '11-14', '14-16', '17-19', '>19'];
+  const ageLabels = { '<11': 'Under 11', '11-14': '11–14', '14-16': '14–16', '17-19': '17–19', '>19': '19+' };
+  const categories = [
+    { value: 'overall', label: 'Best Overall', description: 'Score = total makes across all eligible sessions.' },
+    { value: 'best_session', label: 'Best Single Session', description: 'Score = most makes recorded in a single eligible challenge session.' },
+    { value: 'improvement', label: 'Most Improved', description: 'Score = last three-session average minus first four-session average.' },
+  ];
+
+  content.innerHTML = '';
+  content.append(el('div', { style: { font: '600 13px system-ui', opacity: '.8' } }, 'Loading challenges…'));
+
+  try {
+    if (!state.events) {
+      const res = await fetch('/api/events', { credentials: 'include' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.err || ('HTTP ' + res.status));
+      }
+      state.events = Array.isArray(data.events) ? data.events : [];
+      window.__challengeEvents = window.__challengeEvents || {};
+      state.events.forEach(ev => { window.__challengeEvents[ev.slug] = ev; });
+    }
+  } catch (err) {
+    content.innerHTML = '';
+    window.__challengeState = null;
+    syncChallengeCTA();
+    content.append(
+      el('div', { style: { font: '600 13px system-ui', color: '#ffaeae' } }, 'Unable to load challenges.'),
+      el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, String((err && err.message) || err || 'Unknown error')),
+    );
+    return;
+  }
+
+  if (!state.events || !state.events.length) {
+    content.innerHTML = '';
+    window.__challengeState = null;
+    syncChallengeCTA();
+    content.append(el('div', { style: { font: '600 13px system-ui', opacity: '.85' } }, 'No challenges are currently available.'));
+    return;
+  }
+
+  if (!state.selectedSlug || !state.events.find(ev => ev.slug === state.selectedSlug)) {
+    state.selectedSlug = state.events[0].slug;
+  }
+
+  await refreshStatus(false);
+  render();
+
+  async function refreshStatus(shouldRender = true) {
+    state.statusError = null;
+    state.status = null;
+    state.statusAuth = true;
+    try {
+      const slug = encodeURIComponent(state.selectedSlug || '');
+      if (!slug) throw new Error('event slug missing');
+      const res = await fetch('/api/events/' + slug + '/status', { credentials: 'include' });
+      if (res.status === 401) {
+        state.statusAuth = false;
+        state.status = null;
+      } else {
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.ok) {
+          throw new Error(data?.err || ('HTTP ' + res.status));
+        }
+        state.status = data;
+        if (state.ageSource !== 'manual' && data.age_group) {
+          state.age = data.age_group;
+        }
+      }
+    } catch (err) {
+      state.statusError = err;
+    }
+    if (shouldRender) render();
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return '—';
+    try {
+      return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+    } catch (err) {
+      return iso;
+    }
+  }
+  function fmtPercent(v) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return (v * 100).toFixed(1) + '%';
+  }
+  function fmtFloat(v, digits = 2) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return Number(v).toFixed(digits);
+  }
+  function fmtInt(v) {
+    if (v === null || v === undefined || Number.isNaN(v)) return '—';
+    return String(v);
+  }
+
+  function render() {
+    content.innerHTML = '';
+    const event = state.events.find(ev => ev.slug === state.selectedSlug) || state.events[0];
+    if (!event) return;
+    state.selectedSlug = event.slug;
+    window.__challengeEvents = window.__challengeEvents || {};
+    window.__challengeEvents[event.slug] = event;
+    if (state.status) {
+      window.__challengeState = { slug: state.selectedSlug, event, status: state.status };
+    } else {
+      window.__challengeState = null;
+    }
+    syncChallengeCTA();
+
+    const eventSel = el('select', {}, ...state.events.map(ev => el('option', { value: ev.slug, selected: ev.slug === state.selectedSlug }, ev.name || ev.slug)));
+    eventSel.addEventListener('change', async () => {
+      state.selectedSlug = eventSel.value;
+      if (state.ageSource !== 'manual') state.ageSource = 'auto';
+      await refreshStatus(false);
+      render();
+    });
+
+    const catSel = el('select', {}, ...categories.map(opt => el('option', { value: opt.value, selected: opt.value === state.category }, opt.label)));
+    catSel.addEventListener('change', () => { state.category = catSel.value; updateData(); });
+
+    const ageSel = el('select', {}, ...ageGroups.map(age => el('option', { value: age, selected: age === state.age }, ageLabels[age] || age)));
+    ageSel.addEventListener('change', () => { state.age = ageSel.value; state.ageSource = 'manual'; updateData(); });
+
+    const infoLines = [];
+    if (event.start_date && event.end_date) infoLines.push(fmtDate(event.start_date) + ' – ' + fmtDate(event.end_date));
+    infoLines.push('Min shots per session: ' + (event.min_shots ?? 0));
+    if (event.daily_limit) infoLines.push('Daily limit: ' + event.daily_limit);
+
+    const selectedStatus = state.status;
+    const statusAuth = state.statusAuth;
+    const statusError = state.statusError;
+
+    function makeCard(title) {
+      const wrap = el('div', {
+        style: {
+          background: 'rgba(12,15,22,.92)',
+          border: '1px solid rgba(255,255,255,.14)',
+          borderRadius: '12px',
+          padding: '10px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '6px',
+        },
+      });
+      const heading = el('div', { style: { font: '600 12px system-ui', letterSpacing: '.02em' } }, title);
+      const contentEl = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px', font: '500 12px system-ui', opacity: '.88' } });
+      wrap.append(heading, contentEl);
+      wrap.body = contentEl;
+      wrap.setTitle = (text) => { heading.textContent = text; };
+      return wrap;
+    }
+
+    function fillRegistration(target) {
+      target.innerHTML = '';
+      if (!statusAuth) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Sign in to join this challenge.'));
+        return;
+      }
+      if (statusError) {
+        target.append(el('div', { style: { font: '500 12px system-ui', color: '#ffaeae' } }, 'Status unavailable: ' + String((statusError && statusError.message) || statusError)));
+        return;
+      }
+      if (!selectedStatus) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Loading status…'));
+        return;
+      }
+      const inputStyle = { background: '#0b0f14', color: '#fff', border: '1px solid rgba(255,255,255,.22)', borderRadius: '8px', padding: '7px 10px', font: '500 12px system-ui' };
+      if (!selectedStatus.registered) {
+        target.append(el('div', { style: { font: '500 12px system-ui' } }, 'Enter your birthdate to be ranked in the right age group.'));
+        const dobInput = el('input', { type: 'date', value: selectedStatus.dob || '', style: inputStyle });
+        const actions = el('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } });
+        const registerBtn = el('button', { class: 'doach-btn' }, 'Sign Up');
+        registerBtn.addEventListener('click', async () => {
+          registerBtn.disabled = true;
+          try {
+            const slug = encodeURIComponent(state.selectedSlug || '');
+            const res = await fetch('/api/events/' + slug + '/register', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({ dob: dobInput.value || null }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data?.ok) throw new Error((data && data.err) || ('HTTP ' + res.status));
+            window.showPrompt?.('Registered for the challenge!');
+            await refreshStatus(false);
+            render();
+          } catch (err) {
+            window.showPrompt?.(String((err && err.message) || err || 'Unable to register.'));
+          } finally {
+            registerBtn.disabled = false;
+          }
+        });
+        actions.append(registerBtn);
+        target.append(dobInput, actions);
+      } else {
+        target.append(el('div', { style: { font: '500 12px system-ui' } }, 'Registered · ' + (ageLabels[selectedStatus.age_group] || selectedStatus.age_group)));
+        if (selectedStatus.dob) target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.7' } }, 'DOB: ' + fmtDate(selectedStatus.dob)));
+        if (selectedStatus.registered_at) target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.65' } }, 'Joined: ' + fmtDate(selectedStatus.registered_at)));
+        const row = el('div', { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } });
+        const dobInput = el('input', { type: 'date', value: selectedStatus.dob || '', style: inputStyle });
+        const updateBtn = el('button', { class: 'doach-btn ghost' }, 'Update DOB');
+        updateBtn.addEventListener('click', async () => {
+          updateBtn.disabled = true;
+          try {
+            const slug = encodeURIComponent(state.selectedSlug || '');
+            const res = await fetch('/api/events/' + slug + '/register', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              credentials: 'include',
+              body: JSON.stringify({ dob: dobInput.value || null }),
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok || !data?.ok) throw new Error((data && data.err) || ('HTTP ' + res.status));
+            window.showPrompt?.('Profile updated.');
+            await refreshStatus(false);
+            render();
+          } catch (err) {
+            window.showPrompt?.(String((err && err.message) || err || 'Unable to update DOB.'));
+          } finally {
+            updateBtn.disabled = false;
+          }
+        });
+        row.append(dobInput, updateBtn);
+        target.append(row);
+        const quickCtx = { slug: state.selectedSlug, event, status: selectedStatus };
+        const quickWrap = el('div', { style: { marginTop: '6px', display: 'flex', flexDirection: 'column', gap: '6px' } });
+        const quickBtn = el('button', { class: 'doach-btn' }, '');
+        const quickAction = configureChallengeButton(quickBtn, quickCtx, () => {
+          setTimeout(() => refreshStatus(true), 300);
+        });
+        if (quickAction.visible) {
+          quickWrap.append(quickBtn);
+          if (!quickAction.enabled && quickAction.reason) {
+            quickWrap.append(el('div', { class: 'challenge-note' }, quickAction.reason));
+          }
+          target.append(quickWrap);
+        }
+      }
+    }
+
+    function fillDaily(target) {
+      target.innerHTML = '';
+      if (!statusAuth) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Sign in to log challenge sessions.'));
+        return;
+      }
+      if (statusError) {
+        target.append(el('div', { style: { font: '500 12px system-ui', color: '#ffaeae' } }, 'Status unavailable: ' + String((statusError && statusError.message) || statusError)));
+        return;
+      }
+      if (!selectedStatus) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Loading status…'));
+        return;
+      }
+      const tzNote = selectedStatus.tz ? ' · ' + selectedStatus.tz : '';
+      target.append(el('div', { style: { font: '500 12px system-ui' } }, 'Today: ' + fmtDate(selectedStatus.today_date) + tzNote));
+
+      if (!selectedStatus.registered) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Register above to unlock challenge sessions.'));
+        return;
+      }
+
+      if (selectedStatus.window_state === 'upcoming') {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Challenge opens on ' + fmtDate(selectedStatus.event_start) + '.'));
+        return;
+      }
+      if (selectedStatus.window_state === 'closed') {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Challenge ended on ' + fmtDate(selectedStatus.event_end) + '.'));
+        return;
+      }
+
+      if (selectedStatus.min_shots || selectedStatus.daily_limit) {
+        const limitText = selectedStatus.daily_limit ? (selectedStatus.daily_limit + ' session/day') : 'Unlimited sessions/day';
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, limitText + ' · Min ' + (selectedStatus.min_shots || 0) + ' attempts'));
+      }
+
+      if (Array.isArray(selectedStatus.today_sessions) && selectedStatus.today_sessions.length) {
+        selectedStatus.today_sessions.forEach(sess => {
+          const line = sess.analyzed
+            ? "Today's session: " + fmtInt(sess.makes) + ' / ' + fmtInt(sess.attempts)
+            : "Challenge session started — waiting for analysis.";
+          target.append(el('div', { style: { font: '500 12px system-ui' } }, line));
+        });
+      }
+
+      if (selectedStatus.today_submitted) {
+        target.append(el('div', { style: { font: '600 12px system-ui', color: '#34d399' } }, '✅ Today’s challenge is complete.'));
+      } else if (selectedStatus.today_started) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Session started — wrap up to lock in your score.'));
+      }
+
+      const dailyCtx = { slug: state.selectedSlug, event, status: selectedStatus };
+      const dailyWrap = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '6px' } });
+      const dailyBtn = el('button', { class: 'doach-btn' }, '');
+      const dailyAction = configureChallengeButton(dailyBtn, dailyCtx, () => { setTimeout(() => refreshStatus(true), 300); });
+      if (dailyAction.visible) {
+        dailyWrap.append(dailyBtn);
+        if (!dailyAction.enabled && dailyAction.reason) {
+          dailyWrap.append(el('div', { class: 'challenge-note' }, dailyAction.reason));
+        }
+        target.append(dailyWrap);
+      } else if (!selectedStatus.today_submitted && selectedStatus.today_started) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Daily entry already in progress.'));
+      } else if (!selectedStatus.today_submitted) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Daily entry already used.'));
+      }
+
+      if (selectedStatus.last_session_date) {
+        target.append(el('div', { style: { font: '500 12px system-ui', opacity: '.7' } }, 'Last submission: ' + fmtDate(selectedStatus.last_session_date)));
+      }
+    }
+
+    const cardsWrap = el('div', { style: { display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '8px' } });
+    const descEl = el('div', { class: 'challenge-note' }, categories.find(opt => opt.value === state.category)?.description || '');
+
+    const registrationCard = makeCard('Sign Up');
+    const dailyCard = makeCard('Daily Participation');
+    const myRankCard = makeCard('My Position');
+    const leaderboardCard = makeCard('Leaderboard');
+
+    const registrationBody = registrationCard.body;
+    const dailyBody = dailyCard.body;
+    const myRankWrap = myRankCard.body;
+    const leaderboardWrap = leaderboardCard.body;
+    leaderboardWrap.style.minHeight = '180px';
+
+    cardsWrap.append(registrationCard, dailyCard, myRankCard);
+
+    content.append(
+      el('div', { class: 'doach-field' }, el('label', {}, 'Event'), eventSel),
+      el('div', { class: 'doach-field' }, el('label', {}, 'Category'), catSel),
+      el('div', { class: 'doach-field' }, el('label', {}, 'Age Group'), ageSel),
+      el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, infoLines.join(' · ')),
+      descEl,
+      cardsWrap,
+      leaderboardCard,
+    );
+
+    fillRegistration(registrationBody);
+    fillDaily(dailyBody);
+    myRankWrap.innerHTML = '';
+    myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, statusAuth ? 'Loading…' : 'Sign in to track your rank.'));
+
+    updateData();
+
+    function setTable(entries) {
+      leaderboardWrap.innerHTML = '';
+      if (!entries || !entries.length) {
+        leaderboardWrap.append(el('div', { style: { font: '600 13px system-ui', opacity: '.8' } }, 'No eligible sessions yet.'));
+        return;
+      }
+      const table = el('table', { class: 'challenge-table' });
+      const thead = el('thead');
+      const tbody = el('tbody');
+      const headers = [];
+      if (state.category === 'overall') {
+        headers.push('Rank', 'Player', 'Makes', 'Attempts', 'Accuracy', 'Last Session');
+      } else if (state.category === 'best_session') {
+        headers.push('Rank', 'Player', 'Makes', 'Attempts', 'Accuracy', 'Session Date');
+      } else {
+        headers.push('Rank', 'Player', 'Score', 'Last 3 Avg', 'First 4 Avg', 'Sessions', 'Last Session');
+      }
+      const headerRow = el('tr', {}, ...headers.map(h => el('th', {}, h)));
+      thead.append(headerRow);
+
+      entries.forEach(row => {
+        let cells;
+        if (state.category === 'overall') {
+          cells = [
+            row.rank,
+            row.handle,
+            fmtInt(row.makes),
+            fmtInt(row.attempts),
+            fmtPercent(row.accuracy),
+            row.last_session_date ? fmtDate(row.last_session_date) : '—',
+          ];
+        } else if (state.category === 'best_session') {
+          const acc = row.attempts ? row.makes / row.attempts : null;
+          cells = [
+            row.rank,
+            row.handle,
+            fmtInt(row.makes),
+            fmtInt(row.attempts),
+            fmtPercent(acc),
+            row.session_date ? fmtDate(row.session_date) : '—',
+          ];
+        } else {
+          const firstLabel = row.provisional_first ? fmtFloat(row.first_avg) + '*' : fmtFloat(row.first_avg);
+          const lastLabel = row.provisional_last ? fmtFloat(row.last_avg) + '*' : fmtFloat(row.last_avg);
+          cells = [
+            row.rank,
+            row.handle,
+            fmtFloat(row.score, 2),
+            lastLabel,
+            firstLabel,
+            fmtInt(row.sessions),
+            row.last_session_date ? fmtDate(row.last_session_date) : '—',
+          ];
+        }
+        const tr = el('tr', {}, ...cells.map(value => el('td', {}, value)));
+        tbody.append(tr);
+      });
+
+      table.append(thead, tbody);
+      leaderboardWrap.append(table);
+      if (state.category === 'improvement') {
+        leaderboardWrap.append(el('div', { class: 'challenge-note' }, '* Asterisk denotes provisional averages when fewer than the suggested sessions are available.'));
+      }
+    }
+
+    async function updateData() {
+      if (!state.selectedSlug) return;
+      const reqId = ++state.requestId;
+      const currentCategory = categories.find(opt => opt.value === state.category) || categories[0];
+      const ageName = ageLabels[state.age] || state.age;
+      leaderboardCard.setTitle('Leaderboard · ' + currentCategory.label + ' · ' + ageName);
+      descEl.textContent = currentCategory.description;
+      leaderboardWrap.innerHTML = '';
+      leaderboardWrap.append(el('div', { style: { font: '600 13px system-ui', opacity: '.8' } }, 'Loading leaderboard…'));
+      myRankWrap.innerHTML = '';
+      myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Loading…'));
+      try {
+        const params = new URLSearchParams({ category: state.category, age: state.age });
+        const res = await fetch('/api/events/' + encodeURIComponent(state.selectedSlug) + '/leaderboard?' + params.toString(), { credentials: 'include' });
+        const data = await res.json().catch(() => ({}));
+        if (reqId !== state.requestId) return;
+        if (!res.ok || !data?.ok) {
+          throw new Error((data && data.err) || ('HTTP ' + res.status));
+        }
+        setTable(Array.isArray(data.top) ? data.top : []);
+      } catch (err) {
+        if (reqId !== state.requestId) return;
+        leaderboardWrap.innerHTML = '';
+        leaderboardWrap.append(el('div', { style: { font: '600 13px system-ui', color: '#ffaeae' } }, 'Unable to load leaderboard.'));
+        leaderboardWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, String((err && err.message) || err || 'Unknown error')));
+      }
+      updateMyRank(reqId);
+    }
+
+    async function updateMyRank(checkId) {
+      if (!statusAuth) {
+        myRankWrap.innerHTML = '';
+        myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Sign in to see your rank.'));
+        return;
+      }
+      try {
+        const params = new URLSearchParams({ category: state.category });
+        const res = await fetch('/api/events/' + encodeURIComponent(state.selectedSlug) + '/my_rank?' + params.toString(), { credentials: 'include' });
+        if (checkId !== state.requestId) return;
+        if (res.status === 401) {
+          myRankWrap.innerHTML = '';
+          myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Sign in to see your rank.'));
+          return;
+        }
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.ok) throw new Error((data && data.err) || ('HTTP ' + res.status));
+        myRankWrap.innerHTML = '';
+        if (data.rank == null) {
+          myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, 'Log a challenge session to appear on the board.'));
+          return;
+        }
+        myRankWrap.append(el('div', { style: { font: '600 13px system-ui' } }, 'You are #' + data.rank + ' in ' + (ageLabels[data.age_group] || data.age_group) + '.'));
+        if (state.category === 'overall') {
+          myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.78' } }, 'Makes: ' + fmtInt(data.makes) + ' / ' + fmtInt(data.attempts) + ' (' + fmtPercent(data.accuracy) + ').'));
+        } else if (state.category === 'best_session') {
+          const dateLine = data.session_date ? ' on ' + fmtDate(data.session_date) : '';
+          myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.78' } }, 'Best session: ' + fmtInt(data.makes) + ' / ' + fmtInt(data.attempts) + ' (' + fmtPercent(data.accuracy) + ')' + dateLine + '.'));
+        } else {
+          const firstLabel = data.provisional_first ? fmtFloat(data.first_avg) + '*' : fmtFloat(data.first_avg);
+          const lastLabel = data.provisional_last ? fmtFloat(data.last_avg) + '*' : fmtFloat(data.last_avg);
+          myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.78' } }, 'Improvement: ' + fmtFloat(data.score) + ' (last 3 avg ' + lastLabel + ', first 4 avg ' + firstLabel + ').'));
+        }
+        if (data.last_session_date) {
+          myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.7' } }, 'Last challenge session: ' + fmtDate(data.last_session_date) + '.'));
+        }
+      } catch (err) {
+        if (checkId !== state.requestId) return;
+        myRankWrap.innerHTML = '';
+        myRankWrap.append(el('div', { style: { font: '500 12px system-ui', color: '#ffaeae' } }, 'Unable to load your rank.'));
+        myRankWrap.append(el('div', { style: { font: '500 12px system-ui', opacity: '.75' } }, String((err && err.message) || err || 'Unknown error')));
+      }
+    }
+  }
+}
+
+async function openMyDoachPanel(){
     const panel = (openMyDoachPanel.panel ||= makeSidePanel('My Doach'));
     const prefs = (window.doachGetPrefs?.() || {voice:'alloy', tts:'openai', speed:1, pitch:1, volume:1, bassDb:0, trebleDb:0, lang:'en-US'});
     const body = el('div');
@@ -604,6 +1369,12 @@ function mountHamburgerMenu(){
       el('li', {}, el('button', {class:'doach-item', onclick:openContentPanel}, 'Content')),
       el('li', {}, el('button', {class:'doach-item', onclick:openMyDoachPanel}, 'My Doach')),
       el('li', {}, el('button', {class:'doach-item', onclick:openAuthPanel}, 'Login / Account')),
+      el('li', {},
+        el('button', {class:'doach-item', onclick:openChallengesPanel}, 'Challenges'),
+        el('ul', {class:'doach-submenu'},
+          el('li', {}, el('button', {class:'doach-subitem', onclick:() => openChallengesPanel('cav-camps-2025')}, 'CAV Camps 2025'))
+        )
+      ),
       el('li', {}, el('button', {class:'doach-item', onclick:() => window.open('/static/my_sessions.html','_blank')}, 'My Sessions')),
       el('li', {}, el('button', {class:'doach-item', onclick:openDiagnosticsPanel}, 'Coach Diagnostics')),
       // ✅ one Preferences item only
@@ -632,9 +1403,10 @@ function mountHamburgerMenu(){
   try { if (typeof module !== 'undefined') module.exports = { mountHamburgerMenu }; } catch {}
   // Auto-mount after DOM ready
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', () => mountHamburgerMenu());
+    document.addEventListener('DOMContentLoaded', () => { mountHamburgerMenu(); prefetchChallengeState(); });
   } else {
     mountHamburgerMenu();
+    prefetchChallengeState();
   }
 })();
 
@@ -947,4 +1719,3 @@ async function openPreferencesPanel() {
   panel.setBody(body);
   panel.open();
 }
-

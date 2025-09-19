@@ -167,9 +167,15 @@
   <!-- Auth / Start overlays -->
   <div id="startSessionOverlay" style="
     position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:10060;">
-    <button id="btnStartLive" style="
-      font:700 22px system-ui, -apple-system, Segoe UI, Arial; padding:16px 24px; border-radius:14px; border:1px solid rgba(255,255,255,.18);
-      background: rgba(0,0,0,.78); color:#fff; cursor:pointer; box-shadow:0 10px 40px rgba(0,0,0,.35);">Start Session</button>
+    <div style="display:flex; flex-direction:column; align-items:center; gap:16px;">
+      <button id="btnStartLive" style="
+        font:700 22px system-ui, -apple-system, Segoe UI, Arial; padding:16px 24px; border-radius:14px; border:1px solid rgba(255,255,255,.18);
+        background: rgba(0,0,0,.78); color:#fff; cursor:pointer; box-shadow:0 10px 40px rgba(0,0,0,.35);">Start Session</button>
+      <button id="btnStartChallenge" style="
+        display:none; font:700 18px system-ui, -apple-system, Segoe UI, Arial; padding:12px 20px; border-radius:12px; border:1px solid rgba(255,255,255,.18);
+        background: rgba(17,28,46,.82); color:#fff; cursor:pointer; box-shadow:0 8px 28px rgba(0,0,0,.32);">Start Challenge Session</button>
+      <div id="challengeBtnNote" style="display:none; font:500 12px system-ui; text-align:center; color:#f6d365; max-width:320px;"></div>
+    </div>
   </div>
 
   <div id="authOverlay" style="
