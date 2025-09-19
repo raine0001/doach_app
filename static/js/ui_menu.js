@@ -249,6 +249,7 @@
     if (btn.__challengeHandler) btn.removeEventListener('click', btn.__challengeHandler);
     const prettyName = eventName || slug;
     const handler = () => {
+      try { console.debug('[challenge-btn] click', { slug, eventName: prettyName }); } catch {}
       if (typeof window.startChallengeSession !== 'function') {
         window.showPrompt?.('Session manager not ready yet.');
         return;
@@ -323,6 +324,7 @@
   function configureChallengeButton(btn, ctx, onSuccess) {
     if (!btn) return { visible: false };
     const action = challengeAction(ctx);
+    try { console.debug('[challenge-config]', { ctx, action }); } catch {}
     if (!action.visible) {
       btn.style.display = 'none';
       if (btn.__challengeHandler) {
@@ -338,11 +340,17 @@
       btn.disabled = false;
       attachChallengeStartHandlers(btn, ctx.slug, action.eventName, onSuccess);
     } else {
-      btn.disabled = true;
+      btn.disabled = false;
       if (btn.__challengeHandler) {
         btn.removeEventListener('click', btn.__challengeHandler);
         btn.__challengeHandler = null;
       }
+      const reason = action.reason || 'Challenge session unavailable right now.';
+      const handler = () => {
+        window.showPrompt?.(reason);
+      };
+      btn.__challengeHandler = handler;
+      btn.addEventListener('click', handler);
     }
     return action;
   }
@@ -423,6 +431,7 @@
   window.syncChallengeCTA = syncChallengeCTA;
   window.__challengeEvents = window.__challengeEvents || {};
   window.__challengeState = window.__challengeState || null;
+  window.prefetchChallengeState = prefetchChallengeState;
 
 
   // ---------- Panels ----------
@@ -1329,6 +1338,7 @@ async function openMyDoachPanel(){
         // Defer greeting until camera (or video) actually starts
         window.__welcomePending = true; window.showStartSessionCTA?.();
         try { window.enableHoopPickOnce?.(); } catch {}
+        try { await window.prefetchChallengeState?.(); } catch {}
       } catch (e) { alert('Login failed: ' + e.message); }
     };
     btnCreate.onclick = async ()=>{
@@ -1341,6 +1351,7 @@ async function openMyDoachPanel(){
         // Defer greeting until camera (or video) actually starts
         window.__welcomePending = true; window.showStartSessionCTA?.();
         try { window.enableHoopPickOnce?.(); } catch {}
+        try { await window.prefetchChallengeState?.(); } catch {}
       } catch (e) { alert('Create failed: ' + e.message); }
     };
     btnLogout.onclick = async ()=>{
@@ -1348,6 +1359,7 @@ async function openMyDoachPanel(){
       status.textContent = 'Signed out';
       btnLogout.style.display = 'none';
       nameRow.style.display = '';
+      try { window.__challengeState = null; window.syncChallengeCTA?.(); } catch {}
     };
     btnSessions.onclick = ()=> window.open('/static/my_sessions.html','_blank');
 

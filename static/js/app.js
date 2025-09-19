@@ -133,7 +133,7 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
     }
   } catch {}
 
-  // ---- 5) Single safe emitter you can call from anywhere --------------------
+  // ---- 5) Single safe end Release_shot point emitter  --------------------
   if (typeof window.safeEmitRelease !== 'function') {
     window.safeEmitRelease = function safeEmitRelease(frame, via='unknown', opts={}) {
       try {
@@ -163,7 +163,7 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
 
         // Cooldown + â€œalready firedâ€ guard
         const now = performance.now();
-        const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
+        const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1200);
         const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
         if (since < cd || window.__releaseEventSent) return false;
 
@@ -200,9 +200,67 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
         window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
         window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));
+
+        try { __reportReleaseToServer?.({ frame, via, tMs: Date.now(), prox }); } catch {}
+
+        try { window.__lastSummary = null; } catch {}
+
+        try {
+          const list = (window.__shotList ||= []);
+          const last = list.at?.(-1) || null;
+          const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === frame;
+          if (!same) {
+            const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+              ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+              : null;
+            list.push({ pending: true, frameRelease: frame, tMs: Date.now(), poseSnapshot: snap });
+            try { window.__SHOT_IDX = list.length - 1; } catch {}
+          }
+        } catch {}
+
+        try {
+          const dwell = Math.max(900, Number(window.MINI_SCORE_MS || 1800));
+          if (window.__releaseFallbackTimer) clearTimeout(window.__releaseFallbackTimer);
+          window.__releaseFallbackTimer = setTimeout(() => {
+            try {
+              if (!window.__lastSummary) {
+                const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
+                window.recordShotSummary?.(summary);
+                window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
+              }
+              if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
+            } catch {} finally {
+              try { window.__releaseFallbackTimer = null; } catch {}
+            }
+          }, dwell);
+        } catch {}
+
         return true;
       } catch { return false; }
     };
+  }
+
+  if (!window.__hardCapEnd) {
+    window.__hardCapEnd = function(reason='cap'){
+      try { window.__sessionCapped = true; window.__sessionEnded = true; window.__SESSION_ACTIVE = false; } catch {}
+      try { window.stopPoseReleaseSampler?.(); window.stopFrameAnalysis?.(); } catch {}
+      try { window.setSessionStatus?.('Session complete'); } catch {}
+      try { window.dispatchEvent(new CustomEvent('hud:end-session', { detail: { reason } })); } catch {}
+    };
+  }
+
+  if (!window.__hardCapListener) {
+    window.__hardCapListener = true;
+    window.addEventListener('shot:summary', () => {
+      try { window.__SESSION_SHOT_COUNT = Number(window.__SESSION_SHOT_COUNT || 0) + 1; } catch {}
+      try {
+        const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.__SESSION_CAP ?? window.SESSION_CAP ?? window.SESSION_SIZE ?? 10));
+        const cap = Number(capFn());
+        if (Number.isFinite(cap) && cap > 0 && Number(window.__SESSION_SHOT_COUNT || 0) >= cap) {
+          (window.autoEndSessionAndSummarize || window.__hardCapEnd)?.('summary-cap');
+        }
+      } catch {}
+    });
   }
 
   // ---- 6) Capture-phase gate: swallow invalid releases globally -------------

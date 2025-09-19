@@ -53,6 +53,11 @@ export function initReleaseConfig() {
   try { if (IN_PROBE && !window.POSE_MODEL) window.POSE_MODEL = 'lite'; } catch {}
 }
 
+try { initReleaseConfig?.(); } catch {}
+try { window.SESSION_MANAGER_OWNS_ENDING = true; } catch {}
+try { window.DEFER_FE_SUMMARY = false; } catch {}
+
+
 export function getReleaseKnobs(){ return { ...(window.REL_CFG || {}) }; }
 export function setReleaseKnobs(patch){
   const cur = window.REL_CFG || {};
@@ -255,8 +260,6 @@ try {
 try {
   initReleaseConfig();
 } catch {}
-try { window.SESSION_MANAGER_OWNS_ENDING = true; } catch {}
-try { window.DEFER_FE_SUMMARY = false; } catch {}
 try {
   const base = getReleaseKnobs();
   const trip = Number(base.scoreThresh);

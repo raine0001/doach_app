@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 import io
 import wave
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from collections import defaultdict
 import threading
 try:
@@ -866,13 +866,20 @@ def _age_group_from_dob(dob: date, ref: date) -> str:
 
 def _event_local_date(dt_utc: datetime, tz_name: str|None) -> date:
     # keep simple: use UTC if tz missing
+    base = dt_utc
+    if base.tzinfo is None:
+        base = base.replace(tzinfo=timezone.utc)
     try:
         if tz_name:
             import zoneinfo
-            return dt_utc.astimezone(zoneinfo.ZoneInfo(tz_name)).date()
+            return base.astimezone(zoneinfo.ZoneInfo(tz_name)).date()
     except Exception:
         pass
-    return dt_utc.date()
+    # fall back to local server date when no timezone provided
+    try:
+        return datetime.now().date()
+    except Exception:
+        return base.astimezone(timezone.utc).date()
 
 def _db_event_register(user_id: int, event_slug: str, dob_iso: str|None=None):
     db = getattr(app, 'db', None)

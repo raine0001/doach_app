@@ -73,8 +73,13 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
 
       window.__SESSION_ACTIVE = true;
       // Stable detection & presentation
-      window.__forceServerDetect = true; window.DETECT_ROI_ONLY = true; window.__ROI_DETECT_ALWAYS = true;
-      window.REL_HAND_DIST_PX = 120; window.REL_POSE_STREAK = 1; window.REL_UPWARD_MIN_FRAMES = 1; window.RELEASE_DELAY_FRAMES = 1;
+      window.__forceServerDetect = true; 
+      window.DETECT_ROI_ONLY = true; 
+      window.__ROI_DETECT_ALWAYS = true;
+      window.REL_HAND_DIST_PX = 120; 
+      window.REL_POSE_STREAK = 1; 
+      window.REL_UPWARD_MIN_FRAMES = 1; 
+      window.RELEASE_DELAY_FRAMES = 1;
       try {
         const name = (localStorage.getItem('firstname') || 'player');
         speak(`Hi ${name}, select the hoop, then shoot when ready.`);

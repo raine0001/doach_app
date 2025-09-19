@@ -424,6 +424,7 @@
             localStorage.setItem('firstname', profile.name || 'player');
             hideAuth(); showStart();
           } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Register failed'; }
+          try { await window.prefetchChallengeState?.(); } catch {}
         };
       }
 
@@ -432,7 +433,7 @@
         fetch('/api/auth/me').then(r=>r.json()).then(j=>{
           try { splash.style.display = 'none'; } catch {}
           const user = j && j.user;
-          if (user) { showStart(); }
+          if (user) { showStart(); try { window.prefetchChallengeState?.(); } catch {} }
           else { showAuth(); renderLogin(); }
         }).catch(()=>{ try { splash.style.display='none'; } catch {}; showAuth(); renderLogin(); });
       }
