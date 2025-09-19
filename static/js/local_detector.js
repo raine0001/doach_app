@@ -51,7 +51,7 @@ class LocalDetector {
           this._pending.delete(frameIndex);
           resolve({ objects: [], frameIndex });  // fail-safe
         }
-      }, 300); // ~1 frame @30fps
+      }, 100); // ~1 frame @10fps
     });
 
     this.worker.postMessage({ type: 'detect', frameIndex, bitmap: bmp, ow, oh }, [bmp]);

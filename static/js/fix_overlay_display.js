@@ -1303,7 +1303,7 @@ export async function sendFrameToDetect(canvas, frameIndex) {
 // record canvas tracing and coach summary
 export function startCanvasRecording(canvas) {
   if (!canvas) return;
-  const stream = canvas.captureStream(30); // 30 fps
+  const stream = canvas.captureStream(10); // 10 fps
   canvasRecorder = new MediaRecorder(stream, { mimeType: 'video/webm' });
 
   recordedChunks = [];
@@ -1354,7 +1354,7 @@ export function playArchivedOverlay(videoElement, canvas, frameArchive, onComple
 
   let __frameIdx = 0;
   const totalFrames = frameArchive.length;
-  const fps = 30;
+  const fps = 10;
   const delay = 1000 / fps;
 
   const interval = setInterval(() => {

@@ -83,7 +83,7 @@ try { window.updateBottomStats?.(); } catch {}
 const POST_EXIT_MIN_FRAMES = Number(window.POST_EXIT_MIN_FRAMES ?? 12);   // try 8–12 (higher allows longer linger at rim)
 const POST_EXIT_MAX_FRAMES = Number(window.POST_EXIT_MAX_FRAMES ?? 20);   // safety cap
 // Pose-only fallback: auto-finalize if trail isn’t updating after release
-const AUTO_SUMMARY_GAP_FRAMES = Number(window.AUTO_SUMMARY_GAP ?? 24);    // ~0.8s @30fps
+const AUTO_SUMMARY_GAP_FRAMES = Number(window.AUTO_SUMMARY_GAP ?? 8);     // ~0.8s @10fps
 const AUTO_SUMMARY_MAX_FRAMES = Number(window.AUTO_SUMMARY_MAX ?? 90);    // ~3.0s cap
 
 // Shot window policy

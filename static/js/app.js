@@ -376,26 +376,8 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
 
       // Track last via + optional reporting
       try { window.__REL_LAST_VIA = String(e?.detail?.via || ''); } catch {}
-      try { __reportReleaseToServer?.(e?.detail || {}); } catch {}
-
       // Keep mini-scoring alive during RELEASE_ONLY probes
       try { if (window.__RELEASE_ONLY === true) window.__TEMP_SCORE_UNTIL = performance.now() + (Number(window.MINI_SCORE_MS || 1800)); } catch {}
-
-      // If no summary arrives by the end of the mini scoring window, finalize pending
-      try {
-        const dwell = Number(window.MINI_SCORE_MS || 1800) + 260;
-        setTimeout(() => {
-          try {
-            const list = window.__shotList || [];
-            const last = list.at?.(-1) || null;
-            if (last && last.pending) {
-              const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
-              window.recordShotSummary?.(summary);
-            }
-            if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
-          } catch {}
-        }, dwell);
-      } catch {}
     });
 
     window.addEventListener('shot:summary', (e) => {
@@ -403,6 +385,7 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
       try { if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; } } catch {}
       try { window.__TEMP_SCORE_UNTIL = 0; } catch {}
       try { window.__releaseEventSent = false; window.__gateStreak = 0; } catch {}
+      try { if (window.__releaseFallbackTimer) { clearTimeout(window.__releaseFallbackTimer); window.__releaseFallbackTimer = null; } } catch {}
     });
 
     window.addEventListener('shot:end', () => {
@@ -1617,6 +1600,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       window.__SCORE_SHOT_COUNT = 0;     // HUD uses this canonical counter
       window.__HUD_SHOT_COUNT   = 0;     // legacy HUD counter (kept for safety)
+      window.__SESSION_SHOT_COUNT = 0;   // track cap-enforced attempts
       window.__releaseEventSent = false; // allow first release
       window.__REL_LAST_FIRE_MS = 0;     // reset cooldown
     } catch {}

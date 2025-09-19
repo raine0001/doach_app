@@ -631,7 +631,7 @@ function installPreDetectorFor(srcVideo) {
     if (!srcVideo) return;
     if (window.__preVid && window.__preVid.__boundFor === srcVideo) return;
 
-    const fps = Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 30;
+    const fps = Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 10;
     const leadFrames = Number(window.__PD_LEAD_FRAMES || 6);
     const PD = (window.__PREDET ||= { map: new Map(), fps, size: 128, lead: leadFrames, ready: 0 });
     PD.fps = fps; PD.lead = leadFrames;
@@ -735,7 +735,7 @@ export function attachHoop(hoopLocked) {
     if (typeof window.printLastRelease !== 'function') {
       window.printLastRelease = function printLastRelease() {
         try {
-          const fps = Number(window.__videoFPS) || 30;
+          const fps = Number(window.__videoFPS) || 10;
           const f = Number.isFinite(window.ballState?.releaseFrame) ? window.ballState.releaseFrame : (window.__GATE_LATCH_FRAME ?? null);
           if (Number.isFinite(f)) {
             const t = (f / fps).toFixed(3);
@@ -912,7 +912,7 @@ export async function startCamera() {
 
   // Build constraints with preferred deviceId when available
   const preferredId = await pickPreferredCameraId();
-  const baseVid = { width: { ideal:1280, max:1920 }, height:{ ideal:720, max:1080 }, frameRate:{ ideal:30, max:30 } };
+  const baseVid = { width: { ideal:1280, max:1920 }, height:{ ideal:720, max:1080 }, frameRate:{ ideal:10, max:10 } };
   let videoConst;
   let preferFacing = null;
   if (preferredId) {
@@ -1202,7 +1202,7 @@ export function enableHoopPickOnce() {
         try {
           const fidx = (() => {
             const v = document.getElementById('videoPlayer');
-            const fps = Number(window.__videoFPS) || 30;
+            const fps = Number(window.__videoFPS) || 10;
             return Math.max(0, Math.round((v?.currentTime || 0) * fps));
           })();
           updatePlayerTracker?.(scaled, fidx);
@@ -1257,7 +1257,7 @@ export function enableHoopPickOnce() {
         try {
           const fidx = (() => {
             const v = document.getElementById('videoPlayer');
-            const fps = Number(window.__videoFPS) || 30;
+            const fps = Number(window.__videoFPS) || 10;
             return Math.max(0, Math.round((v?.currentTime || 0) * fps));
           })();
           updatePlayerTracker?.(scaled, fidx);
@@ -1445,7 +1445,7 @@ let __warmFrames          = 0;
 let __coolFrames          = 0;
 
 // knobs
-const WARM_NEED  = 8;   // ~0.25s @ 30fps
+const WARM_NEED  = 3;   // ~0.3s @ 10fps
 const COOL_NEED  = 4;   // require a few misses before dropping ready
 
 export function resetReadiness(reason = '') {
@@ -1655,7 +1655,7 @@ export function startPreDetection(videoEl) {
         // Update only if pose is believable (size + overlaps a detected player/person box)
         try {
           if (Array.isArray(poses) && poses.length) {
-            const fps  = Number(window.__videoFPS) || 30;
+            const fps  = Number(window.__videoFPS) || 10;
             const fidx = Math.max(0, Math.round(((videoEl?.currentTime || 0) * fps)));
             const chosen = (typeof pickPoseForActive === 'function')
               ? pickPoseForActive(poses, buf, getLockedHoopBox?.())
@@ -1971,7 +1971,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // Expectation helpers: watch for a release near a specific frame or time
   window.watchReleaseAtFrame = (frame) => {
     const target = Math.max(0, Number(frame)||0);
-    const fps = Number(window.__videoFPS) || 30;
+    const fps = Number(window.__videoFPS) || 10;
     const tolerance = Number(window.REL_WATCH_TOL || 3);
     const t0 = performance.now();
     const onRel = (e) => {
@@ -1984,7 +1984,7 @@ document.addEventListener('DOMContentLoaded', () => {
   };
   window.watchReleaseAtTime = (hhmmss) => {
     try {
-      const fps = Number(window.__videoFPS) || 30;
+      const fps = Number(window.__videoFPS) || 10;
       const parts = String(hhmmss||'').trim().split(':').map(Number);
       let h=0,m=0,s=0; if (parts.length===3){[h,m,s]=parts;} else if(parts.length===2){[m,s]=parts;} else { s = parts[0]||0; }
       const sec = (h*3600)+(m*60)+s; const frame = Math.round(sec*fps);
@@ -3061,16 +3061,16 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
   let __framePumpTimer = null;
 
   /**
-   * Call onTick at ~30 fps even if the video is paused, and gently
+   * Call onTick at ~10 fps even if the video is paused, and gently
    * advance currentTime so analyzer makes progress when autoplay is blocked.
    */
   function startFramePump(onTick) {
   if (__framePumpTimer) return; // idempotent
 
   // Target FPS (supports 29.97 etc). Set window.__videoFPS = 30 in your app/test if you want to force it.
-  const TARGET_FPS = Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 30;
-  const STEP_S     = 1 / TARGET_FPS;                         // seconds per frame (e.g., 1/30)
-  const INTERVALMS = Math.max(8, Math.round(1000 / TARGET_FPS)); // ~33ms at 30fps
+  const TARGET_FPS = Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 10;
+  const STEP_S     = 1 / TARGET_FPS;                         // seconds per frame (e.g., 1/10)
+  const INTERVALMS = Math.max(8, Math.round(1000 / TARGET_FPS)); // ~100ms at 10fps
 
   __framePumpTimer = setInterval(() => {
     try {
@@ -3361,7 +3361,7 @@ if (typeof window.clientToVideoXY !== 'function') {
           } catch {}
           return;
         }
-        const fps  = Number(window.__videoFPS) || 30;
+        const fps  = Number(window.__videoFPS) || 10;
         let fidx = 0;
         if (window.__RELEASE_ONLY === true) {
           // In release-only mode, ignore analyzer-derived index
@@ -4130,7 +4130,7 @@ window.resetShots = window.resetShots || function () {
         const v = getVideo(); if (!v?.videoWidth) { return schedule(); }
         const buf = document.createElement('canvas'); buf.width = v.videoWidth; buf.height = v.videoHeight;
         const bctx = buf.getContext('2d', { willReadFrequently: true }); bctx.drawImage(v, 0, 0, buf.width, buf.height);
-        const fps  = Number(window.__videoFPS) || 30;
+        const fps  = Number(window.__videoFPS) || 10;
         const fidx = Math.max(0, Math.round((v?.currentTime || 0) * fps));
 
         const det = await detectWithROI_BG(buf, frame).catch(() => ({ objects: [] }));
@@ -4220,7 +4220,7 @@ window.resetShots = window.resetShots || function () {
               // keep last keypoints if current is empty to avoid blinking
             } else {
               try {
-                const fps = Number(window.__videoFPS) || 30;
+                const fps = Number(window.__videoFPS) || 10;
                 const fidx = Math.max(0, Math.round((v?.currentTime || 0) * fps));
                 updatePlayerTracker?.(first, fidx);
               } catch { updatePlayerTracker?.(first, frame); }
