@@ -200,9 +200,67 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
         window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
         window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));
+
+        try { __reportReleaseToServer?.({ frame, via, tMs: Date.now(), prox }); } catch {}
+
+        try { window.__lastSummary = null; } catch {}
+
+        try {
+          const list = (window.__shotList ||= []);
+          const last = list.at?.(-1) || null;
+          const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === frame;
+          if (!same) {
+            const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+              ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+              : null;
+            list.push({ pending: true, frameRelease: frame, tMs: Date.now(), poseSnapshot: snap });
+            try { window.__SHOT_IDX = list.length - 1; } catch {}
+          }
+        } catch {}
+
+        try {
+          const dwell = Math.max(900, Number(window.MINI_SCORE_MS || 1800));
+          if (window.__releaseFallbackTimer) clearTimeout(window.__releaseFallbackTimer);
+          window.__releaseFallbackTimer = setTimeout(() => {
+            try {
+              if (!window.__lastSummary) {
+                const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
+                window.recordShotSummary?.(summary);
+                window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
+              }
+              if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
+            } catch {} finally {
+              try { window.__releaseFallbackTimer = null; } catch {}
+            }
+          }, dwell);
+        } catch {}
+
         return true;
       } catch { return false; }
     };
+  }
+
+  if (!window.__hardCapEnd) {
+    window.__hardCapEnd = function(reason='cap'){
+      try { window.__sessionCapped = true; window.__sessionEnded = true; window.__SESSION_ACTIVE = false; } catch {}
+      try { window.stopPoseReleaseSampler?.(); window.stopFrameAnalysis?.(); } catch {}
+      try { window.setSessionStatus?.('Session complete'); } catch {}
+      try { window.dispatchEvent(new CustomEvent('hud:end-session', { detail: { reason } })); } catch {}
+    };
+  }
+
+  if (!window.__hardCapListener) {
+    window.__hardCapListener = true;
+    window.addEventListener('shot:summary', () => {
+      try { window.__SESSION_SHOT_COUNT = Number(window.__SESSION_SHOT_COUNT || 0) + 1; } catch {}
+      try {
+        const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.__SESSION_CAP ?? window.SESSION_CAP ?? window.SESSION_SIZE ?? 10));
+        const cap = Number(capFn());
+        if (Number.isFinite(cap) && cap > 0 && Number(window.__SESSION_SHOT_COUNT || 0) >= cap) {
+          (window.autoEndSessionAndSummarize || window.__hardCapEnd)?.('summary-cap');
+        }
+      } catch {}
+    });
   }
 
   // ---- 6) Capture-phase gate: swallow invalid releases globally -------------
@@ -318,26 +376,8 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
 
       // Track last via + optional reporting
       try { window.__REL_LAST_VIA = String(e?.detail?.via || ''); } catch {}
-      try { __reportReleaseToServer?.(e?.detail || {}); } catch {}
-
       // Keep mini-scoring alive during RELEASE_ONLY probes
       try { if (window.__RELEASE_ONLY === true) window.__TEMP_SCORE_UNTIL = performance.now() + (Number(window.MINI_SCORE_MS || 1800)); } catch {}
-
-      // If no summary arrives by the end of the mini scoring window, finalize pending
-      try {
-        const dwell = Number(window.MINI_SCORE_MS || 1800) + 260;
-        setTimeout(() => {
-          try {
-            const list = window.__shotList || [];
-            const last = list.at?.(-1) || null;
-            if (last && last.pending) {
-              const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
-              window.recordShotSummary?.(summary);
-            }
-            if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
-          } catch {}
-        }, dwell);
-      } catch {}
     });
 
     window.addEventListener('shot:summary', (e) => {
@@ -345,6 +385,7 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
       try { if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; } } catch {}
       try { window.__TEMP_SCORE_UNTIL = 0; } catch {}
       try { window.__releaseEventSent = false; window.__gateStreak = 0; } catch {}
+      try { if (window.__releaseFallbackTimer) { clearTimeout(window.__releaseFallbackTimer); window.__releaseFallbackTimer = null; } } catch {}
     });
 
     window.addEventListener('shot:end', () => {
@@ -1559,6 +1600,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       window.__SCORE_SHOT_COUNT = 0;     // HUD uses this canonical counter
       window.__HUD_SHOT_COUNT   = 0;     // legacy HUD counter (kept for safety)
+      window.__SESSION_SHOT_COUNT = 0;   // track cap-enforced attempts
       window.__releaseEventSent = false; // allow first release
       window.__REL_LAST_FIRE_MS = 0;     // reset cooldown
     } catch {}

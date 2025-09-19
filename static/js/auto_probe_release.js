@@ -26,7 +26,7 @@
     document.body.appendChild(hud);
     const setText = (id, v) => { const el=document.getElementById(id); if (el) el.textContent=v; };
 
-    const fps = Number(window.__videoFPS) || 30;
+    const fps = Number(window.__videoFPS) || 10;
     const qp = new URLSearchParams(location.search||'');
     const releaseOnly = /^(1|true|yes)$/i.test(qp.get('releaseOnly')||'');
     const relTime = qp.get('release');

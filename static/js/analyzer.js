@@ -606,7 +606,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   try { videoEl.addEventListener('ended', onEnded, { once: true }); } catch {}
   async function onTick(mediaTime) {
     if (!analyzing || tickBusy) return; if (videoEl.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) return;
-    const t = (typeof mediaTime === 'number') ? mediaTime : videoEl.currentTime;    const fps = Number(window.__videoFPS) || 30;    const fidx = Math.max(0, Math.round((t || 0) * fps));
+    const t = (typeof mediaTime === 'number') ? mediaTime : videoEl.currentTime;    const fps = Number(window.__videoFPS) || 10;    const fidx = Math.max(0, Math.round((t || 0) * fps));
     if (t === lastHandledT) {
       try { if ((performance.now() - __lastProgressAt) < 150) return; } catch {}
     }

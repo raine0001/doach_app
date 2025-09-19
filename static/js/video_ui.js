@@ -377,8 +377,8 @@ function getVideoEl() {
 }
 
 function getFPS(v) {
-  // prefer a known fps if you set it elsewhere; fall back to 30
-  return Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 30;
+  // prefer a known fps if you set it elsewhere; fall back to 10
+  return Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 10;
 }
 
 // No-op, just clears any legacy timers if they exist
