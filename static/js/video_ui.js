@@ -2362,8 +2362,7 @@ window.addEventListener('shot:summary', () => {
           });
         } catch {}
         try { window.__SHOT_IDX = (list.length - 1); } catch {}
-        // also upsert a placeholder shot row to backend so admin shows attempts
-        try { postShotUpsert((list.length - 1), { made: null }); } catch {}
+        // Note: Backend communication moved to shot:summary event to avoid premature logging
       }
       window.__UI_LAST_RELEASE_MS = now;
       const taken = list.length;
@@ -2499,8 +2498,7 @@ window.addEventListener('shot:summary', () => {
           } catch {}
         }
         try { window.__SHOT_IDX = targetIdx; } catch {}
-        // Ensure a placeholder row exists in backend for this attempt
-        postShotUpsert(targetIdx, { made: null });
+        // Note: Backend communication moved to shot:summary event to avoid premature logging
       } catch {}
       // Also persist a release snapshot for admin even if strict release event didn't fire
       (async () => {

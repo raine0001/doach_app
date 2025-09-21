@@ -1734,6 +1734,16 @@ document.addEventListener('DOMContentLoaded', () => {
       let idx = null;
       try { if (Number.isFinite(window.__SHOT_IDX)) idx = Number(window.__SHOT_IDX); } catch {}
       if (idx == null && Array.isArray(list) && list.length) idx = list.length - 1;
+      
+      // Get pose snapshot from shot list if available
+      let poseSnapshot = null;
+      try {
+        const shotEntry = list[idx];
+        if (shotEntry && shotEntry.poseSnapshot) {
+          poseSnapshot = shotEntry.poseSnapshot;
+        }
+      } catch {}
+      
       const payload = {
         idx,
         t: Date.now(),
@@ -1741,7 +1751,8 @@ document.addEventListener('DOMContentLoaded', () => {
         arcHeight: (detail?.arcHeight ?? null),
         entryAngle: (detail?.entryAngle ?? null),
         releaseAngle: (detail?.releaseAngle ?? null),
-        missReason: (detail?.missReason ?? null)
+        missReason: (detail?.missReason ?? null),
+        poseSnapshot: poseSnapshot
       };
       // Client-side idempotence: avoid double posts for same sid|idx
       try {
