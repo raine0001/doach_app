@@ -1323,24 +1323,42 @@ def admin_sessions():
 def api_observer_frame(sid):
     """Accept low-FPS JPEG overlay snapshots from a client to aid real-time observing."""
     try:
-        # Accept multipart file 'image' or JSON { image: 'data:image/jpeg;base64,...' }
         img_bytes = None
+        raw_state = None
         if 'image' in request.files:
             f = request.files['image']
             img_bytes = f.read()
+            raw_state = request.form.get('state')
         else:
             b = request.get_json(silent=True) or {}
             data_url = b.get('image') or ''
             if data_url.startswith('data:image') and ';base64,' in data_url:
                 img_bytes = base64.b64decode(data_url.split(',')[1])
+            raw_state = b.get('state')
         if not img_bytes:
             return jsonify({'error': 'no image'}), 400
-        app.observer_frames[sid] = {'ts': int(time.time()*1000), 'bytes': img_bytes}
-        # Best-effort write to disk for later review
+        state_payload = None
+        if raw_state:
+            try:
+                if isinstance(raw_state, (bytes, bytearray)):
+                    raw_state = raw_state.decode('utf-8', 'ignore')
+                if isinstance(raw_state, str):
+                    state_payload = json.loads(raw_state)
+                elif isinstance(raw_state, dict):
+                    state_payload = raw_state
+            except Exception:
+                state_payload = {'__parse_error': True}
+        rec = {'ts': int(time.time()*1000), 'bytes': img_bytes}
+        if state_payload is not None:
+            rec['state'] = state_payload
+        app.observer_frames[sid] = rec
         try:
             d = _session_path(sid)
             with open(os.path.join(d, 'observer_latest.jpg'), 'wb') as f:
                 f.write(img_bytes)
+            if state_payload is not None:
+                with open(os.path.join(d, 'observer_latest.json'), 'w', encoding='utf-8') as fjson:
+                    json.dump({'ts': rec['ts'], 'state': state_payload}, fjson, ensure_ascii=False)
         except Exception:
             pass
         return jsonify({'ok': True})
@@ -1352,7 +1370,6 @@ def admin_observe_jpg(sid):
     rec = app.observer_frames.get(sid)
     if rec and rec.get('bytes'):
         return Response(rec['bytes'], mimetype='image/jpeg')
-    # fallback to disk if present
     try:
         p = os.path.join(_session_path(sid), 'observer_latest.jpg')
         if os.path.exists(p):
@@ -1361,21 +1378,163 @@ def admin_observe_jpg(sid):
         pass
     return jsonify({'error': 'no observer frame'}), 404
 
+@app.get('/admin/observe/<sid>.json')
+def admin_observe_json(sid):
+    """Expose the latest observer snapshot so /d_admin Observe can mirror backend state."""
+    rec = app.observer_frames.get(sid)
+    if rec and rec.get('state') is not None:
+        return jsonify({'ok': True, 'ts': rec.get('ts'), 'state': rec.get('state')})
+    try:
+        p = os.path.join(_session_path(sid), 'observer_latest.json')
+        if os.path.exists(p):
+            with open(p, 'r', encoding='utf-8') as fh:
+                data = json.load(fh)
+            if isinstance(data, dict):
+                data.setdefault('ok', True)
+                return jsonify(data)
+    except Exception:
+        pass
+    return jsonify({'ok': False, 'error': 'no observer state'}), 404
+
+
 @app.get('/admin/observe/<sid>')
 def admin_observe_page(sid):
-    # Simple auto-refreshing viewer (client reloads every 600ms)
-    html = f"""
-<!doctype html>
-<title>Observe {sid}</title>
-<style>body{{margin:0;background:#111;color:#fff;font-family:system-ui}}#wrap{{display:flex;justify-content:center;align-items:center;height:100vh}}img{{max-width:96vw;max-height:94vh;box-shadow:0 10px 30px rgba(0,0,0,.4);border:1px solid #333}}</style>
-<div id=\"wrap\"> 
-  <img id=\"pic\" src=\"/admin/observe/{sid}.jpg?ts={int(time.time()*1000)}\" alt=\"observer\"/>
-  <script>
-    const img = document.getElementById('pic');
-    setInterval(()=>{{ img.src = '/admin/observe/{sid}.jpg?ts=' + Date.now(); }}, 600);
-  </script>
+    stamp = int(time.time() * 1000)
+    template = """<!doctype html>
+<title>Observe __SID__</title>
+<style>
+  :root { color-scheme: dark; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+  body { margin:0; background:#05080f; color:#e6edf3; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
+  .layout { display:flex; flex-wrap:wrap; gap:16px; padding:16px; }
+  .pane { flex:1 1 520px; background:#0b101a; border:1px solid #1b2735; border-radius:14px; padding:12px; box-shadow:0 14px 32px rgba(0,0,0,0.35); }
+  .panel { flex:1 1 420px; background:#0b101a; border:1px solid #1b2735; border-radius:14px; padding:12px; display:flex; flex-direction:column; gap:12px; }
+  #pic { width:100%; max-height:70vh; object-fit:contain; border-radius:10px; background:#000; }
+  #viz { width:100%; height:280px; background:#03070e; border-radius:10px; border:1px solid #182231; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+  .stat { background:#111b29; border:1px solid #1f2a3a; border-radius:10px; padding:8px; }
+  .stat span { display:block; font-size:12px; opacity:.7; margin-bottom:2px; }
+  pre { background:#080d16; border:1px solid #1f2a3a; border-radius:10px; padding:10px; max-height:260px; overflow:auto; font-size:12px; }
+</style>
+<div class="layout">
+  <div class="pane">
+    <img id="pic" src="/admin/observe/__SID__.jpg?ts=__STAMP__" alt="observer feed"/>
   </div>
-"""
+  <div class="panel">
+    <div class="stats">
+      <div class="stat"><span>frame</span><strong id="statFrame">&ndash;</strong></div>
+      <div class="stat"><span>release</span><strong id="statRelease">&ndash;</strong></div>
+      <div class="stat"><span>enter</span><strong id="statEnter">&ndash;</strong></div>
+      <div class="stat"><span>exit</span><strong id="statExit">&ndash;</strong></div>
+      <div class="stat"><span>trail pts</span><strong id="statTrail">0</strong></div>
+      <div class="stat"><span>arc pts</span><strong id="statArc">0</strong></div>
+      <div class="stat"><span>refined pts</span><strong id="statArcRef">0</strong></div>
+      <div class="stat"><span>detect</span><strong id="statDetect">&ndash;</strong></div>
+      <div class="stat"><span>overlay</span><strong id="statOverlay">&ndash;</strong></div>
+    </div>
+    <canvas id="viz" width="520" height="280"></canvas>
+    <pre id="statePre">(no state yet)</pre>
+  </div>
+</div>
+<script>
+const img = document.getElementById('pic');
+setInterval(() => { img.src = `/admin/observe/__SID__.jpg?ts=${Date.now()}`; }, 700);
+const statFrame = document.getElementById('statFrame');
+const statRelease = document.getElementById('statRelease');
+const statEnter = document.getElementById('statEnter');
+const statExit = document.getElementById('statExit');
+const statTrail = document.getElementById('statTrail');
+const statArc = document.getElementById('statArc');
+const statArcRef = document.getElementById('statArcRef');
+const statDetect = document.getElementById('statDetect');
+const statOverlay = document.getElementById('statOverlay');
+const pre = document.getElementById('statePre');
+const canvas = document.getElementById('viz');
+const ctx = canvas.getContext('2d');
+const dash = '\u2014';
+function drawState(state) {
+  const vw = state?.view?.vw || state?.bg?.width || 1280;
+  const vh = state?.view?.vh || state?.bg?.height || 720;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = '#050a12';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const scale = Math.min(canvas.width / vw, canvas.height / vh);
+  const offX = (canvas.width - vw * scale) / 2;
+  const offY = (canvas.height - vh * scale) / 2;
+  ctx.save();
+  ctx.translate(offX, offY);
+  ctx.scale(scale, scale);
+  const lineW = Math.max(1.4 / scale, 1.2);
+  if (state?.proxRect) {
+    const p = state.proxRect;
+    ctx.strokeStyle = '#21d4ff';
+    ctx.lineWidth = lineW;
+    ctx.strokeRect(p.x, p.y, p.w, p.h);
+  }
+  const hoop = state?.hoopCanon || state?.hoop;
+  if (hoop) {
+    const hx = hoop.x ?? (hoop.cx - (hoop.w || 0) / 2);
+    const hy = hoop.y ?? (hoop.cy - (hoop.h || 0) / 2);
+    const hw = hoop.w ?? ((hoop.x2 ?? 0) - (hoop.x1 ?? 0));
+    const hh = hoop.h ?? ((hoop.y2 ?? 0) - (hoop.y1 ?? 0));
+    ctx.strokeStyle = '#ffb347';
+    ctx.lineWidth = lineW;
+    ctx.strokeRect(hx, hy, hw, hh);
+  }
+  const arcRef = Array.isArray(state?.ballArc?.refinedTrail) ? state.ballArc.refinedTrail : [];
+  const arcRaw = Array.isArray(state?.ballArc?.trail) ? state.ballArc.trail : [];
+  const drawPolyline = (points, color) => {
+    if (!points.length) return;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = lineW;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
+    ctx.stroke();
+    ctx.fillStyle = color;
+    const last = points[points.length - 1];
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, Math.max(3 / scale, 2), 0, Math.PI * 2);
+    ctx.fill();
+  };
+  drawPolyline(arcRaw, 'rgba(20,220,255,0.55)');
+  drawPolyline(arcRef, 'rgba(255,220,80,0.85)');
+  const trail = Array.isArray(state?.ballState?.trail) ? state.ballState.trail : [];
+  if (trail.length) {
+    ctx.strokeStyle = 'rgba(255,80,120,0.7)';
+    ctx.lineWidth = lineW;
+    ctx.beginPath();
+    ctx.moveTo(trail[0].x, trail[0].y);
+    for (let i = 1; i < trail.length; i += 1) ctx.lineTo(trail[i].x, trail[i].y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+async function poll() {
+  try {
+    const res = await fetch(`/admin/observe/__SID__.json?ts=${Date.now()}`);
+    if (!res.ok) throw new Error('no state');
+    const data = await res.json();
+    const state = data.state || null;
+    if (!state) return;
+    statFrame.textContent = state.frame ?? dash;
+    statRelease.textContent = state.ballState?.releaseFrame ?? dash;
+    statEnter.textContent = state.ballState?.proxEnterFrame ?? dash;
+    statExit.textContent = state.ballState?.proxExitFrame ?? dash;
+    statTrail.textContent = state.ballState?.trail?.length ?? 0;
+    statArc.textContent = state.ballArc?.trail?.length ?? 0;
+    statArcRef.textContent = state.ballArc?.refinedTrail?.length ?? 0;
+    statDetect.textContent = state.detectSource ?? dash;
+    statOverlay.textContent = state.overlayMode ?? dash;
+    pre.textContent = JSON.stringify(state, null, 2);
+    drawState(state);
+  } catch (err) {
+    // swallow fetch errors to avoid noisy console while waiting for frames
+  }
+}
+setInterval(poll, 750);
+poll();
+</script>"""
+    html = template.replace('__SID__', sid).replace('__STAMP__', str(stamp))
     return Response(html, mimetype='text/html')
 
 @app.get('/admin/session/<sid>/debug')

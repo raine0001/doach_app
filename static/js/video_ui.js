@@ -1,9 +1,10 @@
-﻿// âœ… [video_ui.js] - Enhancements for DOACH Mobile/Full-Screen Integration
+// [video_ui.js] - Enhancements for DOACH Mobile/Full-Screen Integration
+
 import { setOverlayInteractive } from './fix_overlay_display.js';
 import { speak } from './coach_voice.js';
 import { arcHeightLabel } from './shot_utils.js';
 import { enableHoopPickOnce } from './app.js';
-import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection } from './hoop_tracker.js';
+import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, canonHoop } from './hoop_tracker.js';
 
 
 window.getLockedHoopBox = getLockedHoopBox;
@@ -734,6 +735,87 @@ export function ensureHudRoot() {
 // Stream low-FPS overlay snapshots to the server for remote viewing.
 // Enable from console: startObserverStreaming(); stopObserverStreaming();
 let __observerTimer = null;
+
+function pruneObserverPoints(arr, limit) {
+  if (!Array.isArray(arr) || !arr.length) return [];
+  const slice = arr.slice(-Math.max(0, limit || 0));
+  return slice.map((p) => ({
+    x: Math.round(Number(p?.x) || 0),
+    y: Math.round(Number(p?.y) || 0),
+    frame: Number.isFinite(p?.frame) ? p.frame : null
+  }));
+}
+
+function safeHoopBox(hoop) {
+  if (!hoop) return null;
+  const out = {};
+  ['x','y','w','h','x1','y1','x2','y2','width','height','cx','cy','anchor'].forEach((k) => {
+    if (hoop[k] != null) out[k] = hoop[k];
+  });
+  return out;
+}
+
+// Summarize backend state for the admin observer UI without bloating payloads.
+function observerStateSnapshot() {
+  try {
+    const state = {};
+    const view = window.__VIEW || null;
+    if (view) state.view = { vw: view.vw, vh: view.vh };
+
+    const last = window.lastDetectedFrame || null;
+    state.frame = (last && Number.isFinite(last.__frameIdx)) ? last.__frameIdx : null;
+    if (last && Array.isArray(last.objects)) {
+      state.objects = last.objects.slice(0, 8).map((o) => ({
+        label: o?.label || o?.name || null,
+        conf: Number.isFinite(o?.conf) ? o.conf : (Number.isFinite(o?.score) ? o.score : null),
+        box: Array.isArray(o?.box) ? o.box.map((v) => Math.round(Number(v) || 0)) : null
+      }));
+    }
+
+    const bs = window.ballState || {};
+    state.ballState = {
+      state: bs.state || null,
+      releaseFrame: Number.isFinite(bs.releaseFrame) ? bs.releaseFrame : null,
+      proxEnterFrame: Number.isFinite(bs.proxEnterFrame) ? bs.proxEnterFrame : null,
+      proxExitFrame: Number.isFinite(bs.proxExitFrame) ? bs.proxExitFrame : null,
+      trail: pruneObserverPoints(bs.trail, 160),
+      shots: Array.isArray(bs.shots) ? bs.shots.length : 0
+    };
+
+    const arc = window.ballArc || {};
+    state.ballArc = {
+      trail: pruneObserverPoints(arc.trail, 200),
+      refinedTrail: pruneObserverPoints(arc.refinedTrail, 200)
+    };
+
+    state.detectSource = window.__detCache?._source || null;
+    state.overlayMode = window.__overlayMode || null;
+    state.bg = window.__fbf || null;
+
+    const hoop = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
+    if (hoop) {
+      state.hoop = safeHoopBox(hoop);
+      try {
+        const canon = (typeof canonHoop === 'function') ? canonHoop(hoop) : null;
+        if (canon) {
+          state.hoopCanon = { cx: canon.cx, cy: canon.cy, w: canon.w, h: canon.h, rimTop: canon.rimTop };
+          if (window.shotArc && typeof window.shotArc.proxFromHoop === 'function') {
+            const prox = window.shotArc.proxFromHoop(canon);
+            if (prox) state.proxRect = { x: prox.x, y: prox.y, w: prox.w, h: prox.h, yBot: (prox.yBot ?? (prox.y + prox.h)) };
+          }
+        }
+      } catch {}
+    }
+
+    return state;
+  } catch (err) {
+    try { console.warn('[observer] state snapshot failed', err); } catch {}
+    return null;
+  }
+}
+
+
+
 window.startObserverStreaming = function startObserverStreaming(fps = 2){
   try {
     const sid = (window.__SESSION_ID || null);
@@ -763,6 +845,10 @@ window.startObserverStreaming = function startObserverStreaming(fps = 2){
           if (!blob) return;
           const fd = new FormData();
           fd.append('image', blob, 'frame.jpg');
+          const snap = observerStateSnapshot();
+          if (snap) {
+            try { fd.append('state', JSON.stringify(snap)); } catch (e) { console.warn('[observer] state serialize failed', e); }
+          }
           await fetch(`/api/sessions/${sid}/observer_frame`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
         }, 'image/jpeg', 0.65);
       } catch {}
@@ -2638,3 +2724,4 @@ window.addEventListener('shot:summary', () => {
     }
   } catch {}
 });
+
