@@ -99,6 +99,70 @@
     }, { passive: true });
   }
 
+  let diagCanvas = null;
+  let diagCtx = null;
+  let diagParent = null;
+  let diagVideo = null;
+  let diagSizeKey = '';
+
+  function ensureDiagCanvas(video) {
+    if (!video) return;
+    if (!diagCanvas) {
+      diagVideo = video;
+      diagCanvas = document.createElement('canvas');
+      diagCanvas.id = 'bgDiagCanvas';
+      diagCanvas.style.position = 'absolute';
+      diagCanvas.style.top = '0';
+      diagCanvas.style.left = '0';
+      diagCanvas.style.width = '100%';
+      diagCanvas.style.height = '100%';
+      diagCanvas.style.pointerEvents = 'none';
+      diagCanvas.style.zIndex = '60';
+      diagParent = video.parentElement || document.body;
+      if (diagParent && getComputedStyle(diagParent).position === 'static') {
+        diagParent.style.position = 'relative';
+      }
+      if (diagParent) diagParent.insertBefore(diagCanvas, video);
+      diagCtx = diagCanvas.getContext('2d');
+    }
+    syncDiagCanvasSize(video);
+    try { video.style.visibility = 'hidden'; } catch {}
+    diagVideo = video;
+  }
+
+  function syncDiagCanvasSize(video) {
+    if (!diagCanvas || !video) return;
+    const vw = video.videoWidth || video.clientWidth || diagCanvas.width || 0;
+    const vh = video.videoHeight || video.clientHeight || diagCanvas.height || 0;
+    if (!vw || !vh) return;
+    const key = vw + 'x' + vh;
+    if (diagSizeKey === key) return;
+    diagSizeKey = key;
+    diagCanvas.width = vw;
+    diagCanvas.height = vh;
+  }
+
+  function drawDiagFrame(video) {
+    if (!diagCanvas || !diagCtx || !video) return;
+    syncDiagCanvasSize(video);
+    try { diagCtx.drawImage(video, 0, 0, diagCanvas.width, diagCanvas.height); } catch {}
+  }
+
+  function removeDiagCanvas(video) {
+    const target = video || diagVideo || document.getElementById('videoPlayer');
+    if (diagCanvas) {
+      try { diagCanvas.remove(); } catch {}
+      diagCanvas = null;
+      diagCtx = null;
+      diagParent = null;
+      diagVideo = null;
+      diagSizeKey = '';
+    }
+    if (target) {
+      try { target.style.visibility = ''; } catch {}
+    }
+  }
+
   function canonHoopLocal(H){
     try { if (typeof window.canonHoop === 'function') return window.canonHoop(H); } catch {}
     if (!H) return null;
@@ -152,6 +216,7 @@
     releaseFrame: null,
     stopFrame: null,
     dirty: true,
+    notedLive: false,
   };
 
   function pushLog(entry) {
@@ -192,11 +257,16 @@
     const interval = Math.max(40, Math.round(1000 / Math.max(1, fps || 10)));
     diagTimer = setInterval(() => {
       try {
-        if (video.paused) {
-          const dur = Number(video.duration) || Infinity;
-          const next = Math.min((video.currentTime || 0) + stepSeconds, dur - 0.001);
-          if (Number.isFinite(next) && next > (video.currentTime || 0)) {
-            video.currentTime = next;
+        if (video.srcObject) {
+          ensureDiagCanvas(video);
+          drawDiagFrame(video);
+        } else {
+          if (video.paused) {
+            const dur = Number(video.duration) || Infinity;
+            const next = Math.min((video.currentTime || 0) + stepSeconds, dur - 0.001);
+            if (Number.isFinite(next) && next > (video.currentTime || 0)) {
+              video.currentTime = next;
+            }
           }
         }
       } catch {}
@@ -209,11 +279,16 @@
       try { clearInterval(diagTimer); } catch {}
       diagTimer = null;
     }
+    if (diagVideo) {
+      removeDiagCanvas(diagVideo);
+      diagVideo = null;
+    }
   }
 
   function activateDiagnostics(auto = false) {
     if (window.__BG_DIAG_ACTIVE) return true;
     window.__BG_DIAG_ACTIVE = true;
+    logState.notedLive = false;
     try { window.DOACH_OVERLAY_TRACE = true; window.FORCE_POSE_DRAW = true; window.ARC_TRIM_TOP = false; } catch {}
     try { window.setOverlayMode?.('debug'); } catch {}
     try { window.startBgSampler?.({ fps: Number(window.__BG_FPS) || 10 }); } catch {}
@@ -224,7 +299,9 @@
         diagStepLoopStart(v, Number(window.__BG_FPS) || 10);
         try { window.startFrameAnalysis?.(); } catch {}
       } else {
-        diagStepLoopStop();
+        logState.notedLive = true;
+        ensureDiagCanvas(v);
+        diagStepLoopStart(v, Number(window.__BG_FPS) || 10);
         pushLog({ type: 'event', frame: '-', label: 'diag:live-stream' });
       }
     }
@@ -240,10 +317,14 @@
     const mode = window.__SESSION_ACTIVE ? 'coach' : 'live';
     try { window.setOverlayMode?.(mode); } catch {}
     const v = document.getElementById('videoPlayer');
-    if (v && !v.srcObject) {
-      try { v.play(); } catch {}
+    if (v) {
+      if (!v.srcObject) {
+        try { v.play(); } catch {}
+      }
+      removeDiagCanvas(v);
     }
     pushLog({ type: 'event', frame: '-', label: 'diag:off' });
+    logState.notedLive = false;
     return true;
   }
 
@@ -528,4 +609,17 @@
   }
   requestAnimationFrame(tick);
 })();
+
+
+
+
+
+
+
+
+
+
+
+
+
 
