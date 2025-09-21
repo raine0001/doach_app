@@ -15,7 +15,6 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
 (function installDemoSession(){
   const btnStart = document.getElementById('btnStartSession');
   const btnEnd   = document.getElementById('btnEndSession');
-  if (!btnStart || !btnEnd) return;
 
   let sessId = null; let shotIdx = 0; let rec = null; let recChunks = []; let recStream = null; let recCanvas = null;
 
@@ -49,6 +48,19 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
   async function startSession() {
     if (sessId) return; // already
     try {
+      const liveVideo = document.getElementById('videoPlayer');
+      if (!liveVideo?.srcObject) {
+        try {
+          const ok = await (window.startCamera?.() || Promise.resolve(false));
+          if (ok === false) {
+            console.warn('[demo] startCamera returned false; aborting startSession');
+            return;
+          }
+        } catch (camErr) {
+          console.warn('[demo] startSession could not start camera', camErr);
+          return;
+        }
+      }
       // Analyzer runs fully in the background; keep user playback at 1x
       window.USE_FBF_DURING_SHOT = false;   // do not pause/step the visible player
       // Recommended demo defaults
@@ -171,7 +183,8 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
       const stopListen = listenForEndSession('hey doach, end the session', async ()=>{ try { await endSession(); } catch {} });
       window.__demoStopVoice = stopListen;
 
-      btnStart.disabled = true; btnEnd.disabled = false;
+      if (btnStart) btnStart.disabled = true;
+      if (btnEnd) btnEnd.disabled = false;
     } catch (e) {
       console.warn('startSession failed', e);
     }
@@ -182,11 +195,14 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
     try { await window.autoEndSessionAndSummarize?.(); } catch {}
     try { await stopRecorderAndUpload(); } catch {}
     try { window.__SESSION_ACTIVE = false; } catch {}
-    try { btnStart.disabled = false; btnEnd.disabled = true; } catch {}
+    try {
+      if (btnStart) btnStart.disabled = false;
+      if (btnEnd) btnEnd.disabled = true;
+    } catch {}
   }
 
-  btnStart.addEventListener('click', startSession);
-  btnEnd.addEventListener('click', endSession);
+  if (btnStart) btnStart.addEventListener('click', startSession);
+  if (btnEnd) btnEnd.addEventListener('click', endSession);
   // HUD integration: respond to bottom bar events
   window.addEventListener('hud:end-session', () => { try { endSession(); } catch {} });
   window.addEventListener('hud:start-session', () => { try { startSession(); } catch {} });
