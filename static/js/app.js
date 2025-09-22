@@ -2533,6 +2533,10 @@ async function runShotFBF() {
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
 
 window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(videoEl, canvasEl) {
+  if (videoEl && videoEl.srcObject) {
+    console.warn('[legacy] live src detected; using PD/RVFC pipeline');
+    return;
+  }
   // Teardown any previous loop before starting
   if (typeof window.stopFrameAnalysis !== 'function') window.stopFrameAnalysis = () => {};
   window.stopFrameAnalysis();
