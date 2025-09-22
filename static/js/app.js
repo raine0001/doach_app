@@ -1552,6 +1552,9 @@ document.addEventListener('DOMContentLoaded', () => {
       try { window.USE_FBF_DURING_SHOT = true; window.FBF_VISUAL_FPS = 10; } catch {}
       try { enableHoopPickOnce(); } catch {}
       window.showPrompt?.('Tap the hoop to begin setup');
+      try { window.__STRICT_FRAME_LOCK = true; } catch {}
+    } else {
+      try { window.__STRICT_FRAME_LOCK = false; } catch {}
     }
 
     // (keep your prewarm + optional pre-detect)

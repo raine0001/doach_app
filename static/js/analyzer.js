@@ -535,8 +535,36 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   window.stopFrameAnalysis();
   window.stopPreDetection?.();
   if (!videoEl || !canvasEl) { console.warn('[analyze] missing video/canvas'); return; }
+  const isLiveStream = !!(videoEl && videoEl.srcObject);
+  const supportsRVFC = typeof videoEl.requestVideoFrameCallback === 'function';
+  const manualFrameStep = !isLiveStream ? true : (window.__FORCE_FRAME_STEP === true);
+  let releasePauseGuard = null;
+  if (manualFrameStep) {
+    try { if (!videoEl.paused) videoEl.pause(); } catch {}
+    try {
+      const holdPause = (evt) => {
+        try {
+          if (!videoEl.paused) {
+            evt?.stopImmediatePropagation?.();
+            videoEl.pause();
+          }
+        } catch {}
+      };
+      videoEl.addEventListener('play', holdPause, true);
+      videoEl.addEventListener('playing', holdPause, true);
+      releasePauseGuard = () => {
+        try { videoEl.removeEventListener('play', holdPause, true); } catch {}
+        try { videoEl.removeEventListener('playing', holdPause, true); } catch {}
+      };
+    } catch {}
+  }
+  const pumpShouldAdvance = manualFrameStep || (!supportsRVFC && !isLiveStream);
+  const useRVFC = supportsRVFC && !manualFrameStep;
+
   if (window.__analyzerActive) { console.log('[analyze] already running'); return; }
-  window.__analyzerActive = true; try { window.shotArc?.resetShotFSM?.(); } catch {}
+  window.__analyzerActive = true;
+  try { window.shotArc?.resetShotFSM?.(); } catch {}
+
   // E2E/Test harness hint: when tests run under automation, enable test-mode fallbacks
   try {
     // Do NOT infer test mode from __forceServerDetect in normal usage;
@@ -775,7 +803,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   }
   // basic frame pump if rvfc doesn't tick
   let __framePumpTimer = null;
-  function startFramePump() {
+  function startFramePump(advanceTime = false) {
     if (__framePumpTimer) return;
     const FPS = Number(window.__PREROLL_FPS) > 0 ? Number(window.__PREROLL_FPS) : 10; // backend pre-roll target
     const STEP_S = 1 / FPS;
@@ -783,15 +811,25 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
     __framePumpTimer = setInterval(() => {
       try {
         const v = videoEl;
-        const t = v.currentTime || 0;
-        // Always deliver a tick so analyzer runs even when paused
-        onTick(t);
-        // If paused (or no new frames arriving), advance time by one step to simulate FBF
-        if (v.paused || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-          const dur = Number.isFinite(v.duration) ? v.duration : Infinity;
-          const next = Math.min(t + STEP_S, (dur || 0) - 0.001);
-          if (next > t) v.currentTime = next;
+        const prevFrame = frameIdx;
+        const tickPromise = Promise.resolve(onTick(v.currentTime || 0));
+        if (!advanceTime) {
+          tickPromise.catch(() => {});
+          return;
         }
+        tickPromise.then(() => {
+          try {
+            if (!analyzing) return;
+            if (window.__STRICT_FRAME_LOCK === true) return;
+            if (frameIdx === prevFrame) return;
+            if (!(v.paused || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)) return;
+            const tNow = v.currentTime || 0;
+            const dur = Number.isFinite(v.duration) ? v.duration : Infinity;
+            const cap = Number.isFinite(dur) ? Math.max(0, dur - 0.001) : dur;
+            const nextCandidate = Math.min(tNow + STEP_S, cap);
+            if (nextCandidate > tNow) v.currentTime = nextCandidate;
+          } catch {}
+        }).catch(() => {});
       } catch {}
     }, INTERVAL);
   }
@@ -802,18 +840,35 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
     const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
     if (bgMode) {
       // In BG mode, rely solely on the pre-roll pump to avoid overspeed
-      startFramePump();
+      startFramePump(pumpShouldAdvance);
       try { onTick(videoEl.currentTime); } catch {}
       return;
     }
-    const tick = (now, meta) => { if (!analyzing) return; onTick(meta?.mediaTime ?? videoEl.currentTime); rvfcId = videoEl.requestVideoFrameCallback(tick); };
+    if (!useRVFC) {
+      startFramePump(pumpShouldAdvance);
+      try { onTick(videoEl.currentTime); } catch {}
+      return;
+    }
+    const tick = (now, meta) => {
+      if (!analyzing) return;
+      try { onTick(meta?.mediaTime ?? videoEl.currentTime); } catch {}
+      try { rvfcId = videoEl.requestVideoFrameCallback(tick); } catch {}
+    };
     try { rvfcId = videoEl.requestVideoFrameCallback(tick); } catch {}
-    startFramePump();
+    startFramePump(false);
   };
   const prevStop = window.stopFrameAnalysis;
   window.stopFrameAnalysis = function unifiedStop() {
     try { prevStop?.(); } finally {
-      analyzing = false; stopFramePump(); window.__analyzerActive = false; try { videoEl.cancelVideoFrameCallback(rvfcId); } catch {}
+      analyzing = false;
+      stopFramePump();
+      window.__analyzerActive = false;
+      try { videoEl.cancelVideoFrameCallback(rvfcId); } catch {}
+      try { releasePauseGuard?.(); } catch {}
+      releasePauseGuard = null;
+      try { window.removeEventListener('analyzer:step', onStep); } catch {}
+      try { clearInterval(window.__an_tick_watchdog); window.__an_tick_watchdog = null; } catch {}
+      try { clearInterval(window.__an_manual_step); window.__an_manual_step = null; } catch {}
       try { if (Array.isArray(window.__e2eTimers)) { for (const t of window.__e2eTimers) clearTimeout(t); window.__e2eTimers = []; } } catch {}
     }
   };
@@ -835,20 +890,8 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
         try {
           if (!analyzing) return;
           const staleMs = performance.now() - __lastProgressAt;
-          const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
           if (staleMs > 450) {
-            try {
-              const v = videoEl;
-              if (bgMode) {
-                if (Number.isFinite(v.duration) && v.duration > 0) {
-                  const next = Math.min((v.currentTime || 0) + 1/ (Number(window.__PREROLL_FPS)||10), v.duration - 0.001);
-                  if (next > (v.currentTime || 0)) v.currentTime = next;
-                }
-              } else if (Number.isFinite(v.duration) && v.duration > 0 && v.paused) {
-                const next = Math.min((v.currentTime || 0) + 1/ (Number(window.__PREROLL_FPS)||10), v.duration - 0.001);
-                if (next > (v.currentTime || 0)) v.currentTime = next;
-              }
-            } catch {}
+            if (window.__STRICT_FRAME_LOCK === true) { onTick(videoEl.currentTime); return; }
             onTick(videoEl.currentTime);
           }
         } catch {}
@@ -860,6 +903,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       window.__an_manual_step = setInterval(() => {
         try {
           if (!analyzing) return;
+          if (window.__STRICT_FRAME_LOCK === true) return;
           const v = videoEl;
           const dur = Number(v?.duration) || 0;
           const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
