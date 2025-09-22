@@ -558,7 +558,6 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       };
     } catch {}
   }
-  const pumpShouldAdvance = manualFrameStep || (!supportsRVFC && !isLiveStream);
   const useRVFC = supportsRVFC && !manualFrameStep;
 
   if (window.__analyzerActive) { console.log('[analyze] already running'); return; }
@@ -805,31 +804,27 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   let __framePumpTimer = null;
   function startFramePump(advanceTime = false) {
     if (__framePumpTimer) return;
-    const FPS = Number(window.__PREROLL_FPS) > 0 ? Number(window.__PREROLL_FPS) : 10; // backend pre-roll target
-    const STEP_S = 1 / FPS;
-    const INTERVAL = Math.max(20, Math.round(1000 / FPS));
+    const fpsGuess = Number(window.__PREROLL_FPS) > 0 ? Number(window.__PREROLL_FPS)
+                    : (Number(window.__videoFPS) || 10);
+    const STEP_S   = 1 / Math.max(1, fpsGuess);
+    const INTERVAL = Math.max(20, Math.round(1000 / Math.max(1, fpsGuess)));
+
     __framePumpTimer = setInterval(() => {
       try {
         const v = videoEl;
+        const t = v.currentTime || 0;
         const prevFrame = frameIdx;
-        const tickPromise = Promise.resolve(onTick(v.currentTime || 0));
-        if (!advanceTime) {
-          tickPromise.catch(() => {});
-          return;
+        onTick(t);
+        const processedFrame = frameIdx !== prevFrame;
+        // Only advance when we're in explicit frame-step mode, never under RVFC
+        if (advanceTime && processedFrame && window.__STRICT_FRAME_LOCK !== true) {
+          const dur = Number.isFinite(v.duration) ? v.duration : Infinity;
+          const nextCandidate = Number.isFinite(dur) ? Math.min(t + STEP_S, Math.max(t, dur - 0.001))
+                                                     : (t + STEP_S);
+          if (Number.isFinite(nextCandidate) && nextCandidate > t) {
+            v.currentTime = nextCandidate;
+          }
         }
-        tickPromise.then(() => {
-          try {
-            if (!analyzing) return;
-            if (window.__STRICT_FRAME_LOCK === true) return;
-            if (frameIdx === prevFrame) return;
-            if (!(v.paused || v.readyState < HTMLMediaElement.HAVE_CURRENT_DATA)) return;
-            const tNow = v.currentTime || 0;
-            const dur = Number.isFinite(v.duration) ? v.duration : Infinity;
-            const cap = Number.isFinite(dur) ? Math.max(0, dur - 0.001) : dur;
-            const nextCandidate = Math.min(tNow + STEP_S, cap);
-            if (nextCandidate > tNow) v.currentTime = nextCandidate;
-          } catch {}
-        }).catch(() => {});
       } catch {}
     }, INTERVAL);
   }
@@ -840,12 +835,12 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
     const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
     if (bgMode) {
       // In BG mode, rely solely on the pre-roll pump to avoid overspeed
-      startFramePump(pumpShouldAdvance);
+      startFramePump(false);
       try { onTick(videoEl.currentTime); } catch {}
       return;
     }
     if (!useRVFC) {
-      startFramePump(pumpShouldAdvance);
+      startFramePump(true);
       try { onTick(videoEl.currentTime); } catch {}
       return;
     }
@@ -855,7 +850,9 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       try { rvfcId = videoEl.requestVideoFrameCallback(tick); } catch {}
     };
     try { rvfcId = videoEl.requestVideoFrameCallback(tick); } catch {}
-    startFramePump(false);
+    if (window.__PREROLL_FORCE_PUMP === true) {
+      startFramePump(false);
+    }
   };
   const prevStop = window.stopFrameAnalysis;
   window.stopFrameAnalysis = function unifiedStop() {
@@ -892,6 +889,19 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
           const staleMs = performance.now() - __lastProgressAt;
           if (staleMs > 450) {
             if (window.__STRICT_FRAME_LOCK === true) { onTick(videoEl.currentTime); return; }
+            try {
+              const v = videoEl;
+              const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
+              if (bgMode) {
+                if (Number.isFinite(v.duration) && v.duration > 0) {
+                  const next = Math.min((v.currentTime || 0) + 1 / (Number(window.__PREROLL_FPS) || 10), v.duration - 0.001);
+                  if (next > (v.currentTime || 0)) v.currentTime = next;
+                }
+              } else if (Number.isFinite(v.duration) && v.duration > 0 && v.paused) {
+                const next = Math.min((v.currentTime || 0) + 1 / (Number(window.__PREROLL_FPS) || 10), v.duration - 0.001);
+                if (next > (v.currentTime || 0)) v.currentTime = next;
+              }
+            } catch {}
             onTick(videoEl.currentTime);
           }
         } catch {}

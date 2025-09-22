@@ -1549,10 +1549,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // ðŸ‘‡ Auto-arm pick for uploaded videos (not live camera)
     const isLive = !!videoPlayer.srcObject;
     if (!isLive) {
-      try { window.USE_FBF_DURING_SHOT = true; window.FBF_VISUAL_FPS = 10; } catch {}
+      try { window.USE_FBF_DURING_SHOT = true; } catch {}
+      try { window.FBF_VISUAL_FPS = 10; } catch {}
+      try { window.__STRICT_FRAME_LOCK = true; } catch {} // analyzer is the only clock
       try { enableHoopPickOnce(); } catch {}
       window.showPrompt?.('Tap the hoop to begin setup');
-      try { window.__STRICT_FRAME_LOCK = true; } catch {}
     } else {
       try { window.__STRICT_FRAME_LOCK = false; } catch {}
     }
