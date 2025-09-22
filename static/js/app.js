@@ -1632,6 +1632,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Pause â†’ stop analysis + pre-detect, reset readiness a bit
   videoPlayer.addEventListener('pause', () => {
+    // If FBF owns the pause, do NOT tear down analysis
+    if (window.__fbfActive === true || window.__FBF_OWNING_PAUSE === true) return;
+    const live = !!videoPlayer.srcObject;
+    if (!live) return;
     try { window.stopPoseReleaseSampler?.(); } catch {}
     try { window.isTracking = false; } catch {}
     try { stopPreDetection?.(); } catch {}

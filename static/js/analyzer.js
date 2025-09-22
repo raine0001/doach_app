@@ -503,7 +503,7 @@ export async function runShotFBF() {
   if (window.__fbfActive)   return;
   try { window.stopFrameAnalysis?.(); } catch {}
   window.__fbfActive = true; window.__ignoreSlowWhileFBF = true; window.setSessionStatus?.('Analyzing shotâ€¦');
-  try { videoEl.pause(); } catch {}
+  try { window.__FBF_OWNING_PAUSE = true; videoEl.pause(); } catch {}
   try { ensureOverlayCss?.(); syncOverlayToVideo?.(); } catch {}
   const srcFps = getFPS(); const dt = (1 / srcFps) + 1e-4; const visFps = Math.max(1, Number(window.FBF_VISUAL_FPS) || 9);
   const buf = document.createElement('canvas'); const bctx = buf.getContext('2d', { willReadFrequently: true });
@@ -523,6 +523,7 @@ export async function runShotFBF() {
     const minStepMs = 1000 / visFps; const elapsed = performance.now() - tStart; if (elapsed < minStepMs) await new Promise(r => setTimeout(r, Math.max(0, minStepMs - elapsed)));
   }
   window.__fbfActive = false; window.setSessionStatus?.('SESSION IN PROGRESSâ€¦');
+  try { delete window.__FBF_OWNING_PAUSE; } catch {}
   try { videoEl.playbackRate = 1; videoEl.play(); } catch {}
   try { analyzeVideoFrameByFrame(videoEl, canvasEl); } catch {}
   window.removeEventListener('shot:end',     stopNow);
@@ -617,6 +618,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
     }
   } catch {}
   let analyzing = true, tickBusy = false, frameIdx = 0, rvfcId = null, lastHandledT = -1;
+  let __AN_RVFC_ACTIVE = false;
   let __lastProgressAt = performance.now();
   let __lastIdxSeen = -1;
   const buf  = document.createElement('canvas'); const bctx = buf.getContext('2d', { willReadFrequently: true });
@@ -640,26 +642,48 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
     lastHandledT = t;
     tickBusy = true; try {
       syncBufferSize(); bctx.drawImage(videoEl, 0, 0, buf.width, buf.height);
-      const [det, poseRes] = await Promise.all([
-        (async () => {
+      let objects = [];
+      let poses = [];
+      if (isLiveStream) {
+        try {
+          const pd = readPredet(frameIdx);
+          const fallback = window.lastDetectedFrame?.objects || [];
+          objects = Array.isArray(pd?.objects) ? pd.objects : (Array.isArray(fallback) ? fallback : []);
+        } catch {
+          const fallback = window.lastDetectedFrame?.objects || [];
+          objects = Array.isArray(fallback) ? fallback : [];
+        }
+        const poseOwnedByBG = ((window.__SESSION_ACTIVE && !window.DEBUG_FORCE_POSE_ACTIVE) || (window.__FORCE_POSE_BG && !window.DEBUG_FORCE_POSE_ACTIVE));
+        if (!poseOwnedByBG) {
           try {
-            const pd = readPredet(frameIdx);
-            if (pd) return pd;
-            const guess = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || null;
-            return await detectWithROI(buf, frameIdx, guess);
-          } catch { return { objects: [] }; }
-        })(),
-        (async () => {
-          try {
-            if (window.__SESSION_ACTIVE && !window.DEBUG_FORCE_POSE_ACTIVE) return null; // live: let BG sampler own pose
-            if (window.__FORCE_POSE_BG && !window.DEBUG_FORCE_POSE_ACTIVE) return null;
-            const r = await poseDetectSerial();
-            try { if (window.POSE_DEBUG === true) console.log('[pose:analyzer]', { frame: frameIdx, ok: !!(r?.landmarks?.length), n: (Array.isArray(r?.landmarks?.[0])? r.landmarks[0].length : (r?.landmarks?.length||0)) }); } catch {}
-            return r;
-          } catch { return null; }
-        })()
-      ]);
-      let objects = det?.objects ?? []; const poses = poseRes?.landmarks || [];
+            const poseResLive = await poseDetectSerial();
+            try { if (window.POSE_DEBUG === true) console.log('[pose:analyzer]', { frame: frameIdx, ok: !!(poseResLive?.landmarks?.length), n: (Array.isArray(poseResLive?.landmarks?.[0]) ? poseResLive.landmarks[0].length : (poseResLive?.landmarks?.length || 0)) }); } catch {}
+            poses = Array.isArray(poseResLive?.landmarks) ? poseResLive.landmarks : [];
+          } catch { poses = []; }
+        }
+      } else {
+        const [det, poseRes] = await Promise.all([
+          (async () => {
+            try {
+              const pd = readPredet(frameIdx);
+              if (pd) return pd;
+              const guess = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || null;
+              return await detectWithROI(buf, frameIdx, guess);
+            } catch { return { objects: [] }; }
+          })(),
+          (async () => {
+            try {
+              if (window.__SESSION_ACTIVE && !window.DEBUG_FORCE_POSE_ACTIVE) return null; // live: let BG sampler own pose
+              if (window.__FORCE_POSE_BG && !window.DEBUG_FORCE_POSE_ACTIVE) return null;
+              const r = await poseDetectSerial();
+              try { if (window.POSE_DEBUG === true) console.log('[pose:analyzer]', { frame: frameIdx, ok: !!(r?.landmarks?.length), n: (Array.isArray(r?.landmarks?.[0])? r.landmarks[0].length : (r?.landmarks?.length||0)) }); } catch {}
+              return r;
+            } catch { return null; }
+          })()
+        ]);
+        objects = det?.objects ?? [];
+        poses = Array.isArray(poseRes?.landmarks) ? poseRes.landmarks : [];
+      }
       stabilizeLockedHoop?.(objects); try { objects = filterObjectsToLockedHoop?.(objects) ?? objects; } catch {}
       const hoopLocked = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || getLockedHoopBox?.(); const Hc = hoopLocked ? canonHoop(hoopLocked) : null; const hoopTL = Hc ? { ...asTopLeft(Hc), anchor: 'topleft' } : null; if (hoopTL) window.attachHoop?.(hoopTL);
       // Pose selection fallback
@@ -816,8 +840,8 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
         const prevFrame = frameIdx;
         onTick(t);
         const processedFrame = frameIdx !== prevFrame;
-        // Only advance when we're in explicit frame-step mode, never under RVFC
-        if (advanceTime && processedFrame && window.__STRICT_FRAME_LOCK !== true) {
+        const manual = advanceTime && processedFrame && window.__STRICT_FRAME_LOCK !== true && __AN_RVFC_ACTIVE !== true;
+        if (manual) {
           const dur = Number.isFinite(v.duration) ? v.duration : Infinity;
           const nextCandidate = Number.isFinite(dur) ? Math.min(t + STEP_S, Math.max(t, dur - 0.001))
                                                      : (t + STEP_S);
@@ -832,6 +856,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   const onStep = () => onTick(videoEl.currentTime);
   window.addEventListener('analyzer:step', onStep);
   const startRVFC = () => {
+    __AN_RVFC_ACTIVE = false;
     const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
     if (bgMode) {
       // In BG mode, rely solely on the pre-roll pump to avoid overspeed
@@ -844,6 +869,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       try { onTick(videoEl.currentTime); } catch {}
       return;
     }
+    __AN_RVFC_ACTIVE = true;
     const tick = (now, meta) => {
       if (!analyzing) return;
       try { onTick(meta?.mediaTime ?? videoEl.currentTime); } catch {}
@@ -858,6 +884,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   window.stopFrameAnalysis = function unifiedStop() {
     try { prevStop?.(); } finally {
       analyzing = false;
+      __AN_RVFC_ACTIVE = false;
       stopFramePump();
       window.__analyzerActive = false;
       try { videoEl.cancelVideoFrameCallback(rvfcId); } catch {}
@@ -888,7 +915,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
           if (!analyzing) return;
           const staleMs = performance.now() - __lastProgressAt;
           if (staleMs > 450) {
-            if (window.__STRICT_FRAME_LOCK === true) { onTick(videoEl.currentTime); return; }
+            if (window.__STRICT_FRAME_LOCK === true || __AN_RVFC_ACTIVE === true) { onTick(videoEl.currentTime); return; }
             try {
               const v = videoEl;
               const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
@@ -913,7 +940,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       window.__an_manual_step = setInterval(() => {
         try {
           if (!analyzing) return;
-          if (window.__STRICT_FRAME_LOCK === true) return;
+          if (window.__STRICT_FRAME_LOCK === true || __AN_RVFC_ACTIVE === true) return;
           const v = videoEl;
           const dur = Number(v?.duration) || 0;
           const bgMode = /[?&]__bg=1/.test(location.search || '') || (window.__BG_ONLY === true);
