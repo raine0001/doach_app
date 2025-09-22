@@ -313,14 +313,17 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
           } catch {}
         }
 
-        // Proximity sanity: reject releases not preceded by recent prox enter
+        // Ball freshness sanity: use timestamps so cross-clock drift doesn’t kill releases
         try {
-          const f = Number(e?.detail?.frame);
-          const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
-          if (!Number.isFinite(f) || !Number.isFinite(enter) || (f - enter) > Number(window.REL_PROX_MAX_LAG_FRAMES || 90)) {
-            window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+          const nowMs = performance.now();
+          const lastPt = window.ballState?.trail?.at?.(-1) || null;
+          const lastMs = Number(lastPt?.tMs);
+          const freshMs = Number(window.REL_MAX_BALL_MS || 360);
+          if (!Number.isFinite(lastMs) || (nowMs - lastMs) > freshMs) {
+            if (window.DOACH_RELEASE_TRACE === true) console.warn('[REL:warn] prox/ball stale', { gapMs: nowMs - (lastMs || nowMs) });
           }
         } catch {}
+
 
         // Cooldown suppression
         const now = performance.now();
