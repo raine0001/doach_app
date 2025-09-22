@@ -6,27 +6,31 @@
   <title>Doach Admin</title>
   <style>
     :root { color-scheme: dark; }
-    body { margin: 0; font: 14px/1.4 system-ui, -apple-system, Segoe UI, Arial; background:#0b0f14; color:#e6edf3; }
-    header { display:flex; align-items:center; justify-content:space-between; padding: 14px 16px; background:#0f1621; border-bottom:1px solid #1f2a36; position:sticky; top:0; z-index:2; }
-    h1 { font-size: 18px; margin:0; }
-    main { display: grid; grid-template-columns: 420px 1fr; gap: 14px; padding: 14px; }
-    section { background:#0f1621; border:1px solid #1f2a36; border-radius: 10px; overflow:hidden; }
-    section > h2 { font-size: 14px; margin:0; padding:10px 12px; background:#111a25; border-bottom:1px solid #1f2a36; }
-    .list { padding: 8px; max-height: calc(100vh - 180px); overflow:auto; }
+    body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Arial; background:#0b0f14; color:#e6edf3; min-height:100vh; display:flex; flex-direction:column; }
+    header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; background:#0f1621; border-bottom:1px solid #1f2a36; flex-shrink:0; }
+    h1 { font-size:18px; margin:0; }
+    main { display:grid; grid-template-columns:380px 1fr; gap:14px; padding:14px; flex:1 1 auto; box-sizing:border-box; min-height:0; }
+    section { background:#0f1621; border:1px solid #1f2a36; border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+    section > h2 { font-size:14px; margin:0; padding:10px 12px; background:#111a25; border-bottom:1px solid #1f2a36; flex-shrink:0; }
+    .list { padding:8px; overflow:auto; flex:1 1 auto; }
     .row { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid #16202b; cursor:pointer; }
     .row:hover { background:#0d131c; }
-    .muted { opacity: .8; }
-    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size: 12px; }
+    .muted { opacity:.8; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:12px; }
     .ok { background:#11331f; color:#34d399; border:1px solid #1e7a42; }
-    .bad{ background:#2a1111; color:#f87171; border:1px solid #7a1e1e; }
+    .bad { background:#2a1111; color:#f87171; border:1px solid #7a1e1e; }
     .btn { background:#1a2533; color:#dbe5ee; border:1px solid #283241; padding:6px 10px; border-radius:8px; cursor:pointer; }
     .btn:hover { background:#223144; }
     .toolbar { display:flex; gap:8px; align-items:center; }
-    #viewer { height: calc(100% - 44px); display:flex; align-items:center; justify-content:center; padding:10px; }
-    iframe { width: 100%; height: 540px; border:none; border-radius:10px; background:#0b0f14; }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 10px; }
+    #viewer { flex:1 1 auto; display:flex; align-items:center; justify-content:center; padding:10px; min-height:0; }
+    iframe { width:100%; height:100%; border:none; border-radius:10px; background:#0b0f14; min-height:0; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; flex-shrink:0; }
     pre { background:#0b0f14; border:1px solid #1f2a36; border-radius:8px; padding:8px; overflow:auto; max-height:320px; }
     input[type="text"] { background:#0b0f14; color:#e6edf3; border:1px solid #1f2a36; padding:6px 8px; border-radius:8px; width:200px; }
+    @media (max-width: 1040px) {
+      main { grid-template-columns:1fr; }
+      #viewer { min-height:320px; }
+    }
   </style>
 </head>
 <body>
@@ -46,9 +50,7 @@
       <h2>Details</h2>
       <div id="viewer">
         <div class="muted" style="max-width:560px; text-align:center;">
-          <div style="margin-bottom:8px;">
-            Select a session to view observer and debug.
-          </div>
+          <div style="margin-bottom:8px;">Select a session to view observer and debug.</div>
           <div style="text-align:left; background:#0b0f14; border:1px dashed #2a3a4a; padding:10px; border-radius:8px;">
             <strong>Tip</strong>: On the client, open DevTools and run:
             <pre>startObserverStreaming(2)</pre>
@@ -106,7 +108,6 @@
         const B = new Date(b.created_at||b.started_at||b.startedAt||0).getTime();
         return (B - A);
       });
-      // detect increments
       list.forEach(s => {
         const k = s.sid||s.id; const n = s.shots||0; const p = __prevCounts.get(k)||0; s.__inc = (n>p); __prevCounts.set(k,n);
       });

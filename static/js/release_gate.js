@@ -102,7 +102,10 @@ export function releaseGate(lastFrames) {
     if (warmOK) { try { window.__POSE_WARMUP_OK = true; } catch {} }
     const armed = (window.__shotTrackingArmed === true);
     // Gate: do not allow any release until warmup is satisfied AND session is armed
-    if (!(warmOK && armed)) return { released:false, passed:0, tests:{}, reason: (armed ? 'pose-warmup' : 'not-armed') };
+    if (!(warmOK && armed)) {
+      try { window.__releaseGateLast = { ts: Date.now(), frame: hist?.at?.(-1)?.frame ?? null, best: { released:false, reason: armed ? 'pose-warmup' : 'not-armed' }, poseStreak: Number(window.__poseGateStreak || 0), armed, hoopLocked: window.__hoopConfirmed === true }; } catch {}
+      return { released:false, passed:0, tests:{}, reason: (armed ? 'pose-warmup' : 'not-armed') };
+    }
   } catch {}
   function evalSide(side, hist) {
     const right = (side === 'R');
@@ -221,6 +224,22 @@ export function releaseGate(lastFrames) {
     if (l.released && !r.released) best = l;
     else if (l.passed > r.passed) best = l;
     else if ((l.tests?.score || 0) > (r.tests?.score || 0)) best = l;
+    try {
+      const payload = {
+        ts: Date.now(),
+        frame: hist?.at?.(-1)?.frame ?? null,
+        best,
+        right: r,
+        left: l,
+        poseStreak: Number(window.__poseGateStreak || 0),
+        armed: window.__shotTrackingArmed === true,
+        hoopLocked: window.__hoopConfirmed === true
+      };
+      window.__releaseGateLast = payload;
+      if (best?.released && typeof window.__logObserverEvent === 'function') {
+        window.__logObserverEvent('gate:released', payload);
+      }
+    } catch {}
     return best;
   } catch (e) {
     return { released:false, passed:0, tests:{}, reason:'error' };

@@ -1404,16 +1404,29 @@ def admin_observe_page(sid):
 <title>Observe __SID__</title>
 <style>
   :root { color-scheme: dark; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
-  body { margin:0; background:#05080f; color:#e6edf3; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; }
-  .layout { display:flex; flex-wrap:wrap; gap:16px; padding:16px; }
-  .pane { flex:1 1 520px; background:#0b101a; border:1px solid #1b2735; border-radius:14px; padding:12px; box-shadow:0 14px 32px rgba(0,0,0,0.35); }
-  .panel { flex:1 1 420px; background:#0b101a; border:1px solid #1b2735; border-radius:14px; padding:12px; display:flex; flex-direction:column; gap:12px; }
-  #pic { width:100%; max-height:70vh; object-fit:contain; border-radius:10px; background:#000; }
-  #viz { width:100%; height:280px; background:#03070e; border-radius:10px; border:1px solid #182231; }
-  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr)); gap:8px; }
+  html, body { height:100%; }
+  body { margin:0; background:#05080f; color:#e6edf3; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif; overflow:hidden; }
+  .layout { display:flex; flex-wrap:nowrap; gap:16px; padding:16px; height:100%; box-sizing:border-box; }
+  .pane, .panel { background:#0b101a; border:1px solid #1b2735; border-radius:14px; box-shadow:0 14px 32px rgba(0,0,0,0.35); overflow:hidden; box-sizing:border-box; min-height:0; }
+  .pane { flex:2 1 0%; padding:12px; display:flex; flex-direction:column; }
+  #pic { width:100%; height:100%; flex:1 1 auto; object-fit:contain; background:#000; border-radius:12px; }
+  .panel { flex:1.2 1 0%; padding:12px; display:flex; flex-direction:column; gap:12px; overflow:hidden; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(110px,1fr)); gap:8px; overflow-y:auto; max-height:200px; min-height:0; }
   .stat { background:#111b29; border:1px solid #1f2a3a; border-radius:10px; padding:8px; }
   .stat span { display:block; font-size:12px; opacity:.7; margin-bottom:2px; }
-  pre { background:#080d16; border:1px solid #1f2a3a; border-radius:10px; padding:10px; max-height:260px; overflow:auto; font-size:12px; }
+  #viz { width:100%; flex:1 1 auto; min-height:220px; background:#03070e; border-radius:10px; border:1px solid #182231; }
+  .event-log { flex:0 0 170px; background:#080d16; border:1px solid #1f2a3a; border-radius:10px; overflow:auto; font-size:12px; padding:6px 8px; line-height:1.35; }
+  .event-log .event { border-bottom:1px solid rgba(255,255,255,0.08); padding:4px 0; }
+  .event-log .event:last-child { border-bottom:none; }
+  pre { flex:1 1 0%; min-height:0; background:#080d16; border:1px solid #1f2a3a; border-radius:10px; padding:10px; overflow:auto; font-size:12px; }
+  @media (max-width: 1100px) {
+    body { overflow:auto; }
+    .layout { flex-direction:column; height:auto; }
+    .pane, .panel { height:auto; }
+    .stats { max-height:none; }
+    #viz { min-height:200px; }
+    .event-log { flex:0 0 auto; max-height:220px; }
+  }
 </style>
 <div class="layout">
   <div class="pane">
@@ -1428,16 +1441,28 @@ def admin_observe_page(sid):
       <div class="stat"><span>trail pts</span><strong id="statTrail">0</strong></div>
       <div class="stat"><span>arc pts</span><strong id="statArc">0</strong></div>
       <div class="stat"><span>refined pts</span><strong id="statArcRef">0</strong></div>
+      <div class="stat"><span>objects</span><strong id="statObjects">0</strong></div>
+      <div class="stat"><span>bs state</span><strong id="statState">&ndash;</strong></div>
+      <div class="stat"><span>shots</span><strong id="statShots">0</strong></div>
+      <div class="stat"><span>last shot</span><strong id="statLast">&ndash;</strong></div>
+      <div class="stat"><span>gate score</span><strong id="statGateScore">&ndash;</strong></div>
+      <div class="stat"><span>gate reason</span><strong id="statGateReason">&ndash;</strong></div>
+      <div class="stat"><span>gate side</span><strong id="statGateSide">&ndash;</strong></div>
+      <div class="stat"><span>pose streak</span><strong id="statPoseStreak">0</strong></div>
+      <div class="stat"><span>an frame</span><strong id="statAnalyzer">&ndash;</strong></div>
+      <div class="stat"><span>seq</span><strong id="statSeq">0</strong></div>
       <div class="stat"><span>detect</span><strong id="statDetect">&ndash;</strong></div>
       <div class="stat"><span>overlay</span><strong id="statOverlay">&ndash;</strong></div>
     </div>
     <canvas id="viz" width="520" height="280"></canvas>
+    <div id="eventLog" class="event-log">(no events yet)</div>
     <pre id="statePre">(no state yet)</pre>
   </div>
 </div>
 <script>
 const img = document.getElementById('pic');
-setInterval(() => { img.src = `/admin/observe/__SID__.jpg?ts=${Date.now()}`; }, 700);
+setInterval(() => { img.src = `/admin/observe/__SID__.jpg?ts=${Date.now()}`; }, 500);
+const dash = '—';
 const statFrame = document.getElementById('statFrame');
 const statRelease = document.getElementById('statRelease');
 const statEnter = document.getElementById('statEnter');
@@ -1445,12 +1470,42 @@ const statExit = document.getElementById('statExit');
 const statTrail = document.getElementById('statTrail');
 const statArc = document.getElementById('statArc');
 const statArcRef = document.getElementById('statArcRef');
+const statObjects = document.getElementById('statObjects');
+const statState = document.getElementById('statState');
+const statShots = document.getElementById('statShots');
+const statLast = document.getElementById('statLast');
+const statGateScore = document.getElementById('statGateScore');
+const statGateReason = document.getElementById('statGateReason');
+const statGateSide = document.getElementById('statGateSide');
+const statPoseStreak = document.getElementById('statPoseStreak');
+const statAnalyzer = document.getElementById('statAnalyzer');
+const statSeq = document.getElementById('statSeq');
 const statDetect = document.getElementById('statDetect');
 const statOverlay = document.getElementById('statOverlay');
 const pre = document.getElementById('statePre');
+const eventLogEl = document.getElementById('eventLog');
 const canvas = document.getElementById('viz');
 const ctx = canvas.getContext('2d');
-const dash = '\u2014';
+function esc(value) {
+  return String(value ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function renderEvents(events) {
+  if (!eventLogEl) return;
+  if (!Array.isArray(events) || !events.length) {
+    eventLogEl.innerHTML = '<div class="event" style="opacity:0.6">no events</div>';
+    return;
+  }
+  const html = events.slice(-20).reverse().map((entry) => {
+    const ts = entry?.ts ? new Date(entry.ts).toLocaleTimeString() : '';
+    const frame = entry?.frame != null ? `f${entry.frame}` : '';
+    let detail = '';
+    if (entry?.detail != null) {
+      try { detail = esc(JSON.stringify(entry.detail)); } catch { detail = esc(String(entry.detail)); }
+    }
+    return `<div class="event"><div><strong>${esc(entry?.type || 'event')}</strong> ${esc(ts)} ${esc(frame)}</div><div style="opacity:0.75">${detail}</div></div>`;
+  }).join('');
+  eventLogEl.innerHTML = html;
+}
 function drawState(state) {
   const vw = state?.view?.vw || state?.bg?.width || 1280;
   const vh = state?.view?.vh || state?.bg?.height || 720;
@@ -1463,12 +1518,16 @@ function drawState(state) {
   ctx.save();
   ctx.translate(offX, offY);
   ctx.scale(scale, scale);
-  const lineW = Math.max(1.4 / scale, 1.2);
+  const invScale = scale === 0 ? 0 : (1 / scale);
+  const strokePX = (value) => Math.max(value * invScale, value <= 1 ? 1 : value);
+  const baseStroke = 2.2;
   if (state?.proxRect) {
     const p = state.proxRect;
-    ctx.strokeStyle = '#21d4ff';
-    ctx.lineWidth = lineW;
-    ctx.strokeRect(p.x, p.y, p.w, p.h);
+    if (Number.isFinite(p?.x) && Number.isFinite(p?.y) && Number.isFinite(p?.w) && Number.isFinite(p?.h)) {
+      ctx.strokeStyle = '#21d4ff';
+      ctx.lineWidth = strokePX(baseStroke);
+      ctx.strokeRect(p.x, p.y, p.w, p.h);
+    }
   }
   const hoop = state?.hoopCanon || state?.hoop;
   if (hoop) {
@@ -1476,36 +1535,106 @@ function drawState(state) {
     const hy = hoop.y ?? (hoop.cy - (hoop.h || 0) / 2);
     const hw = hoop.w ?? ((hoop.x2 ?? 0) - (hoop.x1 ?? 0));
     const hh = hoop.h ?? ((hoop.y2 ?? 0) - (hoop.y1 ?? 0));
-    ctx.strokeStyle = '#ffb347';
-    ctx.lineWidth = lineW;
-    ctx.strokeRect(hx, hy, hw, hh);
+    if (Number.isFinite(hx) && Number.isFinite(hy) && Number.isFinite(hw) && Number.isFinite(hh)) {
+      ctx.strokeStyle = '#ffb347';
+      ctx.lineWidth = strokePX(baseStroke);
+      ctx.strokeRect(hx, hy, hw, hh);
+    }
   }
-  const arcRef = Array.isArray(state?.ballArc?.refinedTrail) ? state.ballArc.refinedTrail : [];
-  const arcRaw = Array.isArray(state?.ballArc?.trail) ? state.ballArc.trail : [];
+  let arcRef = Array.isArray(state?.ballArc?.refinedTrail) ? state.ballArc.refinedTrail : [];
+  let arcRaw = Array.isArray(state?.ballArc?.trail) ? state.ballArc.trail : [];
+  const fallbackTrail = Array.isArray(state?.ballState?.trail) ? state.ballState.trail : [];
+  if (!arcRaw.length && Array.isArray(state?.shots)) {
+    for (let i = state.shots.length - 1; i >= 0; i -= 1) {
+      const shot = state.shots[i];
+      if (Array.isArray(shot?.trail) && shot.trail.length) { arcRaw = shot.trail; break; }
+    }
+  }
+  if (!arcRef.length) {
+    if (Array.isArray(state?.lastSummary?.trail) && state.lastSummary.trail.length) {
+      arcRef = state.lastSummary.trail;
+    } else if (!arcRaw.length && Array.isArray(state?.ballState?.frozenShots)) {
+      for (let i = state.ballState.frozenShots.length - 1; i >= 0; i -= 1) {
+        const shot = state.ballState.frozenShots[i];
+        if (Array.isArray(shot?.trail) && shot.trail.length) { arcRef = shot.trail; break; }
+      }
+    }
+  }
+  if (!arcRaw.length) arcRaw = fallbackTrail;
+  if (!arcRef.length) arcRef = fallbackTrail;
   const drawPolyline = (points, color) => {
     if (!points.length) return;
     ctx.strokeStyle = color;
-    ctx.lineWidth = lineW;
+    ctx.lineWidth = strokePX(baseStroke);
     ctx.beginPath();
     ctx.moveTo(points[0].x, points[0].y);
     for (let i = 1; i < points.length; i += 1) ctx.lineTo(points[i].x, points[i].y);
     ctx.stroke();
-    ctx.fillStyle = color;
     const last = points[points.length - 1];
-    ctx.beginPath();
-    ctx.arc(last.x, last.y, Math.max(3 / scale, 2), 0, Math.PI * 2);
-    ctx.fill();
+    if (Number.isFinite(last?.x) && Number.isFinite(last?.y)) {
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(last.x, last.y, Math.max(3 * invScale, 2), 0, Math.PI * 2);
+      ctx.fill();
+    }
   };
   drawPolyline(arcRaw, 'rgba(20,220,255,0.55)');
   drawPolyline(arcRef, 'rgba(255,220,80,0.85)');
   const trail = Array.isArray(state?.ballState?.trail) ? state.ballState.trail : [];
   if (trail.length) {
     ctx.strokeStyle = 'rgba(255,80,120,0.7)';
-    ctx.lineWidth = lineW;
+    ctx.lineWidth = strokePX(baseStroke);
     ctx.beginPath();
     ctx.moveTo(trail[0].x, trail[0].y);
-    for (let i = 1; i < trail.length; i += 1) ctx.lineTo(trail[i].x, trail[i].y);
+    for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
     ctx.stroke();
+  }
+  const objects = Array.isArray(state?.objects) ? state.objects : [];
+  if (objects.length) {
+    const fontPx = Math.max(11 / scale, 10);
+    ctx.font = `${fontPx}px system-ui`;
+    objects.forEach((obj) => {
+      const box = Array.isArray(obj?.box) ? obj.box : null;
+      if (!box || box.length < 4) return;
+      let x = Number(box[0]) || 0;
+      let y = Number(box[1]) || 0;
+      let w = 0;
+      let h = 0;
+      if (box.length === 4) {
+        const x2 = Number(box[2]);
+        const y2 = Number(box[3]);
+        if (Number.isFinite(x2) && Number.isFinite(y2)) {
+          if (x2 > x && y2 > y) { w = x2 - x; h = y2 - y; }
+          else { w = x2; h = y2; }
+        }
+      } else {
+        const x2 = Number(box[2]);
+        const y2 = Number(box[3]);
+        const wCandidate = Number(box[4]);
+        const hCandidate = Number(box[5]);
+        if (Number.isFinite(wCandidate) && Number.isFinite(hCandidate) && wCandidate > 0 && hCandidate > 0) {
+          w = wCandidate;
+          h = hCandidate;
+        } else if (Number.isFinite(x2) && Number.isFinite(y2)) {
+          w = x2 - x;
+          h = y2 - y;
+        }
+      }
+      if (w <= 0 || h <= 0) return;
+      const label = obj?.label || 'object';
+      const colorMap = { ball: '#ff6b6b', hoop: '#ffd166', net: '#ffd166', player: '#4fd1c5' };
+      ctx.strokeStyle = colorMap[label] || '#9f7aea';
+      ctx.lineWidth = strokePX(baseStroke);
+      ctx.strokeRect(x, y, w, h);
+      const text = label.toUpperCase();
+      const pad = 4 * invScale;
+      const textWidth = ctx.measureText(text).width + pad * 2;
+      const boxHeight = (fontPx + 6) * invScale;
+      ctx.fillStyle = 'rgba(5,12,22,0.75)';
+      ctx.fillRect(x, y - boxHeight, Math.max(textWidth, 44 * invScale), boxHeight);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, x + pad, y - (boxHeight / 3));
+    });
   }
   ctx.restore();
 }
@@ -1520,15 +1649,30 @@ async function poll() {
     statRelease.textContent = state.ballState?.releaseFrame ?? dash;
     statEnter.textContent = state.ballState?.proxEnterFrame ?? dash;
     statExit.textContent = state.ballState?.proxExitFrame ?? dash;
-    statTrail.textContent = state.ballState?.trail?.length ?? 0;
-    statArc.textContent = state.ballArc?.trail?.length ?? 0;
-    statArcRef.textContent = state.ballArc?.refinedTrail?.length ?? 0;
+    statTrail.textContent = state.ballStateTrailLen ?? (state.ballState?.trail?.length ?? 0);
+    statArc.textContent = state.ballArcTrailLen ?? (state.ballArc?.trail?.length ?? 0);
+    statArcRef.textContent = state.ballArcRefLen ?? (state.ballArc?.refinedTrail?.length ?? 0);
+    statObjects.textContent = Array.isArray(state.objects) ? state.objects.length : 0;
+    statState.textContent = state.ballState?.state || dash;
+    statShots.textContent = state.shotCount ?? state.ballState?.shots ?? 0;
+    const last = state.lastSummary || (Array.isArray(state.shots) && state.shots.length ? state.shots[state.shots.length - 1] : null);
+    statLast.textContent = last ? (last.made === true ? 'make' : (last.made === false ? 'miss' : 'pending')) : dash;
+    if (statGateScore) {
+      const score = state.gate?.score;
+      statGateScore.textContent = Number.isFinite(score) ? Number(score).toFixed(3) : dash;
+    }
+    if (statGateReason) statGateReason.textContent = state.gate?.reason || dash;
+    if (statGateSide) statGateSide.textContent = state.gate?.side || dash;
+    if (statPoseStreak) statPoseStreak.textContent = state.pose?.streak ?? 0;
+    if (statAnalyzer) statAnalyzer.textContent = state.analyzer?.frame ?? dash;
+    if (statSeq) statSeq.textContent = state.seq ?? dash;
     statDetect.textContent = state.detectSource ?? dash;
     statOverlay.textContent = state.overlayMode ?? dash;
+    renderEvents(state.events);
     pre.textContent = JSON.stringify(state, null, 2);
     drawState(state);
   } catch (err) {
-    // swallow fetch errors to avoid noisy console while waiting for frames
+    console.warn('observe poll failed', err);
   }
 }
 setInterval(poll, 750);
@@ -1536,7 +1680,6 @@ poll();
 </script>"""
     html = template.replace('__SID__', sid).replace('__STAMP__', str(stamp))
     return Response(html, mimetype='text/html')
-
 @app.get('/admin/session/<sid>/debug')
 def admin_session_debug(sid):
     """Return joined view: session.json + DB shots + pose_snapshots + ai_feedback + files"""

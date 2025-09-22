@@ -10,10 +10,10 @@ import { analyzeVideoFrameByFrame as runAnalyzer } from './analyzer.js';
 import { resetShotStats, checkShotConditions, detectNetMotion, 
          drawNetMotionStatus, bufferDetectedObjects, scoringTick, 
          isBallInProximityZone } from './shot_logger.js';
-import { playerState, resetPlayerTracker, updatePlayerTracker, initPoseDetector } from './player_tracker.js';
+import { playerState, resetPlayerTracker, updatePlayerTracker, initPoseDetector, markRelease as poseMarkRelease } from './player_tracker.js';
 import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, filterObjectsToLockedHoop } from './hoop_tracker.js';
 import { createPlaybackControls, initHUDForVideo } from './video_ui.js';
-import { ballState, updateBall, resetAll, markRelease, stepFBFArc, fillArcGaps} from './ball_tracker.js';
+import { ballState, updateBall, resetAll, stepFBFArc, fillArcGaps} from './ball_tracker.js';
 // Load shot arc FSM (release/exit timing); available for incremental adoption
 import { resetShotFSM as _arcReset, updateShotArcTick as _arcTick, proxFromHoop } from './shot_arc.js';
 import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.js';
@@ -71,10 +71,19 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         const confirmed = (window.__hoopConfirmed === true);
         const H = window.getLockedHoopBox?.();
         if (!armed || !confirmed || !H) return false;
-        return markRelease?.(frame, opts);
+        const payload = { ...(opts || {}), __fromSafe: true };
+        return poseMarkRelease?.(frame, payload);
       } catch { return false; }
     };
   }
+
+  try {
+    if (typeof window.markRelease !== 'function') {
+      window.markRelease = function poseMarkReleaseWrapper(frame, opts) {
+        return poseMarkRelease?.(frame, { ...(opts || {}), __fromSafe: true });
+      };
+    }
+  } catch {}
 
   // ---- 3) Canonical counter (event-driven)
   // Avoid double-binding if fix_overlay_display already installed the HUD pulse.
@@ -196,7 +205,8 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
         } catch {}
 
         // Mark + dispatch (canonical)
-        (window.__markReleasePose || window.markRelease)?.(frame, { ...opts, prox, via, requirePose: true });
+        const markPayload = { ...opts, prox, via, requirePose: true, __fromSafe: true };
+        (window.__markReleasePose || window.markRelease)?.(frame, markPayload);
         window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
         window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
         window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));

@@ -18,6 +18,89 @@ const ICON_CAMERA_BACK = '\u{1F4F7}';   // rear camera
 const ICON_CAMERA_SWITCH = '\u{1F503}'; // camera switch arrows
 const SYMBOL_INFINITY = '\u{221E}';     // infinity symbol
 
+const OBSERVER_EVENT_LIMIT = 120;
+function safeClone(value) {
+  try { return JSON.parse(JSON.stringify(value)); } catch { return value == null ? null : { value }; }
+}
+function ensureObserverLog(){
+  if (!Array.isArray(window.__observerEventLog)) window.__observerEventLog = [];
+  return window.__observerEventLog;
+}
+function logObserverEvent(type, detail) {
+  try {
+    const log = ensureObserverLog();
+    const entry = {
+      type,
+      ts: Date.now(),
+      frame: (detail && Number.isFinite(detail.frame)) ? detail.frame : (Number.isFinite(window.__AN_IDX) ? window.__AN_IDX : null),
+      detail: detail != null ? safeClone(detail) : null
+    };
+    const last = log.at?.(-1) || null;
+    if (last && last.type === entry.type && last.frame === entry.frame) {
+      const lastDetail = JSON.stringify(last.detail);
+      const nextDetail = JSON.stringify(entry.detail);
+      if (lastDetail === nextDetail) return;
+    }
+    log.push(entry);
+    if (log.length > OBSERVER_EVENT_LIMIT) log.splice(0, log.length - OBSERVER_EVENT_LIMIT);
+  } catch {}
+}
+try { if (typeof window.__logObserverEvent !== 'function') window.__logObserverEvent = logObserverEvent; } catch {}
+(function installObserverFrameHooks(){
+  if (window.__observerFrameHooksInstalled) return;
+  window.__observerFrameHooksInstalled = true;
+  let lastTrailLen = -1;
+  let lastArcLen = -1;
+  window.addEventListener('analyzer:frame-done', (e) => {
+    try {
+      const frameIdx = Number(e?.detail?.__frameIdx);
+      const bsTrailLen = Array.isArray(window.ballState?.trail) ? window.ballState.trail.length : 0;
+      if (bsTrailLen !== lastTrailLen) {
+        logObserverEvent('trail', { frame: frameIdx, len: bsTrailLen, state: window.ballState?.state || null });
+        lastTrailLen = bsTrailLen;
+      }
+      const arcLen = Array.isArray(window.ballArc?.trail) ? window.ballArc.trail.length : 0;
+      if (arcLen !== lastArcLen) {
+        logObserverEvent('arc', { frame: frameIdx, len: arcLen });
+        lastArcLen = arcLen;
+      }
+    } catch {}
+  }, { passive: true });
+})();
+(function installObserverEventHooks(){
+  if (window.__observerEventHooksInstalled) return;
+  window.__observerEventHooksInstalled = true;
+  window.addEventListener('shot:release', (e) => {
+    try {
+      const detail = e?.detail || {};
+      logObserverEvent('shot:release', {
+        frame: Number(detail.frame) || null,
+        via: detail.via || null,
+        gate: safeClone(window.__releaseGateLast || null),
+        pending: Array.isArray(window.__shotList) ? window.__shotList.filter(s => s && s.pending).length : 0
+      });
+    } catch {}
+  }, { passive: true });
+  window.addEventListener('shot:summary', (e) => {
+    try {
+      const detail = e?.detail || {};
+      logObserverEvent('shot:summary', {
+        frame: Number(detail.frameExit ?? detail.frameEnd) || null,
+        made: detail.made ?? null,
+        arcHeight: detail.arcHeight ?? null,
+        entryAngle: detail.entryAngle ?? null,
+        releaseAngle: detail.releaseAngle ?? null
+      });
+    } catch {}
+  }, { passive: true });
+  window.addEventListener('shot:end', (e) => {
+    try { logObserverEvent('shot:end', { reason: e?.detail?.reason || null }); } catch {}
+  }, { passive: true });
+  window.addEventListener('hud:start-session', () => {
+    try { logObserverEvent('hud:start-session', { shots: Array.isArray(window.__shotList) ? window.__shotList.length : 0 }); } catch {}
+  }, { passive: true });
+})();
+
 const formatCameraFacing = (label) => ((label === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + label;
 const formatHudCameraLabel = (label) => formatCameraFacing(label) + ' Camera';
 const formatCapDisplay = (cap) => (Number.isFinite(cap) && cap > 0) ? String(cap) : SYMBOL_INFINITY;
@@ -773,20 +856,82 @@ function observerStateSnapshot() {
     }
 
     const bs = window.ballState || {};
+    const prunedTrail = pruneObserverPoints(bs.trail, 160);
     state.ballState = {
       state: bs.state || null,
       releaseFrame: Number.isFinite(bs.releaseFrame) ? bs.releaseFrame : null,
       proxEnterFrame: Number.isFinite(bs.proxEnterFrame) ? bs.proxEnterFrame : null,
       proxExitFrame: Number.isFinite(bs.proxExitFrame) ? bs.proxExitFrame : null,
-      trail: pruneObserverPoints(bs.trail, 160),
+      trail: prunedTrail,
       shots: Array.isArray(bs.shots) ? bs.shots.length : 0
     };
+    state.ballStateTrailLen = prunedTrail.length;
+    if (Array.isArray(bs.frozenShots)) {
+      state.ballState.frozenShots = bs.frozenShots.slice(-3).map((shot) => ({ trail: pruneObserverPoints(shot?.trail, 200) }));
+    }
+    state.pendingShots = Array.isArray(window.__shotList) ? window.__shotList.filter((shot) => shot && shot.pending).length : 0;
+
+    if (Array.isArray(window.__shotList)) {
+      state.shots = window.__shotList.slice(-5).map((shot) => ({
+        idx: Number.isFinite(shot?.idx) ? shot.idx : null,
+        made: (shot?.made === true) ? true : (shot?.made === false ? false : null),
+        arcHeight: Number.isFinite(shot?.arcHeight) ? shot.arcHeight : null,
+        entryAngle: Number.isFinite(shot?.entryAngle) ? shot.entryAngle : null,
+        releaseAngle: Number.isFinite(shot?.releaseAngle) ? shot.releaseAngle : null,
+        trail: pruneObserverPoints(shot?.trail, 200)
+      }));
+      state.shotCount = window.__shotList.length;
+    }
+
+    const lastSummary = window.__lastSummary || null;
+    if (lastSummary && typeof lastSummary === 'object') {
+      state.lastSummary = {
+        idx: Number.isFinite(lastSummary.idx) ? lastSummary.idx : null,
+        made: (lastSummary.made === true) ? true : (lastSummary.made === false ? false : null),
+        arcHeight: Number.isFinite(lastSummary.arcHeight) ? lastSummary.arcHeight : null,
+        entryAngle: Number.isFinite(lastSummary.entryAngle) ? lastSummary.entryAngle : null,
+        releaseAngle: Number.isFinite(lastSummary.releaseAngle) ? lastSummary.releaseAngle : null,
+        trail: pruneObserverPoints(lastSummary.trail, 200)
+      };
+    }
 
     const arc = window.ballArc || {};
-    state.ballArc = {
-      trail: pruneObserverPoints(arc.trail, 200),
-      refinedTrail: pruneObserverPoints(arc.refinedTrail, 200)
+    const arcTrail = pruneObserverPoints(arc.trail, 200);
+    const arcRef = pruneObserverPoints(arc.refinedTrail, 200);
+    state.ballArc = { trail: arcTrail, refinedTrail: arcRef };
+    state.ballArcTrailLen = arcTrail.length;
+    state.ballArcRefLen = arcRef.length;
+
+    const lastGate = window.__releaseGateLast || null;
+    if (lastGate) {
+      const bestTests = lastGate.best?.tests || null;
+      state.gate = {
+        ts: lastGate.ts || null,
+        frame: lastGate.frame ?? null,
+        released: !!(lastGate.best && lastGate.best.released),
+        reason: lastGate.best?.reason || null,
+        score: bestTests?.score ?? null,
+        tot: bestTests?.tot ?? null,
+        side: bestTests?.side || null,
+        poseStreak: lastGate.poseStreak ?? null
+      };
+    }
+
+    state.pose = {
+      streak: Number(window.__poseGateStreak || 0),
+      warm: window.__POSE_WARMUP_OK === true,
+      armed: window.__shotTrackingArmed === true,
+      hoopLocked: window.__hoopConfirmed === true,
+      picking: window.__pickingHoop === true
     };
+
+    state.analyzer = {
+      frame: Number.isFinite(window.__AN_IDX) ? window.__AN_IDX : null,
+      fps: Number(window.__videoFPS) || null
+    };
+
+    state.events = Array.isArray(window.__observerEventLog) ? window.__observerEventLog.slice(-50) : [];
+    state.seq = Number(window.__observerFrameSeq || 0);
 
     state.detectSource = window.__detCache?._source || null;
     state.overlayMode = window.__overlayMode || null;
@@ -816,6 +961,7 @@ function observerStateSnapshot() {
 
 
 
+
 window.startObserverStreaming = function startObserverStreaming(fps = 2){
   try {
     const sid = (window.__SESSION_ID || null);
@@ -825,6 +971,7 @@ window.startObserverStreaming = function startObserverStreaming(fps = 2){
     if (!overlay) { console.warn('[observer] overlay not found'); return; }
     const period = Math.max(200, Math.round(1000/Math.max(0.5, fps)));
     if (__observerTimer) clearInterval(__observerTimer);
+    window.__observerFrameSeq = 0;
     const off = document.createElement('canvas');
     __observerTimer = setInterval(async () => {
       try {
@@ -843,6 +990,7 @@ window.startObserverStreaming = function startObserverStreaming(fps = 2){
         if (oc) { try { ctx.drawImage(oc, 0, 0, vw, vh); } catch {} }
         off.toBlob(async (blob) => {
           if (!blob) return;
+          window.__observerFrameSeq = (window.__observerFrameSeq || 0) + 1;
           const fd = new FormData();
           fd.append('image', blob, 'frame.jpg');
           const snap = observerStateSnapshot();
