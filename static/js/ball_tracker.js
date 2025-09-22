@@ -130,6 +130,7 @@ export function updateBall(point, frameIndex) {
 
   // Init KF if needed
   if (!state.kf) { state.kf = new Kalman2D(1, OPT.KF_PROCESS_NOISE, OPT.KF_MEASURE_NOISE); state.kf.initFrom(point.x, point.y); }
+  const nowMs = performance.now();
 
   // Fill small gaps and clamp large jumps relative to last recorded point
   const last = state.trail.at?.(-1) || null;
@@ -139,7 +140,7 @@ export function updateBall(point, frameIndex) {
     for (let i=1;i<=fillN;i++) {
       state.kf.predict(1);
       const px = state.kf.x[0], py = state.kf.x[1];
-      state.trail.push({ x:px, y:py, frame: last.frame + i });
+      state.trail.push({ x:px, y:py, frame: last.frame + i , tMs: last.tMs ?? nowMs });
     }
   }
 
@@ -156,7 +157,13 @@ export function updateBall(point, frameIndex) {
     if (d > OPT.MAX_STEP) { const r = OPT.MAX_STEP / d; sx = last.x + dx*r; sy = last.y + dy*r; }
   }
 
-  state.trail.push({ x: sx, y: sy, frame: frameIndex });
+  state.trail.push({ x: sx, y: sy, frame: frameIndex , tMs: nowMs });
+  try {
+    const prev = state.trail.at?.(-2) || null;
+    const curr = state.trail.at?.(-1) || null;
+    const gapF = (prev && curr && Number.isFinite(prev.frame) && Number.isFinite(curr.frame)) ? (curr.frame - prev.frame) : 0;
+    if (curr) window.dispatchEvent?.(new CustomEvent('ball:trail-step', { detail: { frame: curr.frame, gapF, len: state.trail.length } }));
+  } catch {}
   // Cap trail size
   if (state.trail.length > OPT.MAX_TRAIL_POINTS) state.trail.splice(0, state.trail.length - OPT.MAX_TRAIL_POINTS);
   state.lastFrame = frameIndex;

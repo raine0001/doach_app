@@ -1,4 +1,4 @@
-﻿// analyzer.js â€” RVFC + FBF analyzers (extracted from app.js)
+// analyzer.js â€” RVFC + FBF analyzers (extracted from app.js)
 import { ensureOverlayCss, syncOverlayToVideo, updateDebugOverlay, drawLiveOverlay, sendFrameToDetect } from './fix_overlay_display.js';
 import { stabilizeLockedHoop, getLockedHoopBox, asTopLeft, canonHoop, filterObjectsToLockedHoop, autoDetectHoop } from './hoop_tracker.js';
 import { updatePlayerTracker, playerState } from './player_tracker.js';
@@ -137,9 +137,9 @@ function pickBallCenter(objects, player, hoopLocked) {
 
     // Prefer consistency with last point to avoid ghost jumps
     const last = window.ballState?.trail?.at?.(-1) || null;
-    const maxStep = Number(window.BALL_MAX_STEP || 40) * 1.2; // tighter to avoid ghost hops
+    const maxStep = Number(window.BALL_MAX_STEP || 58) * 1.3; // tighter to avoid ghost hops
     if (last) {
-      const corridorHalf = Math.max(45, (Hc?.w || 100) * 0.6);
+      const corridorHalf = Math.max(60, (Hc?.w || 100) * 0.9);
       const candidates = balls
         .filter(c => aspectOK(c) && (!insidePlayer(c) || insideProx(c) || nearHoopY(c)))
         .map(c => ({ c,
@@ -821,6 +821,14 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       try { updateDebugOverlay?.(poses, objects, frameIdx); } catch {};
       try { drawLiveOverlay?.(objects, playerState); } catch {}
       frameIdx++;
+      try {
+        const rf = Number(window.ballState?.releaseFrame);
+        if (Number.isFinite(rf) && frameIdx === rf) {
+          const lastPt = window.ballState?.trail?.at?.(-1) || null;
+          const hoopLocked = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || getLockedHoopBox?.();
+          if (lastPt && hoopLocked) window.shotArc?.updateArc?.(frameIdx, { x: lastPt.x, y: lastPt.y }, hoopLocked);
+        }
+      } catch {}
       try { window.dispatchEvent(new CustomEvent('analyzer:frame-done', { detail: { __frameIdx: frameIdx, t } })); } catch {}
     } catch (err) { console.error('[analyze] tick error:', err); } finally { tickBusy = false; }
   }
