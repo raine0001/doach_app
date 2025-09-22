@@ -14,6 +14,7 @@ import { playerState, resetPlayerTracker, updatePlayerTracker, initPoseDetector,
 import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, filterObjectsToLockedHoop } from './hoop_tracker.js';
 import { createPlaybackControls, initHUDForVideo } from './video_ui.js';
 import { ballState, updateBall, resetAll, stepFBFArc, fillArcGaps} from './ball_tracker.js';
+import { disposeFrameCollection as disposeMicroClipFrameCollection, serializeError as serializeMicroclipError } from './microclip_core.js';
 // Load shot arc FSM (release/exit timing); available for incremental adoption
 import { resetShotFSM as _arcReset, updateShotArcTick as _arcTick, proxFromHoop } from './shot_arc.js';
 import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.js';
@@ -28,7 +29,430 @@ window.POSE_MIN_H              = 110;    // min pose height (px)
 window.POSE_MIN_AREA_FRAC      = 0.006;  // min area vs frame (0.6%)
 window.POSE_BELOW_RIM_MIN      = 80;     // ankles must be â‰¥80px BELOW rim y
 window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to accept
+const MICROCLIP_BUFFER_DEFAULT_MS = 3800;
 
+window.USE_MICROCLIP ??= false;
+
+class MicroClipRingBuffer {
+  constructor(opts = {}) {
+    this.windowMs = Number(opts.windowMs) > 0 ? Number(opts.windowMs) : Number(window.MICROCLIP_BUFFER_MS || MICROCLIP_BUFFER_DEFAULT_MS);
+    this.frames = [];
+    this.fps = Number(opts.fps) > 0 ? Number(opts.fps) : (Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 30);
+    this.maxFrames = Number(opts.maxFrames) > 0 ? Number(opts.maxFrames) : this._calcMaxFrames();
+    this._captureInFlight = 0;
+    this._warnedCaptureFail = false;
+    this._captureDisabled = false;
+  }
+
+  _calcMaxFrames() {
+    const fps = this.fps || 30;
+    const windowMs = this.windowMs || 0;
+    return Math.max(45, Math.ceil((windowMs / 1000) * fps) + 15);
+  }
+
+  setWindowMs(ms) {
+    if (!Number.isFinite(ms) || ms <= 0) return;
+    this.windowMs = ms;
+    this.maxFrames = this._calcMaxFrames();
+    this._trim();
+  }
+
+  setFps(fps) {
+    if (!Number.isFinite(fps) || fps <= 0) return;
+    this.fps = fps;
+    this.maxFrames = this._calcMaxFrames();
+    this._trim();
+  }
+
+  clear() {
+    if (!this.frames.length) return;
+    const old = this.frames.splice(0, this.frames.length);
+    for (const entry of old) {
+      try { entry.bitmap?.close?.(); } catch {}
+    }
+  }
+
+  captureFromCanvas(canvas, frameIdx, mediaTime) {
+    if (this._captureDisabled) return;
+    if (!window.USE_MICROCLIP) return;
+    if (!canvas || canvas.width === 0 || canvas.height === 0) return;
+    if (typeof createImageBitmap !== 'function') {
+      this._captureDisabled = true;
+      if (!this._warnedCaptureFail) {
+        console.warn('[microclip] createImageBitmap unavailable; ring buffer disabled');
+        this._warnedCaptureFail = true;
+      }
+      return;
+    }
+    if (this._captureInFlight >= 2) return;
+    this._captureInFlight += 1;
+    const finalize = (bitmap) => {
+      this._captureInFlight = Math.max(0, this._captureInFlight - 1);
+      if (!(bitmap instanceof ImageBitmap)) return;
+      this.frames.push({
+        bitmap,
+        frameIdx,
+        mediaTime,
+        wallClockMs: performance.now(),
+        width: canvas.width,
+        height: canvas.height
+      });
+      this._trim();
+    };
+    const onError = (err) => {
+      this._captureInFlight = Math.max(0, this._captureInFlight - 1);
+      if (!this._warnedCaptureFail) {
+        console.warn('[microclip] Failed to snapshot frame', err);
+        this._warnedCaptureFail = true;
+      }
+    };
+    try {
+      const maybe = createImageBitmap(canvas);
+      if (maybe && typeof maybe.then === 'function') {
+        maybe.then(finalize).catch(onError);
+      } else if (maybe instanceof ImageBitmap) {
+        finalize(maybe);
+      } else {
+        onError(new Error('unexpected createImageBitmap result'));
+      }
+    } catch (err) {
+      onError(err);
+    }
+  }
+
+  _trim() {
+    const max = this.maxFrames || this._calcMaxFrames();
+    if (this.frames.length <= max) return;
+    const remove = this.frames.splice(0, this.frames.length - max);
+    for (const entry of remove) {
+      try { entry.bitmap?.close?.(); } catch {}
+    }
+  }
+
+  sliceAroundFrame(frameIdx, opts = {}) {
+    if (!Number.isFinite(frameIdx) || !this.frames.length) return null;
+    const fps = this.fps || 30;
+    const preMs = Number.isFinite(opts.preMs) ? opts.preMs : 700;
+    const postMs = Number.isFinite(opts.postMs) ? opts.postMs : 2200;
+    const preFrames = Math.max(0, Math.round((preMs / 1000) * fps));
+    const postFrames = Math.max(0, Math.round((postMs / 1000) * fps));
+    const minFrame = frameIdx - preFrames;
+    const maxFrame = frameIdx + postFrames;
+    const selected = [];
+    for (const entry of this.frames) {
+      const fi = Number(entry.frameIdx);
+      if (!Number.isFinite(fi)) continue;
+      if (fi < minFrame) continue;
+      if (fi > maxFrame) break;
+      selected.push(entry);
+    }
+    if (!selected.length) return null;
+    let releaseOffset = selected.findIndex((entry) => entry.frameIdx >= frameIdx);
+    if (releaseOffset < 0) releaseOffset = selected.length - 1;
+    return {
+      frames: selected.map((entry) => ({ ...entry })),
+      releaseOffset,
+      targetFrame: frameIdx,
+      fps,
+      preMs,
+      postMs
+    };
+  }
+
+  getFrameCount() {
+    return this.frames.length;
+  }
+}
+
+function ensureMicroClipRingBuffer() {
+  if (window.__microClipRingBuffer) return window.__microClipRingBuffer;
+  const inst = new MicroClipRingBuffer();
+  window.__microClipRingBuffer = inst;
+  return inst;
+}
+
+if (typeof window.getMicroClipRingBuffer !== 'function') {
+  window.getMicroClipRingBuffer = function getMicroClipRingBuffer() {
+    return ensureMicroClipRingBuffer();
+  };
+}
+
+
+
+
+const MICROCLIP_PRE_MS_DEFAULT = 700;
+const MICROCLIP_POST_MS_DEFAULT = 2200;
+const MICROCLIP_DETECT_STRIDE_DEFAULT = 6;
+
+async function cloneFramesForWorker(frames) {
+  if (!Array.isArray(frames) || frames.length === 0) return [];
+  if (typeof createImageBitmap !== 'function') {
+    throw new Error('[microclip] createImageBitmap unavailable for worker cloning');
+  }
+  const clones = [];
+  for (let i = 0; i < frames.length; i++) {
+    const entry = frames[i];
+    const src = entry?.bitmap;
+    if (!(src instanceof ImageBitmap)) continue;
+    try {
+      const bitmap = await createImageBitmap(src);
+      clones.push({
+        bitmap,
+        frameIdx: Number.isFinite(entry.frameIdx) ? entry.frameIdx : i,
+        ts: Number.isFinite(entry.wallClockMs) ? entry.wallClockMs : (Number(entry.ts) || null)
+      });
+    } catch (err) {
+      disposeMicroClipFrameCollection(clones);
+      throw err;
+    }
+  }
+  if (!clones.length) throw new Error('[microclip] no frames available to process');
+  return clones;
+}
+
+function ensureMicroClipWorkerManager() {
+  if (window.__microClipWorkerManager) return window.__microClipWorkerManager;
+
+  const manager = {
+    worker: null,
+    jobs: new Map(),
+    ensureWorker() {
+      if (this.worker) return this.worker;
+      let worker;
+      try {
+        const url = new URL('./microclip_worker.js', import.meta.url);
+        worker = new Worker(url, { type: 'module' });
+      } catch (err) {
+        console.error('[microclip] failed to start worker', err);
+        throw err;
+      }
+      worker.addEventListener('message', (event) => this.handleMessage(event));
+      worker.addEventListener('error', (err) => {
+        console.error('[microclip] worker runtime error', err);
+      });
+      try { worker.postMessage({ type: 'init', id: 'boot' }); } catch {}
+      this.worker = worker;
+      return this.worker;
+    },
+    enqueue(jobInput) {
+      const id = jobInput.id || `mc:${Date.now()}:${Math.random().toString(16).slice(2, 8)}`;
+      const job = {
+        id,
+        shot: jobInput.shot || null,
+        clip: jobInput.clip,
+        prox: jobInput.prox ?? null,
+        releaseFrame: jobInput.releaseFrame,
+        releaseTime: jobInput.releaseTime ?? null,
+        fps: jobInput.fps ?? null,
+        hoop: jobInput.hoop ?? null,
+        detectStride: jobInput.detectStride ?? null,
+        status: 'queued'
+      };
+      const registry = (window.__microClipJobsByFrame ||= new Map());
+      if (Number.isFinite(job.releaseFrame) && registry.has(job.releaseFrame)) {
+        return registry.get(job.releaseFrame);
+      }
+
+      this.jobs.set(id, job);
+      this.updateShotState(job, (state) => {
+        state.status = 'queued';
+        state.releaseFrame = job.releaseFrame;
+        state.prox = job.prox ?? null;
+        state.queuedAt = performance.now();
+      });
+
+      window.dispatchEvent(new CustomEvent('microclip:queued', { detail: { id, shot: job.shot, releaseFrame: job.releaseFrame } }));
+
+      if (Number.isFinite(job.releaseFrame)) {
+        registry.set(job.releaseFrame, id);
+      }
+
+      const run = async () => {
+        let payload = null;
+        let transferred = false;
+        try {
+          payload = await cloneFramesForWorker(job.clip.frames);
+          this.ensureWorker();
+          this.updateShotState(job, (state) => {
+            state.status = 'processing';
+            state.framesTotal = payload.length;
+          });
+          job.status = 'processing';
+          window.dispatchEvent(new CustomEvent('microclip:started', { detail: { id, shot: job.shot, framesTotal: payload.length } }));
+          try { window.setSessionStatus?.('Scoring...'); } catch {}
+          const transfer = payload.map((entry) => entry.bitmap);
+          this.worker.postMessage({
+            type: 'process',
+            id,
+            frames: payload,
+            fps: job.fps,
+            hoop: job.hoop,
+            releaseFrame: job.releaseFrame,
+            releaseTime: job.releaseTime,
+            detectStride: job.detectStride,
+            prox: job.prox
+          }, transfer);
+          transferred = true;
+        } catch (err) {
+          if (!transferred && payload) disposeMicroClipFrameCollection(payload);
+          job.status = 'error';
+          this.unregister(job);
+          const errorPayload = serializeMicroclipError(err);
+          this.updateShotState(job, (state) => {
+            state.status = 'error';
+            state.error = errorPayload;
+          });
+          this.jobs.delete(id);
+          window.dispatchEvent(new CustomEvent('microclip:error', { detail: { id, shot: job.shot, error: errorPayload } }));
+        }
+      };
+      run();
+      return id;
+    },
+    handleMessage(event) {
+      const data = event?.data || {};
+      const type = data.type;
+      const id = data.id;
+      if (type === 'init:ok') {
+        window.dispatchEvent(new CustomEvent('microclip:ready', { detail: { id } }));
+        return;
+      }
+      const job = id ? this.jobs.get(id) : null;
+      if (!job) {
+        if (type === 'error') console.warn('[microclip] worker error (no job)', data);
+        return;
+      }
+      switch (type) {
+        case 'progress':
+          job.status = 'processing';
+          job.lastProgress = data;
+          this.updateShotState(job, (state) => {
+            state.status = 'processing';
+            if (Number.isFinite(data.frameIndex)) state.framesProcessed = data.frameIndex;
+            if (Number.isFinite(data.framesTotal)) state.framesTotal = data.framesTotal;
+          });
+          window.dispatchEvent(new CustomEvent('microclip:progress', { detail: { id, shot: job.shot, progress: data } }));
+          break;
+        case 'result':
+          job.status = 'done';
+          job.summary = data.summary || null;
+          this.updateShotState(job, (state) => {
+            state.status = 'done';
+            state.summary = data.summary || null;
+          });
+          this.unregister(job);
+          this.jobs.delete(id);
+          window.dispatchEvent(new CustomEvent('microclip:done', { detail: { id, shot: job.shot, summary: data.summary || null } }));
+          try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
+          break;
+        case 'error':
+          job.status = 'error';
+          job.error = data.error || null;
+          this.updateShotState(job, (state) => {
+            state.status = 'error';
+            state.error = data.error || null;
+          });
+          this.unregister(job);
+          this.jobs.delete(id);
+          window.dispatchEvent(new CustomEvent('microclip:error', { detail: { id, shot: job.shot, error: data.error || null } }));
+          try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
+          break;
+        case 'cancelled':
+          job.status = 'cancelled';
+          this.updateShotState(job, (state) => { state.status = 'cancelled'; });
+          this.unregister(job);
+          this.jobs.delete(id);
+          window.dispatchEvent(new CustomEvent('microclip:cancelled', { detail: { id, shot: job.shot } }));
+          try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
+          break;
+        default:
+          console.warn('[microclip] unhandled worker message', data);
+      }
+    },
+    updateShotState(job, mutate) {
+      if (!job || typeof mutate !== 'function') return;
+      const shot = job.shot;
+      if (!shot) return;
+      const state = (shot.microclip ||= { id: job.id });
+      state.id = job.id;
+      mutate(state);
+    },
+    unregister(job) {
+      const registry = window.__microClipJobsByFrame;
+      if (!job || !registry) return;
+      if (Number.isFinite(job.releaseFrame)) {
+        try { registry.delete(job.releaseFrame); } catch {}
+      }
+    }
+  };
+
+  window.__microClipWorkerManager = manager;
+  return manager;
+}
+
+function scheduleMicroClipForRelease({ frame, via, prox, shot }) {
+  if (window.USE_MICROCLIP !== true) return;
+  if (!Number.isFinite(frame)) return;
+  try {
+    const buffer = ensureMicroClipRingBuffer();
+    const clip = buffer.sliceAroundFrame(frame, {
+      preMs: Number(window.MICROCLIP_PRE_MS || MICROCLIP_PRE_MS_DEFAULT),
+      postMs: Number(window.MICROCLIP_POST_MS || MICROCLIP_POST_MS_DEFAULT)
+    });
+    if (!clip || !Array.isArray(clip.frames) || clip.frames.length === 0) {
+      if (shot) {
+        shot.microclip = { id: null, status: 'clip-missing', reason: 'insufficient_frames', releaseFrame: frame };
+      }
+      window.dispatchEvent(new CustomEvent('microclip:skipped', { detail: { shot, releaseFrame: frame, reason: 'insufficient_frames' } }));
+      return;
+    }
+    const manager = ensureMicroClipWorkerManager();
+    const jobInfo = {
+      shot: shot || null,
+      clip,
+      releaseFrame: frame,
+      releaseTime: clip.frames?.[clip.releaseOffset ?? 0]?.wallClockMs ?? performance.now(),
+      fps: clip.fps ?? (Number(window.__videoFPS) || null),
+      hoop: typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null,
+      detectStride: Number(window.MICROCLIP_DETECT_STRIDE || MICROCLIP_DETECT_STRIDE_DEFAULT),
+      prox: prox || null
+    };
+    manager.enqueue(jobInfo);
+  } catch (err) {
+    const payload = serializeMicroclipError(err);
+    if (shot) {
+      shot.microclip = { id: null, status: 'error', error: payload, releaseFrame: frame };
+    }
+    window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shot, releaseFrame: frame, error: payload } }));
+  }
+}
+
+window.addEventListener('microclip:done', (event) => {
+  try {
+    if (window.__releaseFallbackTimer) {
+      clearTimeout(window.__releaseFallbackTimer);
+      window.__releaseFallbackTimer = null;
+    }
+  } catch {}
+  const detail = event?.detail || {};
+  const summary = detail.summary || null;
+  if (!summary) return;
+  const shot = detail.shot || null;
+  const merged = { ...summary, source: 'microclip' };
+  if (shot) {
+    if (merged.frameRelease == null && Number.isFinite(shot.frameRelease)) merged.frameRelease = shot.frameRelease;
+    if (merged.frameExit == null && Number.isFinite(shot.proxExitFrame)) merged.frameExit = shot.proxExitFrame;
+    if (!merged.shotId && Number.isFinite(shot.__idx)) merged.shotId = shot.__idx;
+  }
+  try {
+    window.recordShotSummary?.(merged);
+    window.dispatchEvent(new CustomEvent('shot:summary', { detail: merged }));
+    window.__lastSummary = merged;
+  } catch (err) {
+    console.error('[microclip] failed to record summary', err);
+  }
+  window.dispatchEvent(new CustomEvent('microclip:summary', { detail: { shot, summary: merged } }));
+});
 
 
 // =========================== Pose Release Pipeline ===========================
@@ -223,8 +647,12 @@ window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to acce
             const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
               ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
               : null;
-            list.push({ pending: true, frameRelease: frame, tMs: Date.now(), poseSnapshot: snap });
+            const shotEntry = { pending: true, frameRelease: frame, tMs: Date.now(), poseSnapshot: snap };
+            list.push(shotEntry);
             try { window.__SHOT_IDX = list.length - 1; } catch {}
+            if (window.USE_MICROCLIP === true) {
+              try { scheduleMicroClipForRelease({ frame, via, prox, shot: shotEntry }); } catch (err) { console.warn('[microclip] schedule failed', err); }
+            }
           }
         } catch {}
 
@@ -2546,6 +2974,18 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
   if (window.__analyzerActive) { console.log('[analyze] already running'); return; }
 
   window.__analyzerActive = true;
+  const microClipBuffer = ensureMicroClipRingBuffer();
+  try { microClipBuffer.clear(); } catch {}
+  try {
+    const clipWindowMs = Number(window.MICROCLIP_BUFFER_MS);
+    if (Number.isFinite(clipWindowMs) && clipWindowMs > 0) microClipBuffer.setWindowMs(clipWindowMs);
+  } catch {}
+  try {
+    const fpsHint = Number(window.__videoFPS);
+    if (Number.isFinite(fpsHint) && fpsHint > 0) {
+      microClipBuffer.setFps(fpsHint);
+    }
+  } catch {}
   try { _arcReset?.(); } catch {}
 
   let analyzing     = true;
@@ -2599,6 +3039,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
       // Keep DET buffer in lockstep with overlay (CANVAS size)
       syncBufferSize();
       bctx.drawImage(videoEl, 0, 0, buf.width, buf.height);
+      try { microClipBuffer.captureFromCanvas?.(buf, frameIdx, t); } catch {}
 
       // YOLO + pose in parallel
       const [det, poseRes] = await Promise.all([
@@ -2881,6 +3322,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
 
   // Target FPS (supports 29.97 etc). Set window.__videoFPS = 30 in your app/test if you want to force it.
   const TARGET_FPS = Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 30;
+  try { microClipBuffer.setFps?.(TARGET_FPS); } catch {}
   const STEP_S     = 1 / TARGET_FPS;                         // seconds per frame (e.g., 1/30)
   const INTERVALMS = Math.max(8, Math.round(1000 / TARGET_FPS)); // ~33ms at 30fps
 
@@ -2967,6 +3409,7 @@ function stopFramePump() {
     analyzing = false;
     stopFramePump();                // ensure pump turns off
     detachResize();
+    try { microClipBuffer.clear(); } catch {}
     window.__analyzerActive = false;
   };
 
