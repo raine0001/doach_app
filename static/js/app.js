@@ -1080,19 +1080,16 @@ export function enableHoopPickOnce() {
 
     const isLive = !!vid.srcObject;
     if (isLive) {
-      // âœ… LIVE: stay on coach plane (pose + hoop) at 1Ã—
       window.__overlayMode = 'live';
       window.__overlayCleanDrawn = false;
 
-      // If something already started the analyzer, stop it now
-      try { window.stopFrameAnalysis?.(); } catch {}
-      window.__analyzerActive = false;
+      // Ensure analyzer, PD, and painter all run together
+      try { runAnalyzer?.(vid, ov); } catch {}
+      window.__analyzerActive = true;
 
-      // Make sure pre-detector runs and we keep painting
       try { installPreDetectorFor?.(vid); } catch {}
       try { startPreDetection?.(vid); } catch {}
 
-      // Lightweight painter: draw pose + hoop every frame from lastDetectedFrame
       try { cancelAnimationFrame(window.__coachPaintRaf); } catch {}
       const paint = () => {
         const last = window.lastDetectedFrame || {};
@@ -1638,7 +1635,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // If FBF owns the pause, do NOT tear down analysis
     if (window.__fbfActive === true || window.__FBF_OWNING_PAUSE === true) return;
     const live = !!videoPlayer.srcObject;
-    if (!live) return;
+    if (live) return;
     try { window.stopPoseReleaseSampler?.(); } catch {}
     try { window.isTracking = false; } catch {}
     try { stopPreDetection?.(); } catch {}
