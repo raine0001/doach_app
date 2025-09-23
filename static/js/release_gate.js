@@ -211,7 +211,7 @@ export function releaseGate(lastFrames) {
     const okNow     = inProbe ? (allFour || strictOK) : allFour;
     const tests = { side, wristAboveElbow, wristAboveShoulder, elbowAtOrAboveShoulder, elbowExtended, alignOK, wristUpTrend, elbowAngleDeg: Math.round(elbowAngleDeg), dx: Math.round(dx), dy: Math.round(dy), dSW: Math.round(dSW), dSE: Math.round(dSE), score: Number(score.toFixed?.(3) || score), tot: Number(tot.toFixed?.(3) || tot), strictOK };
     const reason = okNow ? (allFour ? 'all-four' : 'strict') : 'not-enough';
-    return { released: okNow, passed: posturePassed, tests, reason };
+    return { released: okNow, passed: posturePassed, tests, reason, score, strictOK, side };
   }
   try {
     const useUp = (window.REL_SCORE_USE_UPTREND === true);
@@ -236,6 +236,29 @@ export function releaseGate(lastFrames) {
         hoopLocked: window.__hoopConfirmed === true
       };
       window.__releaseGateLast = payload;
+      const frameForLog = payload.frame ?? null;
+      try {
+        const scoreVal = Number(best?.score ?? best?.tests?.score ?? 0);
+        const detail = {
+          frame: Number.isFinite(frameForLog) ? frameForLog : null,
+          side: best?.side ?? best?.tests?.side ?? null,
+          score: Number.isFinite(scoreVal) ? Number(scoreVal.toFixed(3)) : null,
+          strictOK: !!best?.strictOK,
+          tests: {
+            dx: best?.tests?.dx ?? null,
+            dy: best?.tests?.dy ?? null,
+            dSE: best?.tests?.dSE ?? null,
+            dSW: best?.tests?.dSW ?? null,
+            elbowAngleDeg: best?.tests?.elbowAngleDeg ?? null,
+            elbowExtended: best?.tests?.elbowExtended ?? null,
+            wristUpTrend: best?.tests?.wristUpTrend ?? null,
+            alignOK: best?.tests?.alignOK ?? null
+          },
+          poseStreak: Number(window.__POSE_STREAK__ || 0),
+          reason: best?.released ? 'released' : (best?.reason || 'blocked')
+        };
+        window.dispatchEvent(new CustomEvent('gate:candidate', { detail }));
+      } catch {}
       if (best?.released && typeof window.__logObserverEvent === 'function') {
         window.__logObserverEvent('gate:released', payload);
       }

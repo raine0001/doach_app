@@ -381,6 +381,23 @@ def api_session_add_shot(sid):
         _trace('db add shot error:', e)
     return jsonify({ 'ok': True, 'idx': data['idx'], 'totals': sess['totals'] })
 
+@app.post('/api/microclip/upload')
+def api_microclip_upload():
+    clip = request.files.get('clip')
+    if not clip:
+        return jsonify({'ok': False, 'error': 'no file'}), 400
+    session_id = request.form.get('sessionId') or f'sess_{int(time.time())}'
+    shot_idx = request.form.get('shotIdx') or '0'
+    safe_sid = secure_filename(session_id) or f'sess_{int(time.time())}'
+    session_dir = Path(_session_path(safe_sid))
+    clips_dir = session_dir / 'clips'
+    clips_dir.mkdir(parents=True, exist_ok=True)
+    filename = f'shot-{shot_idx}.webm'
+    dest_path = clips_dir / filename
+    clip.save(dest_path)
+    rel_path = os.path.join('sessions', safe_sid, 'clips', filename)
+    return jsonify(ok=True, path=rel_path)
+
 @app.post('/api/sessions/<sid>/shot_video')
 def api_session_shot_video(sid):
     if 'file' not in request.files:

@@ -57,6 +57,303 @@ window.__DETECT_SOURCE ??= 'unknown';
 window.__REL_LAST_FRAME ??= null;
 window.__lastReleaseFrame ??= null;
 window.__lastReleaseTs ??= 0;
+window.__gateDedupeCount ??= 0;
+window.__sessionConfigEmitted ??= false;
+window.__MICROCLIP_MS ??= 4000;
+window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window.__shotCount) : 0;
+
+(function installMicroClip(){
+  if (window.__microClipInstalled) return;
+  window.__microClipInstalled = true;
+
+  const SRC = { stream: null, kind: 'none' };
+  let rec = null;
+  let chunks = [];
+  let stopTimer = null;
+  let activeFrame = null;
+
+  function log(msg) { try { window.__dbgLine?.(`[microclip] ${msg}`); } catch {} }
+
+  function ensureSource() {
+    const liveStream = SRC.stream && typeof SRC.stream.getTracks === 'function' && SRC.stream.getTracks().some((t) => t.readyState === 'live');
+    if (liveStream) return SRC;
+
+    const canvas = document.getElementById('doach-canvas-overlay');
+    if (canvas && typeof canvas.captureStream === 'function') {
+      try {
+        SRC.stream = canvas.captureStream(30);
+        SRC.kind = 'canvas';
+        if (SRC.stream) return SRC;
+      } catch (err) {
+        log(`canvas capture failed: ${err}`);
+      }
+    }
+
+    const video = document.querySelector('video');
+    if (video && typeof video.captureStream === 'function') {
+      try {
+        if (video.paused) { video.play().catch(() => {}); }
+        SRC.stream = video.captureStream();
+        SRC.kind = 'video';
+        if (SRC.stream) return SRC;
+      } catch (err) {
+        log(`video capture failed: ${err}`);
+      }
+    }
+
+    SRC.stream = null;
+    SRC.kind = 'none';
+    return SRC;
+  }
+
+  function resetRecorder() {
+    if (stopTimer) {
+      clearTimeout(stopTimer);
+      stopTimer = null;
+    }
+    rec = null;
+    chunks = [];
+    activeFrame = null;
+  }
+
+  async function uploadClip(shotIdx, blob, frame) {
+    const uploadUrl = window.__MICROCLIP_UPLOAD_URL || '/api/microclip/upload';
+    const form = new FormData();
+    form.append('sessionId', window.__SESSION_ID || `sess_${Date.now()}`);
+    form.append('shotIdx', String(shotIdx));
+    const clipName = `shot-${shotIdx}.webm`;
+    if (typeof File === 'function') {
+      form.append('clip', new File([blob], clipName, { type: blob.type }));
+    } else {
+      form.append('clip', blob, clipName);
+    }
+    try {
+      const response = await fetch(uploadUrl, { method: 'POST', body: form });
+      let data = null;
+      try { data = await response.json(); } catch {}
+      const savedPath = data && typeof data === 'object' ? (data.path ?? null) : null;
+      window.dispatchEvent(new CustomEvent('microclip:saved', { detail: { shotIdx, ok: response.ok, path: savedPath, frame } }));
+      log(`saved ${response.ok ? 'ok' : 'err'} ${savedPath ?? ''}`);
+    } catch (err) {
+      window.dispatchEvent(new CustomEvent('microclip:saved', { detail: { shotIdx, ok: false, error: String(err), frame } }));
+      log(`save:error ${err}`);
+    }
+  }
+
+  function startClip(meta = {}) {
+    if (typeof window.MediaRecorder !== 'function') {
+      log('MediaRecorder unsupported');
+      return;
+    }
+    const source = ensureSource();
+    if (!source.stream) {
+      log('no capture stream');
+      return;
+    }
+    if (rec && rec.state === 'recording') {
+      log('already recording');
+      return;
+    }
+
+    const optsList = [
+      { mimeType: 'video/webm;codecs=vp9' },
+      { mimeType: 'video/webm;codecs=vp8' },
+      { mimeType: 'video/webm' }
+    ];
+    let opts = {};
+    for (const candidate of optsList) {
+      try { if (MediaRecorder.isTypeSupported(candidate.mimeType)) { opts = candidate; break; } } catch {}
+    }
+    try {
+      rec = new MediaRecorder(source.stream, opts);
+    } catch (err) {
+      log(`MediaRecorder failed: ${err}`);
+      return;
+    }
+
+    const rawFrame = Number(meta.frame);
+    const frame = Number.isFinite(rawFrame) ? rawFrame : (Number.isFinite(Number(window.__REL_LAST_FRAME)) ? Number(window.__REL_LAST_FRAME) : null);
+    activeFrame = frame;
+    const prevCount = Number(window.__shotCount) || 0;
+    const shotIdx = prevCount + 1;
+    window.__shotCount = shotIdx;
+    chunks = [];
+
+    rec.onstart = () => {
+      window.dispatchEvent(new CustomEvent('microclip:started', { detail: { shotIdx, via: source.kind, opts, frame } }));
+      log(`start shot=${shotIdx} via=${source.kind} fmt=${opts.mimeType || 'default'}`);
+    };
+    rec.ondataavailable = (evt) => { if (evt?.data?.size) chunks.push(evt.data); };
+    rec.onerror = (evt) => {
+      window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotIdx, frame, msg: String(evt?.error || evt) } }));
+      log(`error ${evt?.error || evt}`);
+    };
+    rec.onstop = async () => {
+      try {
+        if (!chunks.length) {
+          log('no data captured');
+          return;
+        }
+        const blob = new Blob(chunks, { type: opts.mimeType || 'video/webm' });
+        const fileUrl = URL.createObjectURL(blob);
+        const detail = { shotIdx, url: fileUrl, size: blob.size, type: blob.type, durMs: window.__MICROCLIP_MS, frame: activeFrame };
+        window.dispatchEvent(new CustomEvent('microclip:done', { detail }));
+        log(`done shot=${shotIdx} bytes=${blob.size}`);
+        uploadClip(shotIdx, blob, activeFrame).catch(() => {});
+        window.dispatchEvent(new CustomEvent('microclip:analyze', { detail: { shotIdx, src: fileUrl, blobType: blob.type, frame: activeFrame } }));
+      } catch (err) {
+        window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotIdx, frame: activeFrame, msg: String(err) } }));
+        log(`stop:error ${err}`);
+      } finally {
+        resetRecorder();
+      }
+    };
+
+    try {
+      rec.start();
+      window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 4000;
+      stopTimer = setTimeout(() => { try { rec.stop(); } catch {} }, window.__MICROCLIP_MS);
+    } catch (err) {
+      log(`start failed: ${err}`);
+      resetRecorder();
+    }
+  }
+
+  window.addEventListener('shot:release', (event) => {
+    const detail = event?.detail || {};
+    const trailLen = Array.isArray(window.ballState?.trail) ? window.ballState.trail.length : 0;
+    const minTrail = Number(window.MICROCLIP_MIN_TRAIL || 4);
+    if (trailLen < minTrail) {
+      log(`skip trail too short (${trailLen} < ${minTrail})`);
+      return;
+    }
+    startClip({ frame: detail.frame });
+  }, { passive: true });
+
+  window.addEventListener('hud:start-session', () => { try { window.__shotCount = 0; } catch {} });
+  window.addEventListener('hud:end-session', () => { try { window.__shotCount = 0; } catch {} });
+  window.__startMicroClip = startClip;
+})();
+
+(function installMicroClipFBF(){
+  if (window.__fbfInstalled) return;
+  window.__fbfInstalled = true;
+
+  function log(msg) { try { window.__dbgLine?.(`[fbf] ${msg}`); } catch {} }
+
+  window.addEventListener('microclip:analyze', async (event) => {
+    const detail = event?.detail || {};
+    const src = detail.src;
+    if (!src) return;
+    const shotIdx = detail.shotIdx ?? null;
+    const frame = detail.frame ?? null;
+
+    const video = document.createElement('video');
+    video.src = src;
+    video.muted = true;
+    video.playsInline = true;
+
+    try {
+      await video.play().catch(() => {});
+      video.pause();
+      await new Promise((resolve) => {
+        if (video.readyState >= 1) return resolve();
+        video.addEventListener('loadedmetadata', () => resolve(), { once: true });
+      });
+    } catch (err) {
+      log(`metadata error ${err}`);
+      setTimeout(() => { try { URL.revokeObjectURL(src); } catch {} }, 60000);
+      return;
+    }
+
+    const fps = Number(window.MICROCLIP_FBF_FPS || 30);
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth || 1280;
+    canvas.height = video.videoHeight || 720;
+    const ctx = canvas.getContext('2d');
+    const trail = [];
+
+    async function seekTo(time) {
+      const target = Math.min(video.duration || time, Math.max(0, time));
+      return new Promise((resolve) => {
+        let resolved = false;
+        const finish = () => {
+          if (resolved) return;
+          resolved = true;
+          resolve();
+        };
+        video.addEventListener('seeked', finish, { once: true });
+        try { video.currentTime = target; } catch (err) {
+          video.removeEventListener('seeked', finish);
+          resolve();
+        }
+        setTimeout(finish, 350);
+      });
+    }
+
+    function detectPoint() {
+      const hoop = window.getCanonicalHoopBox?.() || window.getLockedHoopBox?.();
+      const roi = (() => {
+        if (!hoop) {
+          const w = Math.round(canvas.width * 0.3);
+          const h = Math.round(canvas.height * 0.25);
+          const x = Math.round(Math.max(0, canvas.width * 0.55 - w * 0.5));
+          const y = Math.round(Math.max(0, canvas.height * 0.05));
+          return { x, y, w, h };
+        }
+        return {
+          x: Math.max(0, Math.floor(hoop.x - hoop.w * 0.4)),
+          y: Math.max(0, Math.floor(hoop.y - hoop.h * 0.4)),
+          w: Math.min(canvas.width, Math.floor(hoop.w * 2.4)),
+          h: Math.min(canvas.height, Math.floor(hoop.h * 2.6))
+        };
+      })();
+      const image = ctx.getImageData(roi.x, roi.y, roi.w, roi.h);
+      const data = image.data;
+      let best = -1;
+      let idx = 0;
+      for (let i = 0; i < data.length; i += 4) {
+        const lum = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
+        if (lum > best) {
+          best = lum;
+          idx = i;
+        }
+      }
+      const p = (idx / 4) | 0;
+      return {
+        x: roi.x + (p % roi.w),
+        y: roi.y + ((p / roi.w) | 0)
+      };
+    }
+
+    const duration = Math.min(video.duration || 4, Number(window.__MICROCLIP_MS || 4000) / 1000);
+    for (let t = 0; t <= duration; t += 1 / fps) {
+      // eslint-disable-next-line no-await-in-loop
+      await seekTo(t);
+      try { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); } catch {}
+      const point = detectPoint();
+      const sample = { x: point.x, y: point.y, frame: Math.round(t * fps), tMs: Math.round(t * 1000) };
+      trail.push(sample);
+      window.dispatchEvent(new CustomEvent('ball:trail-step', { detail: { frame: sample.frame, len: trail.length, x: sample.x, y: sample.y, tMs: sample.tMs } }));
+    }
+
+    const hoop = window.getCanonicalHoopBox?.() || window.getLockedHoopBox?.();
+    const made = classifyMakeMiss(trail, hoop);
+    window.dispatchEvent(new CustomEvent('shot:summary', { detail: { frame, made, arcHeight: null, releaseAngle: null, entryAngle: null, status: 'fbf', trail } }));
+    log(`analyzed shot=${shotIdx ?? '?'} pts=${trail.length} made=${made}`);
+    setTimeout(() => { try { URL.revokeObjectURL(src); } catch {} }, 60000);
+  });
+
+  function classifyMakeMiss(trail, hoop) {
+    if (!hoop || !Array.isArray(trail) || trail.length < 6) return null;
+    const centerX = hoop.x + hoop.w / 2;
+    const nearHoop = trail.some((p) => Math.abs(p.x - centerX) <= hoop.w && p.y <= (hoop.y + hoop.h * 1.5));
+    const ys = trail.map((p) => p.y);
+    const travel = Math.max(...ys) - Math.min(...ys);
+    return nearHoop && travel > 40;
+  }
+})();
+
 
 function __cloneForLog(obj) {
   try { return JSON.parse(JSON.stringify(obj)); } catch { return null; }
@@ -101,6 +398,51 @@ updateConfigSnapshot({
   }
 });
 updatePipelineStats();
+
+function emitSessionConfig(detailOverrides = {}) {
+  try {
+    if (window.__sessionConfigEmitted === true) return;
+    const detectSource = window.__DETECT_SOURCE || 'unknown';
+    const detectEp = window.__DETECT_EP || window.__EP || 'unknown';
+    const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
+    const labels = Array.isArray(window.BALL_LABELS) ? [...window.BALL_LABELS] : [];
+    const minTrail = Number(window.REL_MIN_TRAIL_BEFORE_RELEASE ?? 4);
+    const cooldownMs = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 0);
+    const detail = {
+      detect: { source: detectSource, ep: detectEp, minScore, ballLabels: labels },
+      gate: { minTrail, cooldownMs, requireProx: true, freshTrail: true },
+      build: {
+        app: window.APP_HASH || window.__APP_BUILD || null,
+        overlay: window.OVERLAY_HASH || window.__OVERLAY_BUILD || null
+      },
+      ...detailOverrides
+    };
+    try { window.__gateDedupeCount = 0; } catch {}
+    window.dispatchEvent(new CustomEvent('session:config', { detail }));
+    window.__sessionConfigEmitted = true;
+  } catch (err) {
+    try { console.warn('[session:config] emit failed', err); } catch {}
+  }
+}
+
+try {
+  window.addEventListener('hud:start-session', () => {
+    try { window.__sessionConfigEmitted = false; } catch {}
+    emitSessionConfig();
+  });
+} catch {}
+try {
+  window.addEventListener('hud:end-session', () => {
+    try { window.__sessionConfigEmitted = false; } catch {}
+  });
+} catch {}
+if (window.__SESSION_ACTIVE === true) {
+  emitSessionConfig();
+} else {
+  setTimeout(() => {
+    try { emitSessionConfig(); } catch {}
+  }, 0);
+}
 
 // ==== Debug Panel (toggleable) ===============================================
 (function installDebugPanel(){
@@ -262,6 +604,7 @@ function updatePoseWarmup(resultOrBool) {
         ok,
         streak,
         warm: window.__POSE_WARMUP_OK,
+        need: need,
         frame: Number(window.__AN_IDX) || 0
       }
     }));
@@ -444,7 +787,7 @@ function installBallMotionFallback(videoEl) {
         try { if (!window.__DETECT_SOURCE || window.__DETECT_SOURCE === 'unknown') window.__DETECT_SOURCE = 'motion'; } catch {}
         try {
           window.dispatchEvent(new CustomEvent('ball:point', {
-            detail: { x: bx, y: by, conf, frame, tMs, via: 'motion' }
+            detail: { x: bx, y: by, conf, frame, tMs, via: 'motion', top: [{ label: 'motion', score: Number(conf) }], roi: { x, y, w, h } }
           }));
         } catch {}
         window.__lastMotionFrame = frame;
@@ -1418,6 +1761,11 @@ window.addEventListener('microclip:done', (event) => {
           const lastFrame = window.__lastReleaseFrame;
           const lastTs = Number(window.__lastReleaseTs || 0);
           if (lastFrame === frameId && (nowTs - lastTs) < 120) {
+            try {
+              const elapsedMs = Math.max(0, nowTs - lastTs);
+              const count = window.__gateDedupeCount = (Number(window.__gateDedupeCount) || 0) + 1;
+              window.dispatchEvent(new CustomEvent('gate:dedupe', { detail: { frame: Number.isFinite(frameId) ? frameId : null, msWindow: 120, elapsedMs, count } }));
+            } catch {}
             e.stopImmediatePropagation();
             return;
           }
@@ -1430,6 +1778,27 @@ window.addEventListener('microclip:done', (event) => {
         const detail = e?.detail || {};
         if (detail?.bypassGate === true) {
           window.__dbgLine?.('[gate:bypass] dev');
+          return;
+        }
+        let __proxEnterFrame = NaN;
+        try {
+          const bs = window.ballState || {};
+          __proxEnterFrame = Number(bs.proxEnterFrame ?? NaN);
+          const proxExitFrame = Number(bs.proxExitFrame ?? NaN);
+          const proxFrame = Number.isFinite(frameId) ? frameId : (Number.isFinite(__proxEnterFrame) ? __proxEnterFrame : null);
+          window.dispatchEvent(new CustomEvent('prox:state', {
+            detail: {
+              frame: proxFrame,
+              latched: Number.isFinite(__proxEnterFrame),
+              enterF: Number.isFinite(__proxEnterFrame) ? __proxEnterFrame : null,
+              exitF: Number.isFinite(proxExitFrame) ? proxExitFrame : null
+            }
+          }));
+        } catch {}
+        if (!Number.isFinite(__proxEnterFrame)) {
+          window.__releaseEventSent = false;
+          window.__dbgBlock?.('no-prox');
+          e.stopImmediatePropagation();
           return;
         }
         const devAllowStaleTrail = (window.__DEV_ALLOW_STALE_TRAIL__ === true);
@@ -1449,34 +1818,52 @@ window.addEventListener('microclip:done', (event) => {
         try {
           const bs = window.ballState || {};
           const trail = Array.isArray(bs.trail) ? bs.trail : [];
+          const trailLen = trail.length | 0;
           const minPtsRaw = Number(window.REL_MIN_BALL_POINTS ?? 3);
           const minTrail = Math.max(minPtsRaw, Number(window.REL_MIN_TRAIL_BEFORE_RELEASE ?? 4));
-          if (trail.length < minTrail) {
-            window.__releaseEventSent = false;
-            window.__dbgBlock?.('min-trail-before-release', { trailLen: trail.length, minTrail });
-            e.stopImmediatePropagation(); return;
-          }
           lastTrailPoint = trail.at?.(-1) || null;
-          const nowMs = performance.now();
-          const maxMs = Number(window.REL_MAX_BALL_MS ?? 260);
+          const armedAt = Number(window.__armedAtMs || 0);
           const candidateMs = Number(lastTrailPoint?.tMs);
-          if (!lastTrailPoint || !Number.isFinite(candidateMs)) {
+          lastTrailMs = Number.isFinite(candidateMs) ? candidateMs : NaN;
+          const fallbackFrame = Number(window.__REL_LAST_FRAME);
+          const contextFrame = Number.isFinite(frameId) ? frameId : (Number.isFinite(fallbackFrame) ? fallbackFrame : null);
+          const lastTrailAgeMs = Number.isFinite(lastTrailMs) ? (nowTs - lastTrailMs) : null;
+          const freshTrail = Number.isFinite(lastTrailMs) ? (lastTrailMs > armedAt) : false;
+          try {
+            window.dispatchEvent(new CustomEvent('release:context', {
+              detail: {
+                frame: contextFrame,
+                freshTrail,
+                trailLen,
+                lastTrailAgeMs: Number.isFinite(lastTrailAgeMs) ? Math.max(0, lastTrailAgeMs) : null
+              }
+            }));
+          } catch {}
+          if (trailLen < minTrail) {
+            window.__releaseEventSent = false;
+            window.__dbgBlock?.('min-trail', { have: trailLen, need: minTrail });
+            e.stopImmediatePropagation();
+            return;
+          }
+          if (!Number.isFinite(lastTrailMs)) {
             window.__releaseEventSent = false;
             window.__dbgBlock?.('ball-sample-missing', { hasPoint: !!lastTrailPoint });
-            e.stopImmediatePropagation(); return;
+            e.stopImmediatePropagation();
+            return;
           }
-          const armedAt = Number(window.__armedAtMs || 0);
-          if (!devAllowStaleTrail && Number.isFinite(armedAt) && armedAt > 0 && candidateMs < armedAt) {
+          const maxMs = Number(window.REL_MAX_BALL_MS ?? 260);
+          if (!devAllowStaleTrail && Number.isFinite(armedAt) && armedAt > 0 && lastTrailMs < armedAt) {
             window.__releaseEventSent = false;
-            window.__dbgBlock?.('fresh-trail-missing', { armedAt, lastTrail: candidateMs });
-            e.stopImmediatePropagation(); return;
+            window.__dbgBlock?.('fresh-trail-missing', { armedAt, lastTrail: lastTrailMs });
+            e.stopImmediatePropagation();
+            return;
           }
-          if ((nowMs - candidateMs) > maxMs && !devAllowStaleTrail) {
+          if (!devAllowStaleTrail && Number.isFinite(lastTrailAgeMs) && lastTrailAgeMs > maxMs) {
             window.__releaseEventSent = false;
-            window.__dbgBlock?.('fresh-trail-missing', { armedAt, lastTrail: candidateMs, ageMs: Math.round(nowMs - candidateMs) });
-            e.stopImmediatePropagation(); return;
+            window.__dbgBlock?.('fresh-trail-missing', { armedAt, lastTrail: lastTrailMs, ageMs: Math.round(lastTrailAgeMs) });
+            e.stopImmediatePropagation();
+            return;
           }
-          lastTrailMs = candidateMs;
         } catch {}
 
         // Require a proximity streak (or segment-cross) before releases can pass

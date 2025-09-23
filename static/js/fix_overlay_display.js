@@ -1182,11 +1182,27 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
       window.updatePipelineStats?.({ detectorLatencyP50: Math.round(p50), detectorLatencyP95: Math.round(p95) });
     }
 
-    const BALL_LABELS = ['ball', 'basketball', 'sports_ball'];
+    const BALL_LABELS = Array.isArray(window.BALL_LABELS)
+      ? window.BALL_LABELS.map((s) => String(s).toLowerCase())
+      : ['ball', 'basketball', 'sports_ball'];
     const MIN_SCORE = Number(window.BALL_MIN_SCORE ?? 0.3);
     const isBallLabel = (s) => !!s && BALL_LABELS.includes(String(s).toLowerCase());
+    const scoreOf = (d) => Number(d?.score ?? d?.confidence ?? 0);
+    const labelOf = (d) => d?.label ?? d?.class ?? d?.type ?? null;
+    const topSummary = items
+      .slice()
+      .sort((a, b) => scoreOf(b) - scoreOf(a))
+      .slice(0, 3)
+      .map((d) => {
+        const raw = scoreOf(d);
+        return {
+          label: labelOf(d),
+          score: Number.isFinite(raw) ? Number(raw.toFixed(3)) : raw
+        };
+      });
 
     let chosen = null;
+    let chosenRoi = null;
     for (const d of items) {
       const lab = d?.label ?? d?.class ?? d?.type;
       const sc = d?.score ?? d?.confidence ?? 0;
@@ -1194,11 +1210,13 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
       if (!isBallLabel(lab) || !Number.isFinite(sc) || sc < MIN_SCORE || !box) continue;
       let cx = null;
       let cy = null;
+      let roi = null;
       if (Array.isArray(box) && box.length === 4) {
         const [x1, y1, x2, y2] = box.map(Number);
         if ([x1, y1, x2, y2].every(Number.isFinite)) {
           cx = (x1 + x2) / 2;
           cy = (y1 + y2) / 2;
+          roi = { x: Math.min(x1, x2), y: Math.min(y1, y2), w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
         }
       } else {
         const bx = Number(box.x ?? box.left ?? NaN);
@@ -1208,17 +1226,32 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
         if ([bx, by, bw, bh].every(Number.isFinite)) {
           cx = bx + bw / 2;
           cy = by + bh / 2;
+          roi = { x: bx, y: by, w: bw, h: bh };
         }
       }
       if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
-      chosen = { x: cx, y: cy, conf: sc };
+      chosen = { x: cx, y: cy, conf: Number(sc) };
+      chosenRoi = roi;
       break;
     }
 
     if (chosen) {
       detail.ball = { x: chosen.x, y: chosen.y, conf: chosen.conf };
       try { window.__lastDetectorBallFrame = frameIndex; } catch {}
-      try { window.dispatchEvent(new CustomEvent('ball:point', { detail: { x: chosen.x, y: chosen.y, conf: chosen.conf, frame: frameIndex, tMs, via: via } })); } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent('ball:point', {
+          detail: {
+            x: chosen.x,
+            y: chosen.y,
+            conf: chosen.conf,
+            frame: frameIndex,
+            tMs,
+            via: via,
+            top: topSummary,
+            roi: chosenRoi ? { x: chosenRoi.x, y: chosenRoi.y, w: chosenRoi.w, h: chosenRoi.h } : null
+          }
+        }));
+      } catch {}
       try { window.__dbgLine?.(`[det→ball] f=${frameIndex} conf=${chosen.conf.toFixed(2)} @(${Math.round(chosen.x)},${Math.round(chosen.y)})`); } catch {}
       if (stats) {
         stats.detectorBall = (stats.detectorBall || 0) + 1;

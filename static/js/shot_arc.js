@@ -266,7 +266,52 @@ export function refineBallTrajectory() {
   arc.releasePoint = cleanArc.releasePoint;
   arc.apexPoint = cleanArc.apexPoint;
   arc.rimCrossingPoint = cleanArc.rimCrossingPoint;
-  
+
+  try {
+    const refined = Array.isArray(cleanArc.trail) ? cleanArc.trail : [];
+    const rawTrail = Array.isArray(arc.trail) ? arc.trail : [];
+    const frames = refined
+      .map((p) => Number(p?.frame))
+      .filter((f) => Number.isFinite(f));
+    const minFrame = frames.length ? Math.min(...frames) : null;
+    const maxFrame = frames.length ? Math.max(...frames) : null;
+    const span = frames.length && Number.isFinite(minFrame) && Number.isFinite(maxFrame)
+      ? Math.max(1, (maxFrame - minFrame + 1))
+      : 0;
+    const continuity = span > 0 ? (new Set(frames)).size / span : 0;
+    const pairs = Math.min(rawTrail.length, refined.length);
+    let sumSq = 0;
+    let count = 0;
+    for (let i = 0; i < pairs; i++) {
+      const a = rawTrail[i];
+      const b = refined[i];
+      const ax = Number(a?.x);
+      const ay = Number(a?.y);
+      const bx = Number(b?.x);
+      const by = Number(b?.y);
+      if ([ax, ay, bx, by].every(Number.isFinite)) {
+        const dx = ax - bx;
+        const dy = ay - by;
+        sumSq += dx * dx + dy * dy;
+        count++;
+      }
+    }
+    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+    const peakY = refined.reduce((min, p) => {
+      const y = Number(p?.y);
+      return Number.isFinite(y) ? Math.min(min, y) : min;
+    }, Number.POSITIVE_INFINITY);
+    const packet = {
+      points: refined.length,
+      continuity: Number(continuity.toFixed(3)),
+      rms: Number(rms.toFixed(3)),
+      peakY: Number.isFinite(peakY) ? peakY : null,
+      tStart: Number.isFinite(minFrame) ? minFrame : null,
+      tEnd: Number.isFinite(maxFrame) ? maxFrame : null
+    };
+    window.dispatchEvent(new CustomEvent('arc:fit', { detail: packet }));
+  } catch {}
+
   if (window.DOACH_SHOT_DEBUG) {
     console.log('[trajectory] refined', {
       originalPoints: arc.trail.length,
@@ -275,7 +320,7 @@ export function refineBallTrajectory() {
       apex: cleanArc.apexPoint
     });
   }
-}
+
 
 function smoothTrajectory(rawTrail) {
   if (!Array.isArray(rawTrail) || rawTrail.length < 3) return rawTrail;
