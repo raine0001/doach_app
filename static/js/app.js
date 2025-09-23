@@ -23,12 +23,19 @@ import { initReleaseConfig, releaseGate } from './release_gate.js';
 
 
 // pose detection global settings
-window.POSE_REQUIRE_PLAYER_BOX = true;   // must see a 'player'/'person' box
-window.POSE_MIN_IOU_PLAYER     = 0.18;   // overlap with player box
-window.POSE_MIN_H              = 110;    // min pose height (px)
-window.POSE_MIN_AREA_FRAC      = 0.006;  // min area vs frame (0.6%)
-window.POSE_BELOW_RIM_MIN      = 80;     // ankles must be â‰¥80px BELOW rim y
-window.POSE_STREAK_NEED        = 2;      // require 2 consecutive frames to accept
+window.POSE_REQUIRE_PLAYER_BOX ??= true;   // must see a 'player'/'person' box
+window.POSE_MIN_IOU_PLAYER     ??= 0.18;   // overlap with player box
+window.POSE_MIN_H              ??= 110;    // min pose height (px)
+window.POSE_MIN_AREA_FRAC      ??= 0.006;  // min area vs frame (0.6%)
+window.POSE_BELOW_RIM_MIN      ??= 80;     // ankles must be â‰¥80px BELOW rim y
+window.POSE_STREAK_NEED        ??= 2;      // require 2 consecutive frames to accept
+window.REL_MIN_BALL_POINTS ??= 3;      // minimum ball samples before release
+window.REL_MAX_BALL_MS     ??= 260;    // max ms since last ball point
+window.PROX_IN_CONSEC_MIN  ??= 2;      // inside-prox streak requirement
+window.REL_MIN_SEP_MS      ??= 500;    // min ms between releases
+
+window.__REL_LAST_FRAME ??= null;
+
 const MICROCLIP_BUFFER_DEFAULT_MS = 3800;
 
 window.USE_MICROCLIP ??= false;
@@ -659,9 +666,12 @@ window.addEventListener('microclip:done', (event) => {
 
         // Cooldown + â€œalready firedâ€ guard
         const now = performance.now();
+        const minSepMs = Number(window.REL_MIN_SEP_MS ?? 500);
+        const sinceMs  = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+        const sameFrame = Number.isFinite(window.__REL_LAST_FRAME) && window.__REL_LAST_FRAME === frame;
+        if (sameFrame || sinceMs < minSepMs) return false;
         const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1200);
-        const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
-        if (since < cd || window.__releaseEventSent) return false;
+        if (sinceMs < cd || window.__releaseEventSent) return false;
 
         // Require wrist-drop reset since the previous release
         if (window.__RESET_SEEN_BELOW === false) return false;
@@ -697,6 +707,7 @@ window.addEventListener('microclip:done', (event) => {
         window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
         window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
         window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));
+        window.__REL_LAST_FRAME = frame;
 
         try { __reportReleaseToServer?.({ frame, via, tMs: Date.now(), prox }); } catch {}
 
@@ -758,6 +769,29 @@ window.addEventListener('microclip:done', (event) => {
     window.__captureGateBound = true;
     window.addEventListener('shot:release', (e) => {
       try {
+        // Do not allow a release unless ball trail exists and is fresh (use ms, not frame deltas)
+        try {
+          const bs = window.ballState || {};
+          const trail = Array.isArray(bs.trail) ? bs.trail : [];
+          const minPts = Number(window.REL_MIN_BALL_POINTS ?? 3);
+          if (trail.length < minPts) { window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
+          const last = trail.at?.(-1) || null;
+          const nowMs = performance.now();
+          const maxMs = Number(window.REL_MAX_BALL_MS ?? 260);
+          const lastMs = Number.isFinite(last?.tMs) ? last.tMs : nowMs;
+          if ((nowMs - lastMs) > maxMs) { window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
+        } catch {}
+
+        // Require a proximity streak (or segment-cross) before releases can pass
+        try {
+          const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
+          const insideStreak = Number(window.ballState?._proxInsideStreak || 0);
+          const needInside = Number(window.PROX_IN_CONSEC_MIN ?? 2);
+          if (!Number.isFinite(enter) && insideStreak < needInside) {
+            window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+          }
+        } catch {}
+
         // Startup anti-ghost: require readiness + pose warmup before any release can pass
         if (window.__readyForScoring !== true) { e.stopImmediatePropagation(); return; }
         if (window.__POSE_WARMUP_OK !== true) { e.stopImmediatePropagation(); return; }
@@ -2820,8 +2854,8 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
       try {
         const hasTrail = (window.ballState?.trail?.length || 0) > 0;
         if (hoopLocked && (updatedThisTick || hasTrail)) {
-          scoringTick?.(frameIdx);
-          checkShotConditions?.(ballState, hoopLocked, frameIdx);
+          if (window.USE_MICROCLIP !== true) scoringTick?.(frameIdx);
+          if (window.USE_MICROCLIP !== true) checkShotConditions?.(ballState, hoopLocked, frameIdx);
         }
       } catch {} } catch {}
 
@@ -2829,8 +2863,8 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
   const hasTrail = (window.ballState?.trail?.length || 0) > 0;
   try {
     if (hoopLocked && (updatedThisTick || hasTrail)) {
-      scoringTick?.(frameIdx);
-      checkShotConditions?.(ballState, hoopLocked, frameIdx);
+      if (window.USE_MICROCLIP !== true) scoringTick?.(frameIdx);
+      if (window.USE_MICROCLIP !== true) checkShotConditions?.(ballState, hoopLocked, frameIdx);
       if (window.DOACH_VERBOSE === true) console.log('[score:fbf]', frameIdx, {
         rel:   ballState?.releaseFrame,
         enter: ballState?.proxEnterFrame,
@@ -3339,8 +3373,8 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
       // Scoring + shot logging in RVFC (live) mode â€” always tick when hoop is locked
       try {
         if (hoopLocked) {
-          scoringTick?.(frameIdx);
-          checkShotConditions?.(ballState, hoopLocked, frameIdx);
+          if (window.USE_MICROCLIP !== true) scoringTick?.(frameIdx);
+          if (window.USE_MICROCLIP !== true) checkShotConditions?.(ballState, hoopLocked, frameIdx);
         }
       } catch {}
 
@@ -3578,6 +3612,7 @@ window.resetShots = function resetShots() {
 
   try { resetReadiness?.('manual reset'); } catch {}
   window.__hoopAutoLocked = false;
+  try { window.__REL_LAST_FRAME = null; } catch {}
 };
 
 // 3) Oneâ€‘frame step when paused (nice for slow scrubbing)
@@ -3689,8 +3724,8 @@ if (typeof window.clientToVideoXY !== 'function') {
           if (until && performance.now() < until) {
             const H = window.getLockedHoopBox?.();
             if (H) {
-              scoringTick?.(fidx);
-              checkShotConditions?.(ballState, H, fidx);
+              if (window.USE_MICROCLIP !== true) scoringTick?.(fidx);
+              if (window.USE_MICROCLIP !== true) checkShotConditions?.(ballState, H, fidx);
             }
           }
         } catch {}
@@ -4503,7 +4538,7 @@ window.resetShots = window.resetShots || function () {
 
         try {
           const hasTrail = (window.ballState?.trail?.length || 0) > 0;
-          if (hoop && hasTrail) { scoringTick?.(fidx); checkShotConditions?.(window.ballState, hoop, fidx); }
+          if (window.USE_MICROCLIP !== true && hoop && hasTrail) { scoringTick?.(fidx); checkShotConditions?.(window.ballState, hoop, fidx); }
         } catch {}
 
         // Fallback draw in live sessions if analyzer is stale or not active

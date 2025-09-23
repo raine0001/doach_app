@@ -458,6 +458,9 @@ async function detectWithROI(ctx, canvas, hoop, frameIdx) {
   const roi = computeROIFromHoop(prox, width, height);
   if (!roi) return await fullDetect();
 
+  if (typeof OffscreenCanvas === 'undefined') {
+    return await fullDetect();
+  }
   const roiCanvas = new OffscreenCanvas(roi.w, roi.h);
   const roiCtx = roiCanvas.getContext('2d');
   roiCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
@@ -509,6 +512,9 @@ export async function runMicroclipJob(job, { postProgress } = {}) {
     return { summary: buildSummary({ status: 'invalid', framesUsed: 0 }) };
   }
 
+  if (typeof OffscreenCanvas === 'undefined') {
+    throw new Error('OffscreenCanvas unavailable in microclip worker');
+  }
   const canvas = new OffscreenCanvas(width, height);
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
