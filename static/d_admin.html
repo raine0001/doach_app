@@ -219,27 +219,24 @@
     if (paused) return;
     buf.push(line);
     if (buf.length > CAP) buf = buf.slice(-CAP);
-    logEl.textContent += line + '
-';
-    if (logEl.textContent.split('
-').length > CAP) {
-      const lines = logEl.textContent.split('
-');
-      logEl.textContent = lines.slice(-CAP).join('
-');
-    }
+logEl.textContent += line + '\n';
+if (logEl.textContent.split('\n').length > CAP) {
+  const lines = logEl.textContent.split('\n');
+  logEl.textContent = lines.slice(-CAP).join('\n');
+}
     if (chkAuto.checked) logEl.scrollTop = logEl.scrollHeight;
   }
 
   btnPause.onclick = () => { paused = !paused; btnPause.textContent = paused ? '▶ resume' : '⏸ pause'; };
   btnClear.onclick = () => { buf = []; logEl.textContent = ''; };
-  btnDown.onclick  = () => {
-    const blob = new Blob([buf.join('
-')], {type:'text/plain'});
+btnDown.onclick  = () => {
+    const blob = new Blob([buf.join('\n')], {type:'text/plain'});
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = `doach-debug-${Date.now()}.log`;
-    document.body.appendChild(a); a.click(); a.remove();
+    a.download = 'doach_debug_log.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   };
 
   function patchDbgLine(){
