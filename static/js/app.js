@@ -50,8 +50,11 @@ window.__POSE_STREAK__ ??= 0;
 window.__readyForScoringArmedAtMs ??= 0;
 window.__readyForScoringBallMsAtArm ??= 0;
 window.__armedAtMs ??= 0;
+window.__DETECT_SOURCE ??= 'unknown';
 
 window.__REL_LAST_FRAME ??= null;
+window.__lastReleaseFrame ??= null;
+window.__lastReleaseTs ??= 0;
 
 // ==== Debug Panel (toggleable) ===============================================
 (function installDebugPanel(){
@@ -182,15 +185,41 @@ function isBallLabel(label) {
 window.isBallLabel = isBallLabel;
 
 function updatePoseWarmup(resultOrBool) {
-  const ok = typeof resultOrBool === 'object'
-    ? !!(resultOrBool?.landmarks?.length)
-    : !!resultOrBool;
+  let ok;
+  if (typeof resultOrBool === 'object') {
+    const marks = resultOrBool?.landmarks;
+    if (Array.isArray(marks) && marks.length) {
+      if (marks.length >= 33 && typeof marks[0]?.x === 'number') {
+        ok = true;
+      } else if (Array.isArray(marks[0]) && marks[0].length >= 33) {
+        ok = true;
+      } else if (typeof marks[0] === 'number' && marks.length >= 99) {
+        ok = true;
+      } else {
+        ok = false;
+      }
+    } else {
+      ok = false;
+    }
+  } else {
+    ok = !!resultOrBool;
+  }
   const prev = Number(window.__POSE_STREAK__ || 0);
-  const streak = ok ? prev + 1 : 0;
+  const streak = ok ? (prev + 1) : 0;
   window.__POSE_STREAK__ = streak;
   const need = Number(window.POSE_WARMUP_FRAMES ?? 20);
   window.__POSE_WARMUP_OK = streak >= need;
   try { window.__dbgLine?.(`[pose] ok=${ok} streak=${streak}`); } catch {}
+  try {
+    window.dispatchEvent(new CustomEvent('pose:state', {
+      detail: {
+        ok,
+        streak,
+        warm: window.__POSE_WARMUP_OK,
+        frame: Number(window.__AN_IDX) || 0
+      }
+    }));
+  } catch {}
   return window.__POSE_WARMUP_OK;
 }
 window.updatePoseWarmup = updatePoseWarmup;
@@ -218,10 +247,13 @@ function chooseDetector() {
     if (wantLocal && typeof window.enableLocalDetector === 'function') {
       window.__forceServerDetect = false;
       window.__LOCAL_DETECTOR = true;
-      window.enableLocalDetector();
-      window.__dbgLine?.('[LocalDetector] enabled (forced)');
+      const ok = window.enableLocalDetector();
+      window.__DETECT_SOURCE = ok ? 'local' : 'server';
+      window.__dbgLine?.(ok ? '[LocalDetector] enabled (forced)' : '[LocalDetector] fallback to server');
+      if (!ok) window.useServerDetector?.();
     } else {
       window.useServerDetector?.();
+      window.__DETECT_SOURCE = 'server';
       window.__dbgLine?.('[ServerDetector] enabled');
     }
   } catch (err) {
@@ -285,10 +317,111 @@ chooseDetector();
     storeCanon(hb);
   }, { passive: true });
 
-  window.getCanonicalHoopBox = function getCanonicalHoopBox() {
-    return window.__canonHoopBox || window.getLockedHoopBox?.() || null;
-  };
+window.getCanonicalHoopBox = function getCanonicalHoopBox() {
+  return window.__canonHoopBox || window.getLockedHoopBox?.() || null;
+};
 })();
+
+function installBallMotionFallback(videoEl) {
+  if (!videoEl) return;
+  if (window.__ballMotionInstalled) return;
+  window.__ballMotionInstalled = true;
+
+  const cvs = document.createElement('canvas');
+  const ctx = cvs.getContext('2d', { willReadFrequently: true });
+  let prevROI = null;
+
+  const roiRect = () => {
+    const hb = window.getCanonicalHoopBox?.() || window.getLockedHoopBox?.();
+    const vw = videoEl.videoWidth || 1280;
+    const vh = videoEl.videoHeight || 720;
+    if (!hb || !Number.isFinite(hb.x)) {
+      const w = Math.round(Math.min(420, vw * 0.3));
+      const h = Math.round(Math.min(300, vh * 0.25));
+      const x = Math.round(Math.max(0, vw * 0.55 - w * 0.5));
+      const y = Math.round(Math.max(0, vh * 0.05));
+      return { x, y, w, h };
+    }
+    const w = Math.max(180, Math.min(480, hb.w * 2.4));
+    const h = Math.max(160, Math.min(360, hb.h * 3.2));
+    const x = Math.max(0, Math.floor(hb.x + hb.w * 0.1 - w * 0.2));
+    const y = Math.max(0, Math.floor(hb.y + hb.h * 0.2 - h * 0.1));
+    return { x, y, w: Math.min(w, vw - x), h: Math.min(h, vh - y) };
+  };
+
+  const handleFrame = (e) => {
+    if (!videoEl.videoWidth || !videoEl.videoHeight) return;
+    const frame = Number.isFinite(e?.detail?.frame) ? Number(e.detail.frame) : (Number(window.__AN_IDX) || 0);
+    const tMs = Number.isFinite(e?.detail?.tMs) ? Number(e.detail.tMs) : performance.now();
+
+    const { x, y, w, h } = roiRect();
+    if (w <= 0 || h <= 0) return;
+    cvs.width = w;
+    cvs.height = h;
+    try {
+      ctx.drawImage(videoEl, x, y, w, h, 0, 0, w, h);
+    } catch {
+      return;
+    }
+    let cur;
+    try {
+      cur = ctx.getImageData(0, 0, w, h);
+    } catch {
+      return;
+    }
+
+    if (prevROI && prevROI.width === w && prevROI.height === h) {
+      const a = cur.data;
+      const b = prevROI.data;
+      let max = 0;
+      let idx = -1;
+      for (let i = 0; i < a.length; i += 4) {
+        const d = Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+        if (d > max) { max = d; idx = i; }
+      }
+      if (idx >= 0 && max > 45) {
+        const p = (idx / 4) | 0;
+        const px = p % w;
+        const py = (p / w) | 0;
+        const bx = x + px;
+        const by = y + py;
+        const conf = Math.min(0.99, max / 255);
+        if (Number(window.__lastMotionFrame) === frame) {
+          prevROI = cur;
+          return;
+        }
+        if (Number(window.__lastDetectorBallFrame) === frame) {
+          prevROI = cur;
+          return;
+        }
+        try { if (!window.__DETECT_SOURCE || window.__DETECT_SOURCE === 'unknown') window.__DETECT_SOURCE = 'motion'; } catch {}
+        try {
+          window.dispatchEvent(new CustomEvent('ball:point', {
+            detail: { x: bx, y: by, conf, frame, tMs, via: 'motion' }
+          }));
+        } catch {}
+        window.__lastMotionFrame = frame;
+      }
+    }
+
+    prevROI = cur;
+  };
+
+  window.addEventListener('video:frame', handleFrame, { passive: true });
+
+  if (!window.__videoFramePump) {
+    window.__videoFramePump = setInterval(() => {
+      try {
+        if (!videoEl.parentNode) return;
+        if (videoEl.readyState < 2) return;
+        const detail = { frame: Number(window.__AN_IDX) || 0, tMs: performance.now() };
+        window.dispatchEvent(new CustomEvent('video:frame', { detail }));
+      } catch {}
+    }, 160);
+  }
+
+  window.__dbgLine?.('[fallback] ball-from-motion active');
+}
 
 (function armLoop() {
   if (window.__armLoopBound) return;
@@ -1232,10 +1365,20 @@ window.addEventListener('microclip:done', (event) => {
       let lastTrailPoint = null;
       let lastTrailMs = NaN;
       try {
-        const frameId = Number(e?.detail?.frame ?? window.__AN_IDX ?? 0);
+        const frameId = Number(e?.detail?.frame);
+        const nowTs = performance.now();
         if (Number.isFinite(frameId)) {
-          if (window.__lastReleaseFrame === frameId) { e.stopImmediatePropagation(); return; }
+          const lastFrame = window.__lastReleaseFrame;
+          const lastTs = Number(window.__lastReleaseTs || 0);
+          if (lastFrame === frameId && (nowTs - lastTs) < 120) {
+            e.stopImmediatePropagation();
+            return;
+          }
           window.__lastReleaseFrame = frameId;
+          window.__lastReleaseTs = nowTs;
+        }
+        else {
+          window.__lastReleaseTs = nowTs;
         }
         const detail = e?.detail || {};
         if (detail?.bypassGate === true) {
@@ -2640,6 +2783,7 @@ document.addEventListener('DOMContentLoaded', () => {
       try { startPreDetection?.(videoPlayer); } catch {}
     }
     try { window.resetReleaseSessionCounters?.(); } catch {}
+    try { installBallMotionFallback(videoPlayer); } catch {}
   }, { once: true });
 
   // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€

@@ -1150,6 +1150,7 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
   if (!window.__detWorker) return;
 
   const emitDetections = (dets, frameIndex, tMs, via='detector') => {
+    try { window.__DETECT_SOURCE = via; } catch {}
     try {
       window.dispatchEvent(new CustomEvent('objects:frame', { detail: { dets: dets || [], frame: frameIndex, tMs, via } }));
     } catch {}
@@ -1189,6 +1190,7 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
 
     if (chosen) {
       const detail = { x: chosen.x, y: chosen.y, conf: chosen.conf, frame: frameIndex, tMs, via };
+      try { window.__lastDetectorBallFrame = frameIndex; } catch {}
       try { window.dispatchEvent(new CustomEvent('ball:point', { detail })); } catch {}
       try { window.__dbgLine?.(`[det→ball] f=${frameIndex} conf=${chosen.conf.toFixed(2)} @(${Math.round(chosen.x)},${Math.round(chosen.y)})`); } catch {}
     } else {

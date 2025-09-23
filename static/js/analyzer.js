@@ -835,6 +835,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       } catch {}
       try { updateDebugOverlay?.(poses, objects, frameIdx); } catch {};
       try { drawLiveOverlay?.(objects, playerState); } catch {}
+      try { window.dispatchEvent(new CustomEvent('video:frame', { detail: { frame: frameIdx, tMs: performance.now() } })); } catch {}
       frameIdx++;
       try {
         const rf = Number(window.ballState?.releaseFrame);

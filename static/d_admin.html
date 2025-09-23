@@ -442,6 +442,13 @@ btnDown.onclick  = () => {
       push('objects:frame',{frame:f,n:r.detN,top:r.top});
     }, {passive:true});
 
+    window.addEventListener('pose:state', e=>{
+      const d = e.detail||{};
+      events++;
+      push('pose:state', d);
+      try { tiles.pose.textContent = d.warm ? 'warm' : String(!!d.ok); } catch {}
+    }, {passive:true});
+
     window.addEventListener('ball:point', e=>{
       const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
       events++;
@@ -479,12 +486,14 @@ btnDown.onclick  = () => {
       const d = e.detail||{}, f = F();
       events++; const r = rowFor(f); r.gate = `block:${d.reason}`;
       push('gate:block',{frame:f,reason:d.reason,extra:d.extra});
+      try { tiles.gate.textContent = `block:${d.reason}`; } catch {}
     }, {passive:true});
 
     window.addEventListener('gate:released', e=>{
       const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
       events++; const r = rowFor(f); r.gate = 'released';
       push('gate:released',{frame:f});
+      try { tiles.gate.textContent = 'released'; } catch {}
     }, {passive:true});
 
     window.addEventListener('hoop:locked', e=>{
