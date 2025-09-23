@@ -13,8 +13,10 @@
     section { background:#0f1621; border:1px solid #1f2a36; border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
     section > h2 { font-size:14px; margin:0; padding:10px 12px; background:#111a25; border-bottom:1px solid #1f2a36; flex-shrink:0; }
     .list { padding:8px; overflow:auto; flex:1 1 auto; }
-    .row { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid #16202b; cursor:pointer; }
+    .row { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid #16202b; cursor:pointer; transition:background 0.2s ease, border-left 0.2s ease; }
     .row:hover { background:#0d131c; }
+    .row.active { background:#122819; border-left:4px solid #2dd683; }
+    .row.active:hover { background:#163121; }
     .muted { opacity:.8; }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:12px; }
     .ok { background:#11331f; color:#34d399; border:1px solid #1e7a42; }
@@ -87,15 +89,20 @@
       const acc = Number.isFinite(s.accuracy) ? s.accuracy : (s.totals?.accuracy ?? null);
       const shots = s.shots ?? s.totals?.attempts ?? 0;
       const pill = acc != null ? `<span class="pill ${acc>=50?'ok':'bad'}">${acc}%</span>` : '';
-      return `<div class="row" data-sid="${s.sid||s.id}">
+    const active = !!(s.active || s.__inc || s.status === 'active');
+    const cls = `row${active ? ' active' : ''}`;
+    const liveBadge = s.__inc ? '<span class="pill ok" style="margin-left:6px;">live</span>' : '';
+    return `<div class="${cls}" data-sid="${s.sid||s.id}">
         <div style="flex:1; min-width:0;">
           <div style="font-weight:700;">${s.sid||s.id}</div>
           <div class="muted">${fmt(s.created_at||s.startedAt)} → ${fmt(s.ended_at||s.endedAt)}</div>
         </div>
         <div class="muted">${shots} shots</div>
         ${pill}
+        ${liveBadge}
         <button class="btn" data-act="observe">Observe</button>
         <button class="btn" data-act="debug">Debug</button>
+        <button class="btn" data-act="download">Download Debug</button>
       </div>`;
     }
 
@@ -113,7 +120,7 @@
       });
       elSessions.innerHTML = list
         .filter(s => !filt || (s.sid||'').toLowerCase().includes(filt))
-        .map(s => rowHTML(s).replace('</div></div>', `${s.__inc?'<span class="pill ok" style="margin-left:6px">live</span>':''}</div></div>`))
+        .map(rowHTML)
         .join('') || '<div class="muted" style="padding:10px;">No sessions.</div>';
     }
 
@@ -133,21 +140,34 @@
         elViewer.innerHTML = `<iframe src="/admin/observe/${sid}"></iframe>`;
         return;
       }
-      if (act === 'debug') {
-        try {
-          const j = await fetchJSON(`/admin/session/${sid}/debug`);
-          elDebug.textContent = JSON.stringify(j, null, 2);
-          elViewer.innerHTML = `<div style="padding:10px;">
-            <div style="margin-bottom:8px; font-weight:700;">${sid}</div>
-            <a class="btn" href="/admin/observe/${sid}" target="_blank">Open Observe</a>
-            <a class="btn" href="/admin/session/${sid}/debug" target="_blank">Open Debug JSON</a>
-          </div>`;
-        } catch (err) {
-          elDebug.textContent = '(error) '+err.message;
-        }
-        return;
+    if (act === 'debug') {
+      try {
+        const j = await fetchJSON(`/admin/session/${sid}/debug`);
+        elDebug.textContent = JSON.stringify(j, null, 2);
+        elViewer.innerHTML = `<div style="padding:10px;">
+          <div style="margin-bottom:8px; font-weight:700;">${sid}</div>
+          <a class="btn" href="/admin/observe/${sid}" target="_blank">Open Observe</a>
+          <a class="btn" href="/admin/session/${sid}/debug" target="_blank">Open Debug JSON</a>
+        </div>`;
+      } catch (err) {
+        elDebug.textContent = '(error) '+err.message;
       }
-    });
+      return;
+    }
+    if (act === 'download') {
+      try {
+        const j = await fetchJSON(`/admin/session/${sid}/debug`);
+        const blob = new Blob([JSON.stringify(j, null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${sid}-debug.json`;
+        a.click();
+      } catch (err) {
+        alert('Download failed: ' + err.message);
+      }
+      return;
+    }
+  });
 
     document.getElementById('btnRefresh').onclick = () => { loadSessions(); loadActive(); };
     document.getElementById('filterTxt').oninput = () => { loadSessions(); };
@@ -314,5 +334,206 @@ btnDown.onclick  = () => {
 
 })();
 </script>
+
+  <!-- ===== One-Page Debug (d_admin) ======================================= -->
+  <section id="onepage-debug" style="margin:12px 0;">
+    <h2 style="margin:0 0 8px;">One-Page Debug</h2>
+    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+      <button id="opg-pause">⏸ pause</button>
+      <button id="opg-clear">🗑 clear</button>
+      <button id="opg-download">⬇ download JSON</button>
+      <label style="margin-left:12px;display:flex;align-items:center;gap:6px;">
+        <input id="opg-autoscroll" type="checkbox" checked> autoscroll
+      </label>
+      <span id="opg-stats" style="margin-left:auto;font:12px/1.35 monospace;color:#8fd;">
+        frames: 0 • events: 0
+      </span>
+    </div>
+
+    <div id="opg-tiles" style="display:grid;grid-template-columns:repeat(8,minmax(110px,1fr));gap:8px;margin-bottom:8px;font:12px/1.35 monospace;">
+      <div class="tile" data-k="detect"  style="padding:8px;border:1px solid #2a6;border-radius:6px;">detect:<b>?</b></div>
+      <div class="tile" data-k="pose"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">pose:<b>?</b></div>
+      <div class="tile" data-k="armed"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">armed:<b>?</b></div>
+      <div class="tile" data-k="trail"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">trail:<b>0</b></div>
+      <div class="tile" data-k="arc"     style="padding:8px;border:1px solid #2a6;border-radius:6px;">arc pts:<b>0</b></div>
+      <div class="tile" data-k="hoop"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">hoop:<b>?</b></div>
+      <div class="tile" data-k="frame"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">an frame:<b>0</b></div>
+      <div class="tile" data-k="gate"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">gate:<b>—</b></div>
+    </div>
+
+    <div style="border:1px solid #2a6;border-radius:8px;overflow:hidden;">
+      <table id="opg-table" style="width:100%;border-collapse:collapse;font:12px/1.35 monospace;">
+        <thead style="position:sticky;top:0;background:#0b0f12;">
+          <tr>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">frame</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">tMs</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">detN</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">ball(x,y)</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">trail</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">arc</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">gate</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">release</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">summary</th>
+            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">top det</th>
+          </tr>
+        </thead>
+        <tbody id="opg-tbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <script>
+  (function onePageDebug(){
+    if (window.__opgInstalled) return; window.__opgInstalled = true;
+
+    const MAX_ROWS = 800;
+    const ledger = new Map();
+    let paused = false, events = 0;
+    const tiles = {}; document.querySelectorAll('#opg-tiles .tile').forEach(t=>tiles[t.dataset.k]=t.querySelector('b'));
+    const tBody = document.getElementById('opg-tbody');
+    const stats = document.getElementById('opg-stats');
+    const chkAuto = document.getElementById('opg-autoscroll');
+
+    const sink = window.__DBG || (window.__DBG = { buf:[], push(kind,data){ this.buf.push({t:Date.now(),kind,data}); if(this.buf.length>5000) this.buf.shift(); } });
+    function push(kind,data){ try{ sink.push(kind,data); }catch{} }
+
+    if (typeof window.__dbgLine === 'function'){
+      const prev = window.__dbgLine;
+      window.__dbgLine = (t)=>{ push('line',{t}); prev(t); };
+    } else {
+      window.__dbgLine = (t)=> push('line',{t});
+    }
+
+    const btnPause = document.getElementById('opg-pause');
+    const btnClear = document.getElementById('opg-clear');
+    const btnDown  = document.getElementById('opg-download');
+    btnPause.onclick = ()=>{ paused = !paused; btnPause.textContent = paused ? '▶ resume' : '⏸ pause'; };
+    btnClear.onclick = ()=>{
+      ledger.clear(); tBody.innerHTML = ''; events = 0;
+      stats.textContent = 'frames: 0 • events: 0';
+    };
+    btnDown.onclick = ()=>{
+      const blob = new Blob([JSON.stringify({records: sink.buf, frames:[...ledger.values()]}, null, 2)], {type:'application/json'});
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = `doach-onepage-debug-${Date.now()}.json`; a.click();
+    };
+
+    function F(){ return Number(window.__AN_IDX)||0; }
+    function rowFor(frame){
+      let r = ledger.get(frame);
+      if (!r){
+        r = { frame, tMs: Date.now(), detN: 0, ball: '', trail: 0, arc: 0, gate: '', release: '', summary: '', top: '' };
+        ledger.set(frame, r);
+        if (ledger.size > MAX_ROWS){
+          const firstKey = ledger.keys().next().value; ledger.delete(firstKey);
+          const firstTr = tBody.querySelector('tr'); firstTr && firstTr.remove();
+        }
+      }
+      return r;
+    }
+    function top3(dets){
+      return (dets||[]).slice(0,3).map(d=>`${d.label||d.class||d.type}:${(d.score??d.confidence??0).toFixed(2)}`).join(', ');
+    }
+
+    window.addEventListener('objects:frame', e=>{
+      const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
+      events++;
+      const r = rowFor(f); r.tMs = d.tMs||Date.now(); r.detN = (d.dets||[]).length; r.top = top3(d.dets);
+      push('objects:frame',{frame:f,n:r.detN,top:r.top});
+    }, {passive:true});
+
+    window.addEventListener('ball:point', e=>{
+      const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
+      events++;
+      const r = rowFor(f); r.ball = `${Math.round(d.x)},${Math.round(d.y)} (${(d.conf||0).toFixed(2)})`;
+      push('ball:point',{frame:f,x:d.x,y:d.y,conf:d.conf,via:d.via});
+    }, {passive:true});
+
+    window.addEventListener('ball:trail-step', e=>{
+      const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
+      events++;
+      const r = rowFor(f); r.trail = d.len|0;
+      push('ball:trail-step',{frame:f,len:d.len});
+
+      const arc = window.ballArc || {};
+      const pts = (Array.isArray(arc.refinedTrail) ? arc.refinedTrail.length : (Array.isArray(arc.trail) ? arc.trail.length : 0))|0;
+      tiles.arc.textContent = pts;
+      push('arc:health',{points:pts});
+    }, {passive:true});
+
+    window.addEventListener('shot:release', e=>{
+      const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
+      events++;
+      const r = rowFor(f); r.release = d.via || 'gate';
+      push('shot:release',{frame:f,via:d.via});
+    }, {passive:true});
+
+    window.addEventListener('shot:summary', e=>{
+      const s = e.detail||{}, f = Number.isFinite(s.frame) ? s.frame : F();
+      events++;
+      const r = rowFor(f); r.summary = `made:${s.made} arcH:${s.arcHeight} rel:${s.releaseAngle} entry:${s.entryAngle}`;
+      push('shot:summary',{frame:f,made:s.made,arcH:s.arcHeight,rel:s.releaseAngle,entry:s.entryAngle});
+    }, {passive:true});
+
+    window.addEventListener('gate:block', e=>{
+      const d = e.detail||{}, f = F();
+      events++; const r = rowFor(f); r.gate = `block:${d.reason}`;
+      push('gate:block',{frame:f,reason:d.reason,extra:d.extra});
+    }, {passive:true});
+
+    window.addEventListener('gate:released', e=>{
+      const d = e.detail||{}, f = Number.isFinite(d.frame) ? d.frame : F();
+      events++; const r = rowFor(f); r.gate = 'released';
+      push('gate:released',{frame:f});
+    }, {passive:true});
+
+    window.addEventListener('hoop:locked', e=>{
+      const b = e?.detail?.box || window.getCanonicalHoopBox?.() || window.getLockedHoopBox?.() || {};
+      tiles.hoop.textContent = Number.isFinite(b.x) ? 'true' : 'false';
+      push('hoop:locked',{box:b});
+    }, {passive:true});
+
+    setInterval(()=>{
+      try{
+        const bs = window.ballState || {};
+        const arc = window.ballArc || {};
+        const trailLen = Array.isArray(bs.trail) ? bs.trail.length : 0;
+        const arcPts = Array.isArray(arc.refinedTrail) ? arc.refinedTrail.length : (Array.isArray(arc.trail) ? arc.trail.length : 0);
+        tiles.detect.textContent = window.__DETECT_SOURCE || 'unknown';
+        tiles.pose.textContent   = !!window.__POSE_WARMUP_OK;
+        tiles.armed.textContent  = !!window.__shotTrackingArmed;
+        tiles.trail.textContent  = trailLen;
+        tiles.frame.textContent  = Number(window.__AN_IDX)||0;
+        stats.textContent = `frames: ${ledger.size} • events: ${events}`;
+      }catch{}
+    }, 400);
+
+    function render(){
+      if (!paused){
+        const rows = [...ledger.values()].sort((a,b)=>a.frame-b.frame).slice(-300);
+        const html = rows.map(r=>(
+          `<tr>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.frame}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.tMs}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.detN}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.ball}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.trail}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.arc}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.gate}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.release}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.summary}</td>
+            <td style="padding:4px 6px;border-top:1px solid #163;">${r.top}</td>
+          </tr>`
+        )).join('');
+        tBody.innerHTML = html;
+        if (chkAuto.checked) tBody.parentElement.scrollTop = tBody.parentElement.scrollHeight;
+      }
+      requestAnimationFrame(render);
+    }
+    render();
+
+    console.log('[One-Page Debug] ready');
+  })();
+  </script>
 </body>
 </html>

@@ -1232,6 +1232,11 @@ window.addEventListener('microclip:done', (event) => {
       let lastTrailPoint = null;
       let lastTrailMs = NaN;
       try {
+        const frameId = Number(e?.detail?.frame ?? window.__AN_IDX ?? 0);
+        if (Number.isFinite(frameId)) {
+          if (window.__lastReleaseFrame === frameId) { e.stopImmediatePropagation(); return; }
+          window.__lastReleaseFrame = frameId;
+        }
         const detail = e?.detail || {};
         if (detail?.bypassGate === true) {
           window.__dbgLine?.('[gate:bypass] dev');
@@ -1289,7 +1294,7 @@ window.addEventListener('microclip:done', (event) => {
           const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
           const insideStreak = Number(window.ballState?._proxInsideStreak || 0);
           const needInside = Number(window.PROX_IN_CONSEC_MIN ?? 2);
-          const frameIdx = Number(e?.detail?.frame ?? window.__REL_LAST_FRAME ?? NaN);
+          const frameIdx = Number.isFinite(frameId) ? frameId : Number(window.__REL_LAST_FRAME ?? NaN);
           if (!Number.isFinite(enter) && insideStreak < needInside) {
             window.__releaseEventSent = false;
             window.__dbgBlock?.('prox-inside', { streak: insideStreak, needInside });
