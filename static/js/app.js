@@ -28,6 +28,8 @@ window.BALL_LABELS        = ['ball', 'basketball', 'sports_ball', 'sports ball']
 window.MIN_TRAIL_TO_ARM   = 1;           // at least one fresh sample post-arm
 window.__FORCE_LOCAL_DETECTOR__ = window.__FORCE_LOCAL_DETECTOR__ ?? false;
 window.__DEV_ALLOW_STALE_TRAIL__ = false; // set true via console only when debugging
+window.__pipelineStats = window.__pipelineStats || { detectorBall: 0, motionBall: 0, missingBall: 0, detectorFrames: 0 };
+window.__configSnapshot = window.__configSnapshot || {};
 
 
 // pose detection global settings
@@ -55,6 +57,50 @@ window.__DETECT_SOURCE ??= 'unknown';
 window.__REL_LAST_FRAME ??= null;
 window.__lastReleaseFrame ??= null;
 window.__lastReleaseTs ??= 0;
+
+function __cloneForLog(obj) {
+  try { return JSON.parse(JSON.stringify(obj)); } catch { return null; }
+}
+
+function updatePipelineStats(partial = {}) {
+  const stats = (window.__pipelineStats ||= { detectorBall: 0, motionBall: 0, missingBall: 0, detectorFrames: 0 });
+  if (partial && typeof partial === 'object') Object.assign(stats, partial);
+  stats.totalBallPoints = (stats.detectorBall || 0) + (stats.motionBall || 0);
+  stats.updatedAt = performance.now();
+  try {
+    const detail = __cloneForLog(stats) || { ...stats };
+    window.dispatchEvent(new CustomEvent('pipeline:stats', { detail }));
+    window.__DBG?.push?.('pipeline:stats', detail);
+  } catch {}
+}
+window.updatePipelineStats = updatePipelineStats;
+
+function updateConfigSnapshot(partial = {}) {
+  try {
+    const snap = Object.assign(window.__configSnapshot || {}, partial || {});
+    window.__configSnapshot = snap;
+    const detail = __cloneForLog(snap) || { ...snap };
+    window.dispatchEvent(new CustomEvent('config:update', { detail }));
+    window.__DBG?.push?.('config:update', detail);
+  } catch (err) {
+    try { console.warn('[config:update] snapshot failed', err); } catch {}
+  }
+}
+window.updateConfigSnapshot = updateConfigSnapshot;
+
+updateConfigSnapshot({
+  detectSource: window.__DETECT_SOURCE,
+  ball: { labels: [...window.BALL_LABELS], minScore: window.BALL_MIN_SCORE },
+  gate: {
+    minTrailBeforeRelease: window.REL_MIN_TRAIL_BEFORE_RELEASE,
+    proxLagFrames: window.REL_PROX_MAX_LAG_FRAMES ?? null,
+    cooldownMs: window.REL_COOLDOWN_MS ?? window.REL_CFG?.cooldownMs ?? null
+  },
+  app: {
+    build: window.__APP_BUILD ?? null
+  }
+});
+updatePipelineStats();
 
 // ==== Debug Panel (toggleable) ===============================================
 (function installDebugPanel(){
@@ -256,6 +302,7 @@ function chooseDetector() {
       window.__DETECT_SOURCE = 'server';
       window.__dbgLine?.('[ServerDetector] enabled');
     }
+    updateConfigSnapshot({ detectSource: window.__DETECT_SOURCE });
   } catch (err) {
     console.warn('[LocalDetector] chooser error', err);
   }

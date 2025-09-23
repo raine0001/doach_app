@@ -1086,6 +1086,8 @@ export function drawLiveOverlay(objects = [], playerState) {
 let isDetectingFrame = false;
 const reusableYOLOCanvas = document.createElement("canvas");
 const reusableYOLOCtx = reusableYOLOCanvas.getContext("2d");
+window.__detStartTimes = window.__detStartTimes || new Map();
+window.__detLatencyHistory = window.__detLatencyHistory || [];
 
 // ------------------------------------------------------------------------------------//
 //    Capture the *real* pixels and send to YOLO.
@@ -1150,17 +1152,42 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
   if (!window.__detWorker) return;
 
   const emitDetections = (dets, frameIndex, tMs, via='detector') => {
+    const items = Array.isArray(dets) ? dets : [];
+    const summary = items.slice(0, 3).map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
+    let latency = null;
+    const startMap = window.__detStartTimes;
+    if (startMap && startMap.has(frameIndex)) {
+      latency = Math.max(0, tMs - startMap.get(frameIndex));
+      startMap.delete(frameIndex);
+    }
+
     try { window.__DETECT_SOURCE = via; } catch {}
-    try {
-      window.dispatchEvent(new CustomEvent('objects:frame', { detail: { dets: dets || [], frame: frameIndex, tMs, via } }));
-    } catch {}
+
+    const detail = { dets: items, frame: frameIndex, tMs, via, summary };
+    if (latency != null) detail.latency = latency;
+    try { window.dispatchEvent(new CustomEvent('objects:frame', { detail })); } catch {}
+
+    const stats = window.__pipelineStats;
+    if (stats) {
+      stats.detectorFrames = (stats.detectorFrames || 0) + 1;
+    }
+
+    if (latency != null) {
+      const hist = window.__detLatencyHistory || (window.__detLatencyHistory = []);
+      hist.push(latency);
+      if (hist.length > 200) hist.shift();
+      const sorted = [...hist].sort((a, b) => a - b);
+      const p50 = sorted[Math.floor(sorted.length * 0.5)] || latency;
+      const p95 = sorted[Math.floor(sorted.length * 0.95)] || latency;
+      window.updatePipelineStats?.({ detectorLatencyP50: Math.round(p50), detectorLatencyP95: Math.round(p95) });
+    }
 
     const BALL_LABELS = ['ball', 'basketball', 'sports_ball'];
     const MIN_SCORE = Number(window.BALL_MIN_SCORE ?? 0.3);
     const isBallLabel = (s) => !!s && BALL_LABELS.includes(String(s).toLowerCase());
 
     let chosen = null;
-    for (const d of dets || []) {
+    for (const d of items) {
       const lab = d?.label ?? d?.class ?? d?.type;
       const sc = d?.score ?? d?.confidence ?? 0;
       const box = d?.bbox ?? d?.box ?? d?.rect;
@@ -1189,12 +1216,22 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
     }
 
     if (chosen) {
-      const detail = { x: chosen.x, y: chosen.y, conf: chosen.conf, frame: frameIndex, tMs, via };
+      detail.ball = { x: chosen.x, y: chosen.y, conf: chosen.conf };
       try { window.__lastDetectorBallFrame = frameIndex; } catch {}
-      try { window.dispatchEvent(new CustomEvent('ball:point', { detail })); } catch {}
+      try { window.dispatchEvent(new CustomEvent('ball:point', { detail: { x: chosen.x, y: chosen.y, conf: chosen.conf, frame: frameIndex, tMs, via: via } })); } catch {}
       try { window.__dbgLine?.(`[det→ball] f=${frameIndex} conf=${chosen.conf.toFixed(2)} @(${Math.round(chosen.x)},${Math.round(chosen.y)})`); } catch {}
+      if (stats) {
+        stats.detectorBall = (stats.detectorBall || 0) + 1;
+        window.updatePipelineStats?.();
+      }
     } else {
+      detail.ball = null;
       try { window.__dbgLine?.(`[det] no ball in f=${frameIndex}`); } catch {}
+      try { window.dispatchEvent(new CustomEvent('detector:no-ball', { detail: { frame: frameIndex, summary, count: items.length, via, latency } })); } catch {}
+      if (stats) {
+        stats.missingBall = (stats.missingBall || 0) + 1;
+        window.updatePipelineStats?.();
+      }
     }
 
     return chosen;
@@ -1204,6 +1241,13 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
 
   window.__detWorker.onmessage = (e) => {
     const m = e.data || {};
+    if (m.type === 'detector:ep') {
+      try {
+        window.__DETECT_EP = m.ep;
+        window.updateConfigSnapshot?.({ detectSource: window.__DETECT_SOURCE, detector: { provider: m.ep, model: m.model || null, threads: m.threads ?? null, wasmSimd: m.simd ?? null } });
+      } catch {}
+      return;
+    }
     if (m.type === 'ready') { window.__detReady = true; return; }
     if (m.type === 'result') {
       const p = window.__detPending.get(m.frameIndex);
@@ -1247,6 +1291,13 @@ try {
       window.__detReady = false; window.__detPending = new Map();
       window.__detWorker.onmessage = (e) => {
         const m = e.data || {};
+        if (m.type === 'detector:ep') {
+          try {
+            window.__DETECT_EP = m.ep;
+            window.updateConfigSnapshot?.({ detectSource: window.__DETECT_SOURCE, detector: { provider: m.ep, model: m.model || null, threads: m.threads ?? null, wasmSimd: m.simd ?? null } });
+          } catch {}
+          return;
+        }
         if (m.type === 'ready') { window.__detReady = true; return; }
         if (m.type === 'result') {
           const p = window.__detPending.get(m.frameIndex);
@@ -1373,6 +1424,10 @@ export async function sendFrameToDetect(canvas, frameIndex) {
     const OH = ohFromVid || (canvas?.height || 0);
     if (!(OW > 0 && OH > 0)) return { objects: window.__detCache.objects, frameIndex, _source: 'size-not-ready' };
 
+    if (Number.isFinite(frameIndex)) {
+      try { window.__detStartTimes?.set(frameIndex, performance.now()); } catch {}
+    }
+
     let out;
     if (!window.__forceServerDetect && window.__detWorker && window.__detReady) {
       out = await detectViaWorker(canvas, frameIndex, OW, OH);
@@ -1387,6 +1442,7 @@ export async function sendFrameToDetect(canvas, frameIndex) {
     return out;
   } catch (e) {
     console.warn('[detect] exception:', e);
+    try { window.__detStartTimes?.delete(frameIndex); } catch {}
     return { objects: window.__detCache.objects, frameIndex, _source: 'exception-cache' };
   } finally {
     __detBusy = false;
