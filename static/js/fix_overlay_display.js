@@ -149,6 +149,21 @@ try {
   }
 } catch {}
 
+try {
+  window.localDetectorAvailable = function localDetectorAvailable() {
+    return !!(window.__detWorker && window.__detReady);
+  };
+  window.useServerDetector = function useServerDetector() {
+    window.__forceServerDetect = true;
+    window.__LOCAL_DETECTOR = false;
+    try { window.__detWorker?.terminate?.(); } catch {}
+    window.__detWorker = null;
+    window.__detReady = false;
+    window.__detPending = new Map();
+    console.log('[LocalDetector] switched to server detector');
+  };
+} catch {}
+
 // Alias for older callers/tests: lock overlay to current video rect and DPR buffer
 export function lockOverlayToVideo() { try { return syncOverlayToVideo(); } catch {} }
 
@@ -1041,7 +1056,8 @@ export function drawLiveOverlay(objects = [], playerState) {
 
       if (label === 'player' && ap) continue;
       if (label === 'player'     && show.player     === false) continue;
-      if (label === 'basketball' && show.ball       === false) continue;
+      const isBall = window.isBallLabel?.(label) ?? (label === 'basketball');
+      if (isBall && show.ball === false) continue;
       if (label === 'hoop'       && show.hoop       === false) continue;
       if (label === 'backboard'  && show.backboard  === false) continue;
       if (label === 'net'        && show.net        === false) continue;
@@ -1117,10 +1133,15 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
   window.__detBootstrapped = true;
   // Respect toggles: when forced to server or local detector disabled, do NOT create the worker
   try {
-    if (window.__forceServerDetect || window.__LOCAL_DETECTOR === false) {
+    const forcedLocal = window.__FORCE_LOCAL_DETECTOR__ === true;
+    if (!forcedLocal && (window.__forceServerDetect || window.__LOCAL_DETECTOR === false)) {
       console.log('[LocalDetector] disabled; using server detector.');
       window.__detWorker = null; window.__detReady = false; window.__detPending = new Map();
       return;
+    }
+    if (forcedLocal) {
+      window.__forceServerDetect = false;
+      window.__LOCAL_DETECTOR = true;
     }
   } catch {}
   try { window.__detWorker = new Worker('/static/js/detector.worker.js', { name: 'detector' }); } catch (e) { window.__detWorker = null; }
@@ -1157,7 +1178,12 @@ try {
       if (window.__detWorker && window.__detReady) return true;
     } catch {}
     try {
-      if (window.__forceServerDetect || window.__LOCAL_DETECTOR === false) return false;
+      const forcedLocal = window.__FORCE_LOCAL_DETECTOR__ === true;
+      if (!forcedLocal && (window.__forceServerDetect || window.__LOCAL_DETECTOR === false)) return false;
+      if (forcedLocal) {
+        window.__forceServerDetect = false;
+        window.__LOCAL_DETECTOR = true;
+      }
       window.__detWorker = new Worker('/static/js/detector.worker.js', { name: 'detector' });
       window.__detReady = false; window.__detPending = new Map();
       window.__detWorker.onmessage = (e) => {
@@ -1203,6 +1229,11 @@ async function detectViaServer(canvas, frameIndex, OW, OH) {
     if (!res.ok) return { objects: window.__detCache.objects, frameIndex, _source: 'server-error' };
     const out = await res.json();
     out._source = 'server';
+    try {
+      if (Array.isArray(out?.objects)) {
+        window.ingestServerDetections?.(out.objects, performance.now(), frameIndex);
+      }
+    } catch {}
     return out;
   } catch {
     // never return empty on failure — reuse cache

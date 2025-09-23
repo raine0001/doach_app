@@ -11,6 +11,13 @@ function poseDetectSerial() {
   try { return window.poseDetectSerial?.() || null; } catch { return null; }
 }
 
+function isBallLabelLocal(label) {
+  try {
+    if (typeof window.isBallLabel === 'function') return !!window.isBallLabel(label);
+  } catch {}
+  return String(label).toLowerCase() === 'basketball';
+}
+
 // Detect with optional ROI crop around hoop proximity (backend slow-play near hoop)
 async function detectWithROI(buf, frameIdx, hoopLockedGuess = null) {
   try {
@@ -106,7 +113,7 @@ function updateProxStamps(frameIdx, ballCenter, hoopLocked) {
 function pickBallCenter(objects, player, hoopLocked) {
   try {
     const balls = (objects || [])
-      .filter(o => o && o.label === 'basketball' && Array.isArray(o.box))
+      .filter(o => o && isBallLabelLocal(o.label) && Array.isArray(o.box))
       .map(o => {
         const [x1,y1,x2,y2] = o.box; return { cx:(x1+x2)/2, cy:(y1+y2)/2, w:(x2-x1), h:(y2-y1), o };
       })
@@ -333,7 +340,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
   if (!updatedThisTick) {
     try {
       const pick = (objects || [])
-        .filter(o => o.label === 'basketball' && Array.isArray(o.box))
+        .filter(o => isBallLabelLocal(o.label) && Array.isArray(o.box))
         .map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) }))
         .sort((a,b)=> b.area - a.area)[0];
       if (pick && hoopLocked) {
@@ -658,8 +665,12 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
           try {
             const poseResLive = await poseDetectSerial();
             try { if (window.POSE_DEBUG === true) console.log('[pose:analyzer]', { frame: frameIdx, ok: !!(poseResLive?.landmarks?.length), n: (Array.isArray(poseResLive?.landmarks?.[0]) ? poseResLive.landmarks[0].length : (poseResLive?.landmarks?.length || 0)) }); } catch {}
+            window.updatePoseWarmup?.(poseResLive);
             poses = Array.isArray(poseResLive?.landmarks) ? poseResLive.landmarks : [];
-          } catch { poses = []; }
+          } catch {
+            poses = [];
+            window.updatePoseWarmup?.(null);
+          }
         }
       } else {
         const [det, poseRes] = await Promise.all([
@@ -677,8 +688,12 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
               if (window.__FORCE_POSE_BG && !window.DEBUG_FORCE_POSE_ACTIVE) return null;
               const r = await poseDetectSerial();
               try { if (window.POSE_DEBUG === true) console.log('[pose:analyzer]', { frame: frameIdx, ok: !!(r?.landmarks?.length), n: (Array.isArray(r?.landmarks?.[0])? r.landmarks[0].length : (r?.landmarks?.length||0)) }); } catch {}
+              window.updatePoseWarmup?.(r);
               return r;
-            } catch { return null; }
+            } catch {
+              window.updatePoseWarmup?.(null);
+              return null;
+            }
           })()
         ]);
         objects = det?.objects ?? [];
@@ -703,7 +718,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
         updatePlayerTracker?.(poses[0], frameIdx);
       }
       // Ball update first
-      let ballCanvas = null; const pick = (objects || []).filter(o => o.label === 'basketball' && Array.isArray(o.box)).map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) })).sort((a,b)=> b.area - a.area)[0];
+      let ballCanvas = null; const pick = (objects || []).filter(o => isBallLabelLocal(o.label) && Array.isArray(o.box)).map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) })).sort((a,b)=> b.area - a.area)[0];
       if (pick) {
         const [x1,y1,x2,y2] = pick.o.box; const cx = (x1+x2)/2, cy = (y1+y2)/2;
         const last = window.ballState?.trail?.at?.(-1) || null; const maxStep = Number(window.BALL_MAX_STEP || 40) * 1.8;

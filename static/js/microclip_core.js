@@ -2,6 +2,13 @@ const DETECTOR_MODEL_URL = '/static/models/best.onnx';
 const DETECTOR_FALLBACK_URL = '/static/models/backup_best.onnx';
 const DETECTOR_LABELS = ['basketball', 'hoop', 'net', 'backboard', 'player'];
 
+function isBallLabel(label) {
+  try {
+    if (typeof window.isBallLabel === 'function') return !!window.isBallLabel(label);
+  } catch {}
+  return String(label).toLowerCase() === 'basketball';
+}
+
 let detectorWorker = null;
 let detectorReady = false;
 let detectorReadyPromise = null;
@@ -275,7 +282,7 @@ function refineBallWithROI(ctx, lastPt, win = 18) {
 
 function pickBallCenter(objects, lastBall, allowLoose = false, maxStep = 60) {
   const balls = (objects || [])
-    .filter(o => o && o.label === 'basketball' && Array.isArray(o.box))
+    .filter(o => o && isBallLabel(o.label) && Array.isArray(o.box))
     .map(o => {
       const [x1, y1, x2, y2] = o.box;
       return { cx: (x1 + x2) / 2, cy: (y1 + y2) / 2, area: Math.max(1, (x2 - x1) * (y2 - y1)) };
@@ -473,7 +480,7 @@ async function detectWithROI(ctx, canvas, hoop, frameIdx) {
     frameIdx
   });
   const objects = detection.objects || [];
-  const hasBall = objects.some(o => o?.label === 'basketball');
+  const hasBall = objects.some(o => isBallLabel(o?.label));
   if (hasBall) return objects;
   return await fullDetect();
 }

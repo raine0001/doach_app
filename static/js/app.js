@@ -7,19 +7,27 @@ import { initOverlay, drawLiveOverlay, sendFrameToDetect,
          syncOverlayToVideo, updateDebugOverlay, ensureOverlayCss,
          installOverlayTracer, removeOverlayTracer } from './fix_overlay_display.js';
 import { analyzeVideoFrameByFrame as runAnalyzer } from './analyzer.js';
-import { resetShotStats, checkShotConditions, detectNetMotion, 
-         drawNetMotionStatus, bufferDetectedObjects, scoringTick, 
+import { resetShotStats, checkShotConditions, detectNetMotion,
+         drawNetMotionStatus, bufferDetectedObjects, scoringTick,
          isBallInProximityZone } from './shot_logger.js';
 import { playerState, resetPlayerTracker, updatePlayerTracker, initPoseDetector, markRelease as poseMarkRelease } from './player_tracker.js';
 import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, filterObjectsToLockedHoop } from './hoop_tracker.js';
 import { createPlaybackControls, initHUDForVideo } from './video_ui.js';
-import { ballState, updateBall, resetAll, stepFBFArc, fillArcGaps} from './ball_tracker.js';
+import { ballState, updateBall, resetAll, stepFBFArc, fillArcGaps } from './ball_tracker.js';
 import { disposeFrameCollection as disposeMicroClipFrameCollection, serializeError as serializeMicroclipError } from './microclip_core.js';
 // Load shot arc FSM (release/exit timing); available for incremental adoption
 import { resetShotFSM as _arcReset, updateShotArcTick as _arcTick, proxFromHoop } from './shot_arc.js';
 import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.js';
 import { mountPrefs } from './ui_prefs.js';
 import { initReleaseConfig, releaseGate } from './release_gate.js';
+
+// Global defaults (overridable via console when needed)
+window.POSE_WARMUP_FRAMES = 20;          // frames of ok pose before warm status
+window.BALL_MIN_SCORE     = 0.30;        // min detector conf for ball
+window.BALL_LABELS        = ['ball', 'basketball', 'sports_ball', 'sports ball'];
+window.MIN_TRAIL_TO_ARM   = 1;           // at least one fresh sample post-arm
+window.__FORCE_LOCAL_DETECTOR__ = true;  // prefer local worker while stabilizing
+window.__DEV_ALLOW_STALE_TRAIL__ = false; // set true via console only when debugging
 
 
 // pose detection global settings
@@ -37,8 +45,10 @@ window.REL_MIN_SEP_MS      ??= 500;    // min ms between releases
 window.__armWhenReadyTimer ??= null;
 window.__readyForScoring ??= false;
 window.__POSE_WARMUP_OK ??= false;
+window.__POSE_STREAK__ ??= 0;
 window.__readyForScoringArmedAtMs ??= 0;
 window.__readyForScoringBallMsAtArm ??= 0;
+window.__armedAtMs ??= 0;
 
 window.__REL_LAST_FRAME ??= null;
 
@@ -156,6 +166,152 @@ if (typeof window.__dbgMicroclip !== 'function') {
       try { window.__dbgLine?.(`[microclip:${type}] ${String(payload)}`); } catch {}
     }
   };
+}
+
+function isBallLabel(label) {
+  if (label == null) return false;
+  try {
+    const list = Array.isArray(window.BALL_LABELS) ? window.BALL_LABELS : [];
+    const needle = String(label).toLowerCase();
+    return list.includes(needle);
+  } catch {
+    return false;
+  }
+}
+window.isBallLabel = isBallLabel;
+
+function updatePoseWarmup(resultOrBool) {
+  const ok = typeof resultOrBool === 'object'
+    ? !!(resultOrBool?.landmarks?.length)
+    : !!resultOrBool;
+  const prev = Number(window.__POSE_STREAK__ || 0);
+  const streak = ok ? prev + 1 : 0;
+  window.__POSE_STREAK__ = streak;
+  const need = Number(window.POSE_WARMUP_FRAMES ?? 20);
+  window.__POSE_WARMUP_OK = streak >= need;
+  try { window.__dbgLine?.(`[pose] ok=${ok} streak=${streak}`); } catch {}
+  return window.__POSE_WARMUP_OK;
+}
+window.updatePoseWarmup = updatePoseWarmup;
+
+function ingestServerDetections(dets, tMs = performance.now(), frame) {
+  let best = null;
+  try {
+    const items = Array.isArray(dets) ? dets : [];
+    const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
+    for (const d of items) {
+      const label = d?.label ?? d?.class ?? d?.type;
+      if (!isBallLabel(label)) continue;
+      const score = d?.score ?? d?.confidence ?? 1;
+      if (!Number.isFinite(score) || score < minScore) continue;
+      const box = d?.bbox ?? d?.box ?? d?.rect ?? null;
+      if (!box) continue;
+      let cx = null;
+      let cy = null;
+      if (Array.isArray(box) && box.length === 4) {
+        const [x1, y1, x2, y2] = box.map(Number);
+        if ([x1, y1, x2, y2].every(Number.isFinite)) {
+          cx = (x1 + x2) / 2;
+          cy = (y1 + y2) / 2;
+        }
+      } else {
+        const bx = Number(box.x ?? box.left ?? NaN);
+        const by = Number(box.y ?? box.top ?? NaN);
+        const bw = Number(box.w ?? box.width ?? ((box.right ?? NaN) - (box.x ?? box.left ?? 0)));
+        const bh = Number(box.h ?? box.height ?? ((box.bottom ?? NaN) - (box.y ?? box.top ?? 0)));
+        if ([bx, by, bw, bh].every(Number.isFinite)) {
+          cx = bx + bw / 2;
+          cy = by + bh / 2;
+        }
+      }
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      best = { x: cx, y: cy, score, tMs };
+      break;
+    }
+  } catch (err) {
+    console.warn('[server-dets] ingest error', err);
+  }
+  try {
+    if (best && typeof window.updateBall === 'function') {
+      const pt = { x: best.x, y: best.y, tMs: best.tMs, via: 'server', score: best.score };
+      const frameIdx = Number.isFinite(frame) ? frame : 0;
+      window.updateBall(pt, frameIdx);
+    }
+  } catch (err) {
+    console.warn('[server-dets] updateBall failed', err);
+  }
+}
+window.ingestServerDetections = ingestServerDetections;
+
+(function chooseDetectorPath() {
+  try {
+    const wantLocal = window.__FORCE_LOCAL_DETECTOR__ === true || window.localDetectorAvailable?.();
+    if (wantLocal) {
+      window.__forceServerDetect = false;
+      window.__LOCAL_DETECTOR = true;
+      if (window.enableLocalDetector?.()) {
+        console.log('[LocalDetector] enabled (forced)');
+      } else {
+        console.log('[LocalDetector] forcing local but awaiting readiness');
+      }
+    } else {
+      window.useServerDetector?.();
+    }
+  } catch (err) {
+    console.warn('[LocalDetector] chooser error', err);
+  }
+})();
+
+(function armLoop() {
+  if (window.__armLoopBound) return;
+  window.__armLoopBound = true;
+  const periodMs = 150;
+  setInterval(() => {
+    try {
+      const bs = window.ballState || {};
+      const trail = Array.isArray(bs.trail) ? bs.trail : [];
+      const last = trail.at?.(-1) || null;
+      const hoopOk = !!window.__hoopConfirmed || !!window.getLockedHoopBox?.();
+      const poseOk = !!window.__POSE_WARMUP_OK;
+      const minTrail = Number(window.MIN_TRAIL_TO_ARM ?? 1);
+      const trailOk = trail.length >= minTrail;
+      const ready = hoopOk && poseOk && trailOk;
+      if (ready) {
+        if (!window.__shotTrackingArmed) {
+          window.__shotTrackingArmed = true;
+          const armedAt = performance.now();
+          window.__armedAtMs = armedAt;
+          window.__readyForScoringArmedAtMs = armedAt;
+          const lastMs = Number(last?.tMs);
+          if (Number.isFinite(lastMs)) window.__readyForScoringBallMsAtArm = lastMs;
+          window.__dbgLine?.('[armed] ceremony satisfied');
+        }
+      } else if (window.__shotTrackingArmed) {
+        window.__shotTrackingArmed = false;
+        window.__armedAtMs = 0;
+        window.__readyForScoringArmedAtMs = 0;
+        window.__readyForScoringBallMsAtArm = 0;
+        window.__dbgLine?.('[disarm] requirement lost');
+      }
+    } catch (err) {
+      console.warn('[armLoop] error', err);
+    }
+  }, periodMs);
+})();
+
+if (!window.__dbgEvtsBound) {
+  window.__dbgEvtsBound = true;
+  window.addEventListener('shot:release', (e) => {
+    const detail = e?.detail || {};
+    window.__dbgLine?.(`[release] via=${detail.via ?? 'unknown'} f=${detail.frame ?? 'n/a'}`);
+  });
+  window.addEventListener('shot:summary', (e) => {
+    const s = e?.detail || {};
+    window.__dbgLine?.(`[summary] made=${s.made} arcH=${s.arcHeight} rel=${s.releaseAngle} entry=${s.entryAngle}`);
+  });
+  window.addEventListener('shot:end', () => {
+    window.__dbgLine?.('[shot:end]');
+  });
 }
 
 const MICROCLIP_BUFFER_DEFAULT_MS = 3800;
@@ -382,6 +538,10 @@ function disarmRelease(reason = 'pending') {
   }
 }
 
+function markPoseWarmStatus(resultOrOk) {
+  updatePoseWarmup(resultOrOk);
+}
+
 function scheduleArmWhenReady(delay = 320) {
   if (window.__hoopConfirmed !== true) return;
   if (window.__readyForScoring === true) return;
@@ -445,8 +605,29 @@ async function armWhenReady() {
   return true;
 }
 
-try { window.addEventListener('hoop:locked', () => { disarmRelease('hoop-locked'); scheduleArmWhenReady(0); }); } catch {}
-try { window.addEventListener('hoop:confirmed', () => { disarmRelease('hoop-confirmed'); scheduleArmWhenReady(0); }); } catch {}
+const __verifyHoopCanon = () => {
+  try {
+    const hb = window.getLockedHoopBox?.();
+    if (!hb || !Number.isFinite(hb?.x)) {
+      window.__dbgLine?.('[hoop] locked but missing canonical box - recomputing');
+      window.canonHoop?.(hb);
+    }
+  } catch {}
+};
+try {
+  window.addEventListener('hoop:locked', () => {
+    disarmRelease('hoop-locked');
+    __verifyHoopCanon();
+    scheduleArmWhenReady(0);
+  });
+} catch {}
+try {
+  window.addEventListener('hoop:confirmed', () => {
+    disarmRelease('hoop-confirmed');
+    __verifyHoopCanon();
+    scheduleArmWhenReady(0);
+  });
+} catch {}
 if (window.__hoopConfirmed === true) scheduleArmWhenReady(0);
 
 function ensureMicroClipWorkerManager() {
@@ -1017,6 +1198,19 @@ window.addEventListener('microclip:done', (event) => {
       let lastTrailPoint = null;
       let lastTrailMs = NaN;
       try {
+        const devAllowStaleTrail = (window.__DEV_ALLOW_STALE_TRAIL__ === true);
+        if (window.__shotTrackingArmed !== true) {
+          window.__releaseEventSent = false;
+          window.__dbgBlock?.('not-armed');
+          e.stopImmediatePropagation();
+          return;
+        }
+        if (window.__POSE_WARMUP_OK !== true) {
+          window.__releaseEventSent = false;
+          window.__dbgBlock?.('pose-not-warm', { streak: Number(window.__POSE_STREAK__ || 0), need: Number(window.POSE_WARMUP_FRAMES || 0) });
+          e.stopImmediatePropagation();
+          return;
+        }
         // Do not allow a release unless ball trail exists and is fresh (use ms, not frame deltas)
         try {
           const bs = window.ballState || {};
@@ -1036,12 +1230,18 @@ window.addEventListener('microclip:done', (event) => {
             window.__dbgBlock?.('ball-sample-missing', { hasPoint: !!lastTrailPoint });
             e.stopImmediatePropagation(); return;
           }
-          lastTrailMs = candidateMs;
-          if ((nowMs - candidateMs) > maxMs) {
+          const armedAt = Number(window.__armedAtMs || 0);
+          if (!devAllowStaleTrail && Number.isFinite(armedAt) && armedAt > 0 && candidateMs < armedAt) {
             window.__releaseEventSent = false;
-            window.__dbgBlock?.('ball-stale', { gapMs: Math.round(nowMs - candidateMs), maxMs });
+            window.__dbgBlock?.('fresh-trail-missing', { armedAt, lastTrail: candidateMs });
             e.stopImmediatePropagation(); return;
           }
+          if ((nowMs - candidateMs) > maxMs && !devAllowStaleTrail) {
+            window.__releaseEventSent = false;
+            window.__dbgBlock?.('fresh-trail-missing', { armedAt, lastTrail: candidateMs, ageMs: Math.round(nowMs - candidateMs) });
+            e.stopImmediatePropagation(); return;
+          }
+          lastTrailMs = candidateMs;
         } catch {}
 
         // Require a proximity streak (or segment-cross) before releases can pass
@@ -1068,29 +1268,6 @@ window.addEventListener('microclip:done', (event) => {
         // Startup anti-ghost: require readiness + pose warmup before any release can pass
         if (window.__readyForScoring !== true) {
           window.__dbgBlock?.('not-ready', { ready: window.__readyForScoring, poseWarm: window.__POSE_WARMUP_OK });
-          e.stopImmediatePropagation(); return;
-        }
-        try {
-          const armedAtMs = Number(window.__readyForScoringArmedAtMs || 0);
-          if (armedAtMs > 0) {
-            const sampleMs = Number.isFinite(lastTrailMs) ? lastTrailMs : Number(window.ballState?.trail?.at?.(-1)?.tMs);
-            if (!Number.isFinite(sampleMs)) {
-              window.__releaseEventSent = false;
-              window.__dbgBlock?.('ball-sample-missing', { sampleMs });
-              e.stopImmediatePropagation();
-              return;
-            }
-            const minBallMs = Number(window.__readyForScoringBallMsAtArm || armedAtMs);
-            if (Number.isFinite(minBallMs) && sampleMs < minBallMs) {
-              window.__releaseEventSent = false;
-              window.__dbgBlock?.('ball-before-arm', { sampleMs, minBallMs });
-              e.stopImmediatePropagation();
-              return;
-            }
-          }
-        } catch {}
-        if (window.__POSE_WARMUP_OK !== true) {
-          window.__dbgBlock?.('pose-warmup', { poseOk: window.__POSE_WARMUP_OK });
           e.stopImmediatePropagation(); return;
         }
         // Hard-stop guard at session cap/end
@@ -2134,8 +2311,7 @@ export function tickReadiness(objects, poses) {
     if (!window.__readyForScoring && __warmFrames >= WARM_NEED) {
       window.__readyForScoring = true;
       window.__detectorsWarmed = true;
-      window.__shotTrackingArmed = true;
-      console.log('[ready] âœ… armed (warm frames =', __warmFrames, ')');
+      console.log('[ready] warm frames met (', __warmFrames, ')');
     }
   } else {
     // Don't drop readiness while a shot is happening
@@ -2149,8 +2325,7 @@ export function tickReadiness(objects, poses) {
 
     if (window.__readyForScoring && __coolFrames >= COOL_NEED) {
       window.__readyForScoring = false;
-      console.log('[ready] â›” cooled (cool frames =', __coolFrames, ')');
-      window.__shotTrackingArmed = false;
+      console.log('[ready] cooled (cool frames =', __coolFrames, ')');
     }
   }
 }
@@ -3031,13 +3206,17 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
   }
 
   // 3) Player tracker (use your chosen pose)
+  let poseMarked = false;
   try {
     if (poses?.length) {
       const keypoints = poses[0];
       updatePlayerTracker?.(keypoints, frameIdx);
       playerState.keypoints = keypoints;
+      markPoseWarmStatus(true);
+      poseMarked = true;
     }
   } catch {}
+  if (!poseMarked) markPoseWarmStatus(false);
 
   // 4) Release/Proximity via shot_arc FSM (centralized)
   try {
@@ -3068,7 +3247,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
   // 6b) YOLO center (CANVAS â€” detector runs on buf == canvas size)
   if (!updatedThisTick) {
     try {
-      const ballObj = objects.find(o => o.label === 'basketball' && Array.isArray(o.box));
+      const ballObj = objects.find(o => isBallLabel(o.label) && Array.isArray(o.box));
       if (ballObj && hoopLocked) {
         const [x1,y1,x2,y2] = ballObj.box;
         const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;       // already CANVAS coords
@@ -3316,7 +3495,7 @@ async function runShotFBF() {
       if (H && typeof canonHoop === 'function' && typeof makeProxRectFromCanon === 'function') {
         const Hc = canonHoop(H);
         const prox = makeProxRectFromCanon(Hc);
-        const raw = objs.find(o => o.label==='basketball' && Array.isArray(o.box));
+        const raw = objs.find(o => isBallLabel(o.label) && Array.isArray(o.box));
         if (prox && raw) {
           const [x1,y1,x2,y2] = raw.box; const by = (y1+y2)/2;
           const m = Number(window.FBF_STOP_BELOW_MARGIN || 8);
@@ -3493,14 +3672,20 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
       updateActivePlayer?.(objects, frameIdx, canvasEl.width, canvasEl.height);
       let chosen = null;
       try { if (!window.__DISABLE_POSE_PICK) chosen = pickPoseForActive?.(poses, canvasEl, hoopLocked) || null; } catch {}
+      let poseMarked = false;
       if (chosen) {
         updatePlayerTracker?.(chosen.scaled, frameIdx);
         playerState.keypoints = chosen.scaled;
         playerState.box = [ chosen.box.x, chosen.box.y, chosen.box.x + chosen.box.w, chosen.box.y + chosen.box.h ];
+        markPoseWarmStatus(true);
+        poseMarked = true;
       } else if (Array.isArray(poses) && Array.isArray(poses[0]) && poses[0].length >= 33) {
         // Fallback: first pose in result (normalized â†’ scaled inside updatePlayerTracker)
         updatePlayerTracker?.(poses[0], frameIdx);
+        markPoseWarmStatus(true);
+        poseMarked = true;
       }
+      if (!poseMarked) markPoseWarmStatus(false);
 
       // (release/exit handled after ball update below)
 
@@ -3511,7 +3696,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
       // ---- Ball choose + update (VIDEOâ†’CANVAS mapping safe, strong fallback) ----
       // 1) best YOLO ball by area (DET is on buf==canvas, so boxes are CANVAS px)
       const ballDet = (objects || [])
-        .filter(o => o.label === 'basketball' && Array.isArray(o.box))
+      .filter(o => isBallLabel(o.label) && Array.isArray(o.box))
         .map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) }))
         .sort((a,b)=> b.area - a.area)[0];
 
@@ -4256,7 +4441,7 @@ function _ballCenter(objects) {
     let sx=0, sy=0; for (let i=tr.length-n; i<tr.length; i++) { sx+=tr[i].x; sy+=tr[i].y; }
     return { x: sx/n, y: sy/n };
   }
-  const ball = (objects||[]).find(o => o.label === 'basketball' && Array.isArray(o.box));
+  const ball = (objects||[]).find(o => isBallLabel(o.label) && Array.isArray(o.box));
   if (ball) {
     const [x1,y1,x2,y2] = ball.box;
     return { x:(x1+x2)/2, y:(y1+y2)/2 };
@@ -4507,10 +4692,6 @@ export function pickPoseForActive(poses, canvasEl, hoopBox) {
 // End Active Player â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
-// Choose the correct ball when several are on screen.
-// Relies on a tiny memory to track velocity between frames.
-const BALL_LABELS = new Set(['basketball', 'ball', 'sports ball']);
-
 // Tiny memory for prediction between YOLO hits
 const __ballMem = { x:null, y:null, vx:0, vy:0, area:null, has:false };
 
@@ -4540,7 +4721,7 @@ function centerize(b) {
 
 function pickBallCandidate(objects, hoopBox) {
   // 1) Filter to ball-like labels and normalize to centers
-  const balls = (objects || []).filter(o => BALL_LABELS.has(o.label || 'basketball'));
+  const balls = (objects || []).filter(o => isBallLabel(o.label));
   if (!balls.length) return null;
 
   const withCenters = balls.map(centerize).filter(Boolean);
@@ -4820,7 +5001,7 @@ window.resetShots = window.resetShots || function () {
         try { stabilizeLockedHoop?.(objects); } catch {}
 
         const ball = (objects||[])
-          .filter(o => o.label === 'basketball' && Array.isArray(o.box))
+          .filter(o => isBallLabel(o.label) && Array.isArray(o.box))
           .map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) }))
           .sort((a,b)=> b.area - a.area)[0];
         if (ball) { const [x1,y1,x2,y2] = ball.o.box; const cx=(x1+x2)/2, cy=(y1+y2)/2; try { updateBall?.({ x: cx, y: cy }, fidx); } catch {} }
@@ -4899,6 +5080,7 @@ window.resetShots = window.resetShots || function () {
             try { ensureOverlayCss?.(); syncOverlayToVideo?.(); } catch {}
             const first = (Array.isArray(poses) && Array.isArray(poses[0]) && poses[0].length >= 33) ? poses[0] : null;
             if (!first) {
+              markPoseWarmStatus(false);
               // keep last keypoints if current is empty to avoid blinking
             } else {
               try {
@@ -4906,6 +5088,7 @@ window.resetShots = window.resetShots || function () {
                 const fidx = Math.max(0, Math.round((v?.currentTime || 0) * fps));
                 updatePlayerTracker?.(first, fidx);
               } catch { updatePlayerTracker?.(first, frame); }
+              markPoseWarmStatus(true);
             }
             drawLiveOverlay?.(objects, window.playerState);
           }

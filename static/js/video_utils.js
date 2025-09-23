@@ -6,6 +6,13 @@ import { updateBall, ballState, markRelease } from './ball_tracker.js';
 import {playerState} from './player_tracker.js';
 import { attachHoop } from './app.js';
 
+function isBall(label) {
+  try {
+    if (typeof window.isBallLabel === 'function') return !!window.isBallLabel(label);
+  } catch {}
+  return String(label).toLowerCase() === 'basketball';
+}
+
 
 // ✅ Fixed canvas resolution (for internal logic)
 export const CANVAS_WIDTH = 1920;
@@ -106,7 +113,7 @@ export function animateOverlayLoop(frame) {
   const promptBar = document.getElementById('promptBar');
   const idx = (frame.__frameIdx ?? frame.frameIndex ?? 0);
 
-  const ballDet = objects.find(o => o.label === 'basketball' && Array.isArray(o.box));
+  const ballDet = objects.find(o => isBall(o.label) && Array.isArray(o.box));
   if (ballDet && lockedHoopBox) {
     const [x1,y1,x2,y2] = ballDet.box;
     const center = { x: (x1 + x2) / 2, y: (y1 + y2) / 2 };
@@ -149,7 +156,7 @@ export function animateOverlayLoop(frame) {
   drawLiveOverlay(objects, playerState);
 
   // Ball tracking + proximity-driven shot flow
-  const ball = objects.find(o => o.label === 'basketball');
+  const ball = objects.find(o => isBall(o.label));
   if (ball && lockedHoopBox) {
     updateBall(ball, idx);
 

@@ -128,9 +128,15 @@ export function updateBall(point, frameIndex) {
   if (!state.active) return false;
   if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
 
+  try { window.ballState = window.ballState || ballState; } catch {}
+  const bs = window.ballState || ballState;
+  if (!Array.isArray(bs.trail)) {
+    try { bs.trail = state.trail; } catch {}
+  }
+
   // Init KF if needed
   if (!state.kf) { state.kf = new Kalman2D(1, OPT.KF_PROCESS_NOISE, OPT.KF_MEASURE_NOISE); state.kf.initFrom(point.x, point.y); }
-  const nowMs = performance.now();
+  const sampleMs = Number.isFinite(point?.tMs) ? Number(point.tMs) : performance.now();
 
   // Fill small gaps and clamp large jumps relative to last recorded point
   const last = state.trail.at?.(-1) || null;
@@ -140,7 +146,7 @@ export function updateBall(point, frameIndex) {
     for (let i=1;i<=fillN;i++) {
       state.kf.predict(1);
       const px = state.kf.x[0], py = state.kf.x[1];
-      state.trail.push({ x:px, y:py, frame: last.frame + i , tMs: last.tMs ?? nowMs });
+      state.trail.push({ x:px, y:py, frame: last.frame + i , tMs: last.tMs ?? sampleMs });
     }
   }
 
@@ -157,13 +163,18 @@ export function updateBall(point, frameIndex) {
     if (d > OPT.MAX_STEP) { const r = OPT.MAX_STEP / d; sx = last.x + dx*r; sy = last.y + dy*r; }
   }
 
-  state.trail.push({ x: sx, y: sy, frame: frameIndex , tMs: nowMs });
+  state.trail.push({ x: sx, y: sy, frame: frameIndex , tMs: sampleMs });
+  try {
+    bs.state = 'TRACKING';
+  } catch {}
   try {
     const prev = state.trail.at?.(-2) || null;
     const curr = state.trail.at?.(-1) || null;
     const gapF = (prev && curr && Number.isFinite(prev.frame) && Number.isFinite(curr.frame)) ? (curr.frame - prev.frame) : 0;
     if (curr) {
       const detail = { frame: curr.frame, gapF, len: state.trail.length, x: curr.x, y: curr.y, tMs: curr.tMs };
+      if (point?.via) detail.via = point.via;
+      if (Number.isFinite(point?.score)) detail.score = Number(point.score);
       window.dispatchEvent?.(new CustomEvent('ball:trail-step', { detail }));
       try {
         const arc = window.ballArc || {};
