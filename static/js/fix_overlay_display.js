@@ -1156,7 +1156,14 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
       const p = window.__detPending.get(m.frameIndex);
       if (p) { window.__detPending.delete(m.frameIndex); if (p.tid) clearTimeout(p.tid); p.resolve({ ...m, _source:'worker' }); }
       // update cache even if no one was waiting (late worker result)
-      if (Array.isArray(m.objects)) window.__detCache = { objects: m.objects, frameIndex: m.frameIndex, _source: 'worker-late' };
+      if (Array.isArray(m.objects)) {
+        window.__detCache = { objects: m.objects, frameIndex: m.frameIndex, _source: 'worker-late' };
+        try {
+          window.dispatchEvent(new CustomEvent('localdet:frame', {
+            detail: { dets: m.objects, frame: m.frameIndex, tMs: performance.now(), via: 'local' }
+          }));
+        } catch {}
+      }
       return;
     }
     if (m.type === 'debug') { console.log(m.msg); return; }
@@ -1192,7 +1199,14 @@ try {
         if (m.type === 'result') {
           const p = window.__detPending.get(m.frameIndex);
           if (p) { window.__detPending.delete(m.frameIndex); if (p.tid) clearTimeout(p.tid); p.resolve({ ...m, _source:'worker' }); }
-          if (Array.isArray(m.objects)) window.__detCache = { objects: m.objects, frameIndex: m.frameIndex, _source: 'worker-late' };
+          if (Array.isArray(m.objects)) {
+            window.__detCache = { objects: m.objects, frameIndex: m.frameIndex, _source: 'worker-late' };
+            try {
+              window.dispatchEvent(new CustomEvent('localdet:frame', {
+                detail: { dets: m.objects, frame: m.frameIndex, tMs: performance.now(), via: 'local' }
+              }));
+            } catch {}
+          }
           return;
         }
         if (m.type === 'debug') { console.log(m.msg); return; }

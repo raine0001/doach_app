@@ -191,13 +191,17 @@ export function updateBall(arg1, arg2, arg3) {
     }
   }
 
+  const conf = Number.isFinite(meta?.conf)
+    ? Number(meta.conf)
+    : Number.isFinite(point?.score) ? Number(point.score) : 0;
+  const via = meta?.via ?? point?.via ?? 'unknown';
   const sample = {
     x: sx,
     y: sy,
     frame: frameIndex,
     tMs: sampleMs,
-    conf: Number.isFinite(meta?.conf) ? Number(meta.conf) : Number.isFinite(point?.score) ? Number(point.score) : undefined,
-    via: meta?.via ?? point?.via
+    conf,
+    via
   };
 
   state.trail.push(sample);
@@ -219,6 +223,9 @@ export function updateBall(arg1, arg2, arg3) {
         window.__dbgArcLast = msg;
         window.__dbgLine?.(msg);
       }
+    } catch {}
+    try {
+      window.__dbgLine?.(`[trail] len=${state.trail.length} f=${sample.frame} via=${sample.via || 'unknown'}`);
     } catch {}
   } catch {}
 

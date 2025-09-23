@@ -41,6 +41,7 @@ window.REL_MIN_BALL_POINTS ??= 3;      // minimum ball samples before release
 window.REL_MAX_BALL_MS     ??= 260;    // max ms since last ball point
 window.PROX_IN_CONSEC_MIN  ??= 2;      // inside-prox streak requirement
 window.REL_MIN_SEP_MS      ??= 500;    // min ms between releases
+window.REL_MIN_TRAIL_BEFORE_RELEASE ??= 4;
 
 window.__armWhenReadyTimer ??= null;
 window.__readyForScoring ??= false;
@@ -199,12 +200,10 @@ function ingestServerDetections(dets, tMs = performance.now(), frame) {
   try {
     const items = Array.isArray(dets) ? dets : [];
     try {
-      if (items.length) {
-        const summary = items.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
-        console.log('[server:det]', summary);
-      } else {
-        console.log('[server:det] none');
-      }
+      const summary = items.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
+      window.__dbgLine?.(`[det] ${summary || 'none'}`);
+      if (summary) console.log('[server:det]', summary);
+      else console.log('[server:det] none');
     } catch {}
     const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
     for (const d of items) {
@@ -236,19 +235,91 @@ function ingestServerDetections(dets, tMs = performance.now(), frame) {
       best = { x: cx, y: cy, score, tMs };
       break;
     }
+    const frameIdx = Number.isFinite(frame) ? Number(frame) : (Number(window.__AN_IDX) || 0);
+    window.dispatchEvent?.(new CustomEvent('objects:frame', {
+      detail: { dets: items, frame: frameIdx, tMs, via: 'server' }
+    }));
   } catch (err) {
     console.warn('[server-dets] ingest error', err);
   }
-  try {
-    if (best && typeof window.updateBall === 'function') {
-      const meta = { frame, tMs: best.tMs, conf: best.score, via: 'server' };
-      window.updateBall(best.x, best.y, meta);
-    }
-  } catch (err) {
-    console.warn('[server-dets] updateBall failed', err);
-  }
+  return best;
 }
 window.ingestServerDetections = ingestServerDetections;
+
+(function installBallIngest(){
+  if (window.__ballIngestInstalled) return;
+  window.__ballIngestInstalled = true;
+
+  function getBallLabels() {
+    const fromWindow = Array.isArray(window.BALL_LABELS) ? window.BALL_LABELS : null;
+    return fromWindow || ['ball', 'basketball', 'sports_ball'];
+  }
+
+  function isBallLbl(label) {
+    if (!label) return false;
+    const list = getBallLabels();
+    const needle = String(label).toLowerCase();
+    return list.includes(needle);
+  }
+
+  function selectBall(dets) {
+    const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
+    for (const d of dets || []) {
+      const lab = d?.label ?? d?.class ?? d?.type;
+      const score = d?.score ?? d?.confidence ?? 0;
+      if (!isBallLbl(lab) || !Number.isFinite(score) || score < minScore) continue;
+      const box = d?.bbox ?? d?.box ?? d?.rect;
+      if (!box) continue;
+      let cx = null;
+      let cy = null;
+      if (Array.isArray(box) && box.length === 4) {
+        const [x1, y1, x2, y2] = box.map(Number);
+        if ([x1, y1, x2, y2].every(Number.isFinite)) {
+          cx = (x1 + x2) / 2;
+          cy = (y1 + y2) / 2;
+        }
+      } else {
+        const bx = Number(box.x ?? box.left ?? NaN);
+        const by = Number(box.y ?? box.top ?? NaN);
+        const bw = Number(box.w ?? box.width ?? ((box.right ?? NaN) - (box.x ?? box.left ?? 0)));
+        const bh = Number(box.h ?? box.height ?? ((box.bottom ?? NaN) - (box.y ?? box.top ?? 0)));
+        if ([bx, by, bw, bh].every(Number.isFinite)) {
+          cx = bx + bw / 2;
+          cy = by + bh / 2;
+        }
+      }
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      return { x: cx, y: cy, score, label: lab };
+    }
+    return null;
+  }
+
+  function handleDetEvent(e, defaultVia) {
+    try {
+      const detail = e?.detail || {};
+      const dets = detail.dets || detail.objects || [];
+      const via = detail.via || defaultVia || 'unknown';
+      if (dets.length && via !== 'server') {
+        try {
+          const summary = dets.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
+          window.__dbgLine?.(`[det] ${summary}`);
+        } catch {}
+      }
+      const ball = selectBall(dets);
+      if (!ball) return;
+      const frame = Number.isFinite(detail.frame) ? Number(detail.frame) : (Number(window.__AN_IDX) || 0);
+      const tMs = Number.isFinite(detail.tMs) ? Number(detail.tMs) : performance.now();
+      window.updateBall?.(ball.x, ball.y, { frame, tMs, conf: ball.score, via });
+    } catch (err) {
+      console.warn('[ball-ingest] event error', err);
+    }
+  }
+
+  window.addEventListener('objects:frame', (e) => handleDetEvent(e, 'server'), { passive: true });
+  window.addEventListener('localdet:frame', (e) => handleDetEvent(e, 'local'), { passive: true });
+
+  window.__dbgLine?.('[ingest] ball ingest harness installed');
+})();
 
 (function chooseDetectorPath() {
   try {
@@ -267,6 +338,62 @@ window.ingestServerDetections = ingestServerDetections;
   } catch (err) {
     console.warn('[LocalDetector] chooser error', err);
   }
+})();
+
+(function bindArcWorker(){
+  if (window.__arcBound) return;
+  window.__arcBound = true;
+
+  window.addEventListener('shot:release', () => {
+    try { window.ballArc = { trail: [], refinedTrail: [] }; } catch {}
+  }, { passive: true });
+
+  window.addEventListener('ball:trail-step', (e) => {
+    try {
+      const d = e?.detail || {};
+      const arc = (window.ballArc ||= { trail: [], refinedTrail: [] });
+      arc.trail = Array.isArray(arc.trail) ? arc.trail : [];
+      arc.trail.push({ x: d.x, y: d.y, frame: d.frame, tMs: d.tMs });
+      window.refineArc?.();
+    } catch (err) {
+      console.warn('[arc] trail-step handler error', err);
+    }
+  }, { passive: true });
+
+  window.__dbgLine?.('[arc] worker bound to ball:trail-step');
+})();
+
+(function ensureCanonHoop(){
+  if (window.__canonHoopEnsured) return;
+  window.__canonHoopEnsured = true;
+
+  function storeCanon(hb) {
+    if (!hb) return null;
+    try {
+      const box = canonHoop?.(hb);
+      if (box && Number.isFinite(box.x)) {
+        window.__canonHoopBox = { ...box };
+        return window.__canonHoopBox;
+      }
+    } catch {}
+    return null;
+  }
+
+  window.addEventListener('hoop:locked', (e) => {
+    const hb = e?.detail?.box || window.getLockedHoopBox?.();
+    const box = storeCanon(hb);
+    if (!box) window.__dbgLine?.('[hoop] canon missing, waiting for update');
+    else window.__dbgLine?.(`[hoop] canon ${box.x},${box.y},${box.w}x${box.h}`);
+  }, { passive: true });
+
+  window.addEventListener('hoop:confirmed', (e) => {
+    const hb = e?.detail?.box || window.getLockedHoopBox?.();
+    storeCanon(hb);
+  }, { passive: true });
+
+  window.getCanonicalHoopBox = function getCanonicalHoopBox() {
+    return window.__canonHoopBox || window.getLockedHoopBox?.() || null;
+  };
 })();
 
 (function armLoop() {
@@ -615,8 +742,8 @@ const __verifyHoopCanon = () => {
     const hb = window.getLockedHoopBox?.();
     if (!hb || !Number.isFinite(hb?.x)) {
       window.__dbgLine?.('[hoop] locked but missing canonical box - recomputing');
-      window.canonHoop?.(hb);
     }
+    window.getCanonicalHoopBox?.();
   } catch {}
 };
 try {
@@ -1233,10 +1360,11 @@ window.addEventListener('microclip:done', (event) => {
         try {
           const bs = window.ballState || {};
           const trail = Array.isArray(bs.trail) ? bs.trail : [];
-          const minPts = Number(window.REL_MIN_BALL_POINTS ?? 3);
-          if (trail.length < minPts) {
+          const minPtsRaw = Number(window.REL_MIN_BALL_POINTS ?? 3);
+          const minTrail = Math.max(minPtsRaw, Number(window.REL_MIN_TRAIL_BEFORE_RELEASE ?? 4));
+          if (trail.length < minTrail) {
             window.__releaseEventSent = false;
-            window.__dbgBlock?.('ball-min-points', { len: trail.length, min: minPts });
+            window.__dbgBlock?.('min-trail-before-release', { trailLen: trail.length, minTrail });
             e.stopImmediatePropagation(); return;
           }
           lastTrailPoint = trail.at?.(-1) || null;
@@ -2819,6 +2947,17 @@ document.addEventListener('DOMContentLoaded', () => {
   // Dev toggles (no listeners bound until you call them)
   window.setShotDebug   = (on=true) => { window.DOACH_SHOT_DEBUG   = !!on; console.log('[shot:debug]',   window.DOACH_SHOT_DEBUG); };
   window.setReleaseTrace= (on=true) => { window.DOACH_RELEASE_TRACE= !!on; console.log('[release:trace]', window.DOACH_RELEASE_TRACE); };
+  window.__DEV_fakeBall = function __DEV_fakeBall(count = 24) {
+    const n = Math.max(4, Number(count) || 24);
+    const f0 = Number(window.__AN_IDX || 0);
+    const t0 = performance.now();
+    for (let i = 0; i < n; i++) {
+      const x = 600 + i * 6;
+      const y = 420 - (i * 7) + Math.floor(0.15 * i * i);
+      window.updateBall?.(x, y, { frame: f0 + i, tMs: t0 + i * 33, conf: 0.9, via: 'dev' });
+    }
+    window.__dbgLine?.(`[dev] injected fake ball trail (${n} pts)`);
+  };
 
   // Expectation helpers: watch for a release near a specific frame or time
   window.watchReleaseAtFrame = (frame) => {
