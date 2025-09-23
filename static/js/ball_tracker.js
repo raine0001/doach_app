@@ -162,7 +162,20 @@ export function updateBall(point, frameIndex) {
     const prev = state.trail.at?.(-2) || null;
     const curr = state.trail.at?.(-1) || null;
     const gapF = (prev && curr && Number.isFinite(prev.frame) && Number.isFinite(curr.frame)) ? (curr.frame - prev.frame) : 0;
-    if (curr) window.dispatchEvent?.(new CustomEvent('ball:trail-step', { detail: { frame: curr.frame, gapF, len: state.trail.length } }));
+    if (curr) {
+      const detail = { frame: curr.frame, gapF, len: state.trail.length, x: curr.x, y: curr.y, tMs: curr.tMs };
+      window.dispatchEvent?.(new CustomEvent('ball:trail-step', { detail }));
+      try {
+        const arc = window.ballArc || {};
+        const refined = Array.isArray(arc.refinedTrail) && arc.refinedTrail.length ? arc.refinedTrail.length : 0;
+        const arcLen = refined || (Array.isArray(arc.trail) ? arc.trail.length : 0);
+        const msg = `[arc] trail=${state.trail.length} arc=${arcLen}`;
+        if (window.__dbgArcLast !== msg) {
+          window.__dbgArcLast = msg;
+          window.__dbgLine?.(msg);
+        }
+      } catch {}
+    }
   } catch {}
   // Cap trail size
   if (state.trail.length > OPT.MAX_TRAIL_POINTS) state.trail.splice(0, state.trail.length - OPT.MAX_TRAIL_POINTS);
