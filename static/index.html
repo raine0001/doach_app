@@ -38,6 +38,7 @@
 
   <!-- Core app/scripts (load each ONCE) -->
   <script src="/static/js/coachAssistant.js"></script>
+  <script src="/static/js/shot_arc.js?v=20250915"></script>
   <script>
     // Conditionally load auto probe tools via query param ?probe=release
     (function(){ try { var q=new URLSearchParams(location.search||''); if((q.get('probe')||'').toLowerCase()==='release'){ var s=document.createElement('script'); s.type='module'; s.src='/static/js/auto_probe_release.js'; document.head.appendChild(s);} } catch(e){} })();

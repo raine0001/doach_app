@@ -1812,6 +1812,38 @@ def admin_session_debug(sid):
     _trace('admin_session_debug', {'sid': sid, 'sessionFile': (len(out.get('sessionFile',{}).get('shots',[]) or [])), 'shotsDB': len(out.get('shotsDB') or []), 'feedback': len(out.get('feedback') or [])})
     return jsonify(out)
 
+@app.get('/admin/session/<sid>/clips')
+def admin_session_clips(sid):
+    """List saved microclips for a session."""
+    clips_dir = Path(_session_path(sid)) / 'clips'
+    if not clips_dir.exists():
+        return jsonify({'sid': sid, 'count': 0, 'clips': []})
+    items = []
+    try:
+        for clip_path in clips_dir.glob('*'):
+            if not clip_path.is_file():
+                continue
+            info = {
+                'name': clip_path.name,
+                'url': f'/sessions/{sid}/clips/{clip_path.name}',
+            }
+            try:
+                stat = clip_path.stat()
+                info['size'] = stat.st_size
+                info['created'] = datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat()
+                info['_mtime'] = stat.st_mtime
+            except Exception:
+                info['size'] = None
+                info['created'] = None
+            items.append(info)
+    except Exception as exc:
+        _trace('admin_session_clips error', {'sid': sid, 'error': str(exc)})
+        return jsonify({'sid': sid, 'count': 0, 'clips': []})
+    items.sort(key=lambda x: x.get('_mtime') or 0, reverse=True)
+    for clip in items:
+        clip.pop('_mtime', None)
+    return jsonify({'sid': sid, 'count': len(items), 'clips': items})
+
 @app.get('/admin/users')
 def admin_users():
     try:
@@ -3716,3 +3748,4 @@ if __name__ == '__main__':
 
 # WSGI entrypoint for PythonAnywhere
 application = app
+

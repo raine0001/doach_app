@@ -29,6 +29,13 @@
     .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; flex-shrink:0; }
     pre { background:#0b0f14; border:1px solid #1f2a36; border-radius:8px; padding:8px; overflow:auto; max-height:320px; }
     input[type="text"] { background:#0b0f14; color:#e6edf3; border:1px solid #1f2a36; padding:6px 8px; border-radius:8px; width:200px; }
+    .clips { padding:10px; border-top:1px solid #1f2a36; }
+    .clips-header { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
+    .clips-header h3 { margin:0; font-size:13px; }
+    .clips-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .clips-table th, .clips-table td { padding:6px 8px; border-bottom:1px solid #1f2a36; text-align:left; }
+    .clips-table tbody tr:hover { background:#0d131c; }
+    .clips-empty { padding:8px; color:#94a3b8; font-style:italic; }
     @media (max-width: 1040px) {
       main { grid-template-columns:1fr; }
       #viewer { min-height:320px; }
@@ -70,6 +77,12 @@
           <pre id="activeUsers">(loading)</pre>
         </div>
       </div>
+      <div class="clips">
+        <div class="clips-header">
+          <h3>Shot Clips <span id="clipCount" class="muted">(0)</span></h3>
+        </div>
+        <div id="clipTableWrap" class="clips-empty">Select a session to view clips.</div>
+      </div>
     </section>
   </main>
   <script>
@@ -78,12 +91,94 @@
     const elDebug    = document.getElementById('debugJson');
     const elActive   = document.getElementById('activeUsers');
 
+    const elClipCount = document.getElementById("clipCount");
+    const elClipWrap  = document.getElementById("clipTableWrap");
+    let clipPollTimer = null;
+    let clipSessionId = null;
     async function fetchJSON(url){ const r = await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status); return await r.json(); }
 
     function fmt(ts){
       if (!ts) return 'â€”';
       try { const d = new Date(ts); return d.toLocaleString(); } catch { return String(ts); }
     }
+
+    function fmtClipTime(iso){
+      if (!iso) return '—';
+      try { return new Date(iso).toLocaleString(); } catch { return String(iso); }
+    }
+
+    function fmtBytes(bytes){
+      if (!Number.isFinite(bytes)) return '—';
+      const units = ['B','KB','MB','GB'];
+      let value = bytes;
+      let unit = 0;
+      while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+      const digits = unit === 0 ? 0 : 1;
+      return `${value.toFixed(digits)} ${units[unit]}`;
+    }
+
+    function showClipMessage(msg, count = 0){
+      elClipCount.textContent = String(count);
+      elClipWrap.className = 'clips-empty';
+      elClipWrap.textContent = msg;
+    }
+
+    function renderClipRows(clips, totalCount){
+      const count = Number.isFinite(totalCount) ? totalCount : (Array.isArray(clips) ? clips.length : 0);
+      if (!Array.isArray(clips) || !clips.length){
+        showClipMessage('No clips yet.', count || 0);
+        return;
+      }
+      elClipCount.textContent = String(count);
+      const rows = clips.map((clip, idx) => {
+        const size = fmtBytes(clip.size);
+        const saved = fmtClipTime(clip.created);
+        const label = clip.name || `clip-${idx + 1}`;
+        return `<tr><td>${idx + 1}</td><td><a href="${clip.url}" target="_blank" rel="noopener">${label}</a></td><td>${size}</td><td>${saved}</td></tr>`;
+      }).join('');
+      elClipWrap.className = '';
+      elClipWrap.innerHTML = `<table class="clips-table"><thead><tr><th>#</th><th>Clip</th><th>Size</th><th>Saved</th></tr></thead><tbody>${rows}</tbody></table>`;
+    }
+
+    async function loadClips(sid){
+      if (!sid){
+        showClipMessage('Select a session to view clips.', 0);
+        return;
+      }
+      try {
+        const data = await fetchJSON(`/admin/session/${sid}/clips`);
+        if (clipSessionId !== sid) return;
+        const clips = Array.isArray(data.clips) ? data.clips : [];
+        const total = Number.isFinite(data.count) ? Number(data.count) : clips.length;
+        if (!total || !clips.length) {
+          showClipMessage('No clips yet.', total || 0);
+          return;
+        }
+        renderClipRows(clips, total);
+      } catch (err) {
+        if (clipSessionId === sid) showClipMessage('Failed to load clips.', 0);
+      }
+    }
+
+    function startClipPolling(sid){
+      clipSessionId = sid;
+      if (clipPollTimer) clearInterval(clipPollTimer);
+      loadClips(sid);
+      clipPollTimer = setInterval(() => {
+        if (clipSessionId) loadClips(clipSessionId);
+      }, 4000);
+    }
+
+    function stopClipPolling(){
+      if (clipPollTimer){
+        clearInterval(clipPollTimer);
+        clipPollTimer = null;
+      }
+      clipSessionId = null;
+    }
+    showClipMessage('Select a session to view clips.', 0);
+
+
 
     function rowHTML(s){
       const acc = Number.isFinite(s.accuracy) ? s.accuracy : (s.totals?.accuracy ?? null);
@@ -138,9 +233,10 @@
       const act = e.target.getAttribute('data-act');
       if (act === 'observe') {
         elViewer.innerHTML = `<iframe src="/admin/observe/${sid}"></iframe>`;
+        startClipPolling(sid);
         return;
       }
-    if (act === 'debug') {
+      if (act === 'debug') {
       try {
         const j = await fetchJSON(`/admin/session/${sid}/debug`);
         elDebug.textContent = JSON.stringify(j, null, 2);
@@ -152,9 +248,10 @@
       } catch (err) {
         elDebug.textContent = '(error) '+err.message;
       }
+      startClipPolling(sid);
       return;
     }
-    if (act === 'download') {
+      if (act === 'download') {
       try {
         const j = await fetchJSON(`/admin/session/${sid}/debug`);
         const blob = new Blob([JSON.stringify(j, null, 2)], { type: 'application/json' });
@@ -169,7 +266,7 @@
     }
   });
 
-    document.getElementById('btnRefresh').onclick = () => { loadSessions(); loadActive(); };
+    document.getElementById('btnRefresh').onclick = () => { loadSessions(); loadActive(); if (clipSessionId) loadClips(clipSessionId); };
     document.getElementById('filterTxt').oninput = () => { loadSessions(); };
 
     loadSessions(); loadActive();
@@ -408,3 +505,11 @@ btnDown.onclick  = () => {
   <script src="/static/js/d_admin_opg.js"></script>
 </body>
 </html>
+
+
+
+
+
+
+
+

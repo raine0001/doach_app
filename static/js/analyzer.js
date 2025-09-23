@@ -3,12 +3,23 @@ import { ensureOverlayCss, syncOverlayToVideo, updateDebugOverlay, drawLiveOverl
 import { stabilizeLockedHoop, getLockedHoopBox, asTopLeft, canonHoop, filterObjectsToLockedHoop, autoDetectHoop } from './hoop_tracker.js';
 import { updatePlayerTracker, playerState } from './player_tracker.js';
 import { updateBall } from './ball_tracker.js';
-import { updateShotArcTick as _arcTick, updateArc as shotArcUpdateArc, proxFromHoop } from './shot_arc.js';
 import { bufferDetectedObjects, scoringTick, checkShotConditions } from './shot_logger.js';
 import { detectNetMotionFromCanvas } from './hoop_tracker.js';
+function __shotArcModule() {
+  const api = window.shotArcModule || window.shotArc;
+  return (api && typeof api === 'object') ? api : null;
+}
+function __shotArcCall(name, fallback) {
+  const api = __shotArcModule();
+  const fn = api && api[name];
+  return (typeof fn === 'function') ? fn : fallback;
+}
+const _arcTick = (opts = {}) => __shotArcCall('updateShotArcTick', () => null)(opts);
+const shotArcUpdateArc = (...args) => __shotArcCall('updateArc', () => null)(...args);
+const proxFromHoop = (...args) => __shotArcCall('proxFromHoop', () => null)(...args);
 
 function poseDetectSerial() {
-  try { return window.poseDetectSerial?.() || null; } catch { return null; }
+  try { return window.poseDetectSerial?.( ); } catch { return null; }
 }
 
 function isBallLabelLocal(label) {
@@ -143,7 +154,7 @@ function pickBallCenter(objects, player, hoopLocked) {
     }
 
     // Prefer consistency with last point to avoid ghost jumps
-    const last = window.ballState?.trail?.at?.(-1) || null;
+    const last = window.ballState?.trail?.at?.(-1 );
     const maxStep = Number(window.BALL_MAX_STEP || 58) * 1.3; // tighter to avoid ghost hops
     if (last) {
       const corridorHalf = Math.max(60, (Hc?.w || 100) * 0.9);
@@ -208,7 +219,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
 
   // Prefer pre-detected objects if available
   const pd = readPredet(frameIdx);
-  const guess = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || null;
+  const guess = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null );
   const det = pd || await detectWithROI(buf, frameIdx, guess);
   let objects = det?.objects || [];
   const poseRes = await (async () => { try { return await poseDetectSerial(); } catch { return null; } })();
@@ -243,7 +254,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
   // Release/Proximity FSM (use filtered raw detection if updateBall rejected a jump)
   try {
     let obs = pickBallCenter(objects, playerState, hoopLocked);
-    const last = window.ballState?.trail?.at?.(-1) || null;
+    const last = window.ballState?.trail?.at?.(-1 );
     const ballPt = obs || last;
     if (window.DOACH_SHOT_DEBUG) {
       const poseReady = !!(window.playerState?.keypoints?.length >= 33);
@@ -285,7 +296,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
     try {
       const cand = pickBallCenter(objects, playerState, hoopLocked);
       if (cand && hoopLocked) {
-        const last = window.ballState?.trail?.at?.(-1) || null;
+        const last = window.ballState?.trail?.at?.(-1 );
         const maxStep = Number(window.BALL_MAX_STEP || 40) * 1.8;
         if (last) {
           const dist = Math.hypot(cand.x - last.x, cand.y - last.y);
@@ -306,7 +317,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
   // ROI micro-tracker: nudge ball near last point when detection misses or teleports
   if (!updatedThisTick) {
     try {
-      const last = window.ballState?.trail?.at?.(-1) || null;
+      const last = window.ballState?.trail?.at?.(-1 );
       if (last && bctx) {
         const p = (function refineBallWithROI(ctx, lastPt, win = 16) {
           if (!lastPt || !ctx) return null;
@@ -356,7 +367,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
   try {
     // prefer raw detection for prox/arc stepping; fall back to trail
     let obs = pickBallCenter(objects, playerState, hoopLocked);
-    const lastPt = window.ballState?.trail?.at?.(-1) || null;
+    const lastPt = window.ballState?.trail?.at?.(-1 );
     const ballCenter = obs || (lastPt ? { x: lastPt.x, y: lastPt.y } : null);
     if (hoopLocked && (ballCenter || window.__TEST_MODE)) {
       // Test-mode: aggressively auto-latch release when ball center or shortly after start
@@ -678,7 +689,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
             try {
               const pd = readPredet(frameIdx);
               if (pd) return pd;
-              const guess = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || null;
+              const guess = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null );
               return await detectWithROI(buf, frameIdx, guess);
             } catch { return { objects: [] }; }
           })(),
@@ -706,7 +717,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       let chosen = null;
       try {
         if (!window.__DISABLE_POSE_PICK) {
-          chosen = window.pickPoseForActive?.(poses, canvasEl, hoopLocked) || null;
+          chosen = window.pickPoseForActive?.(poses, canvasEl, hoopLocked );
         }
       } catch {}
       if (chosen) {
@@ -721,7 +732,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       let ballCanvas = null; const pick = (objects || []).filter(o => isBallLabelLocal(o.label) && Array.isArray(o.box)).map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) })).sort((a,b)=> b.area - a.area)[0];
       if (pick) {
         const [x1,y1,x2,y2] = pick.o.box; const cx = (x1+x2)/2, cy = (y1+y2)/2;
-        const last = window.ballState?.trail?.at?.(-1) || null; const maxStep = Number(window.BALL_MAX_STEP || 40) * 1.8;
+        const last = window.ballState?.trail?.at?.(-1 ); const maxStep = Number(window.BALL_MAX_STEP || 40) * 1.8;
         if (last) {
           const dist = Math.hypot(cx - last.x, cy - last.y);
           if (dist <= maxStep) {
@@ -748,7 +759,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       // Arc FSM after ball update (use raw detection if ghost-filter dropped update)
       try {
         let raw = null; try { if (pick) { const [x1,y1,x2,y2] = pick.o.box; raw = { x:(x1+x2)/2, y:(y1+y2)/2 }; } } catch {}
-        const lastPt = window.ballState?.trail?.at?.(-1) || null;
+        const lastPt = window.ballState?.trail?.at?.(-1 );
         const ballPt = ballCanvas || raw || lastPt;
         if (window.DOACH_SHOT_DEBUG) { const poseReady = !!(window.playerState?.keypoints?.length >= 33); const hasBall  = !!(ballPt && Number.isFinite(ballPt.x)); console.log('[rvfc:tick] arcTick', { frame: fidx, poseReady, hasBall }); }
         if (hoopLocked && ballPt) {
@@ -784,7 +795,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       // Arc step + HUD (prefer latest observation)
       try {
         let raw = null; try { if (pick) { const [x1,y1,x2,y2] = pick.o.box; raw = { x:(x1+x2)/2, y:(y1+y2)/2 }; } } catch {}
-        const lastPt = window.ballState?.trail?.at?.(-1) || null;
+        const lastPt = window.ballState?.trail?.at?.(-1 );
         const ballCenter = ballCanvas || raw || (lastPt ? { x: lastPt.x, y: lastPt.y } : null);
         // Redundant proximity stamping to guarantee enter/exit in automation (rvfc)
         try {
@@ -840,7 +851,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
       try {
         const rf = Number(window.ballState?.releaseFrame);
         if (Number.isFinite(rf) && frameIdx === rf) {
-          const lastPt = window.ballState?.trail?.at?.(-1) || null;
+          const lastPt = window.ballState?.trail?.at?.(-1 );
           const hoopLocked = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || getLockedHoopBox?.();
           if (lastPt && hoopLocked) window.shotArc?.updateArc?.(frameIdx, { x: lastPt.x, y: lastPt.y }, hoopLocked);
         }
@@ -988,7 +999,7 @@ function readPredet(frameIdx) {
   try {
     const PD = window.__PREDET;
     if (!PD || !PD.map) return null;
-    let hit = PD.map.get(frameIdx) || PD.map.get(frameIdx - 1) || PD.map.get(frameIdx + 1) || null;
+    let hit = PD.map.get(frameIdx) || PD.map.get(frameIdx - 1) || PD.map.get(frameIdx + 1 );
     return hit ? { objects: hit.objects || [], _source: 'predet' } : null;
   } catch { return null; }
 }

@@ -16,10 +16,22 @@ import { createPlaybackControls, initHUDForVideo } from './video_ui.js';
 import { ballState, updateBall, resetAll, stepFBFArc, fillArcGaps } from './ball_tracker.js';
 import { disposeFrameCollection as disposeMicroClipFrameCollection, serializeError as serializeMicroclipError } from './microclip_core.js';
 // Load shot arc FSM (release/exit timing); available for incremental adoption
-import { resetShotFSM as _arcReset, updateShotArcTick as _arcTick, proxFromHoop } from './shot_arc.js';
 import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.js';
 import { mountPrefs } from './ui_prefs.js';
 import { initReleaseConfig, releaseGate } from './release_gate.js';
+
+function __shotArcModule() {
+  const api = window.shotArcModule || window.shotArc;
+  return (api && typeof api === 'object') ? api : null;
+}
+function __shotArcCall(name, fallback) {
+  const api = __shotArcModule();
+  const fn = api && api[name];
+  return (typeof fn === 'function') ? fn : fallback;
+}
+const _arcReset = (...args) => __shotArcCall('resetShotFSM', () => undefined)(...args);
+const _arcTick = (opts = {}) => __shotArcCall('updateShotArcTick', () => null)(opts);
+const proxFromHoop = (...args) => __shotArcCall('proxFromHoop', () => null)(...args);
 
 // Global defaults (overridable via console when needed)
 window.POSE_WARMUP_FRAMES = 20;          // frames of ok pose before warm status
@@ -59,14 +71,14 @@ window.__lastReleaseFrame ??= null;
 window.__lastReleaseTs ??= 0;
 window.__gateDedupeCount ??= 0;
 window.__sessionConfigEmitted ??= false;
-window.__MICROCLIP_MS ??= 4000;
+window.__MICROCLIP_MS ??= 3000;
 window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window.__shotCount) : 0;
 
 (function installMicroClip(){
   if (window.__microClipInstalled) return;
   window.__microClipInstalled = true;
 
-  const SRC = { stream: null, kind: 'none' };
+  const SRC = { stream: null, kind: 'none', stopOnReset: false };
   let rec = null;
   let chunks = [];
   let stopTimer = null;
@@ -79,30 +91,107 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     if (liveStream) return SRC;
 
     const canvas = document.getElementById('doach-canvas-overlay');
+
     if (canvas && typeof canvas.captureStream === 'function') {
+
       try {
+
         SRC.stream = canvas.captureStream(30);
+
         SRC.kind = 'canvas';
+
+        SRC.stopOnReset = false;
         if (SRC.stream) return SRC;
+
       } catch (err) {
-        log(`canvas capture failed: ${err}`);
+        log('[microclip] canvas capture failed: ' + err);
       }
     }
 
-    const video = document.querySelector('video');
-    if (video && typeof video.captureStream === 'function') {
-      try {
-        if (video.paused) { video.play().catch(() => {}); }
-        SRC.stream = video.captureStream();
-        SRC.kind = 'video';
-        if (SRC.stream) return SRC;
-      } catch (err) {
-        log(`video capture failed: ${err}`);
+    const videoEl = document.getElementById('videoPlayer') || document.querySelector('video');
+
+    if (videoEl) {
+      const srcObj = videoEl.srcObject;
+
+      if (srcObj && typeof srcObj.getTracks === 'function') {
+
+        try {
+
+          const tracks = typeof srcObj.getVideoTracks === 'function' ? srcObj.getVideoTracks() : srcObj.getTracks();
+
+          const videoTracks = Array.isArray(tracks) ? tracks.filter(track => !track || track.kind === 'video') : [];
+
+          if (videoTracks.length) {
+
+            let stream = null;
+
+            let cloned = false;
+
+            try {
+
+              const clones = videoTracks.map(track => (typeof track.clone === 'function') ? track.clone() : track);
+
+              cloned = clones.some((track, idx) => track !== videoTracks[idx]);
+
+              stream = new MediaStream(clones);
+
+            } catch (cloneErr) {
+
+              log('[microclip] clone stream failed: ' + cloneErr);
+
+              try {
+
+                stream = new MediaStream(videoTracks);
+
+              } catch (attachErr) {
+
+                log('[microclip] attach srcObject tracks failed: ' + attachErr);
+
+              }
+
+            }
+
+            if (stream) {
+
+              SRC.stream = stream;
+
+              SRC.kind = 'camera';
+
+              SRC.stopOnReset = cloned;
+
+              return SRC;
+
+            }
+
+          }
+        } catch (err) {
+          log('[microclip] camera stream probe failed: ' + err);
+        }
+      }
+
+      if (typeof videoEl.captureStream === 'function') {
+
+        try {
+
+          if (videoEl.paused) { videoEl.play().catch(() => {}); }
+
+          SRC.stream = videoEl.captureStream();
+
+          SRC.kind = 'video';
+
+          SRC.stopOnReset = false;
+
+          if (SRC.stream) return SRC;
+
+        } catch (err) {
+          log('[microclip] video capture failed: ' + err);
+        }
       }
     }
 
     SRC.stream = null;
     SRC.kind = 'none';
+    SRC.stopOnReset = false;
     return SRC;
   }
 
@@ -110,6 +199,16 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     if (stopTimer) {
       clearTimeout(stopTimer);
       stopTimer = null;
+    }
+    if (SRC.stopOnReset && SRC.stream) {
+      try {
+        SRC.stream.getTracks().forEach((track) => {
+          try { track.stop(); } catch {}
+        });
+      } catch {}
+      SRC.stream = null;
+      SRC.kind = 'none';
+      SRC.stopOnReset = false;
     }
     rec = null;
     chunks = [];
@@ -167,15 +266,28 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     try {
       rec = new MediaRecorder(source.stream, opts);
     } catch (err) {
-      log(`MediaRecorder failed: ${err}`);
+      log('MediaRecorder failed: ' + err);
+      if (SRC.stopOnReset && SRC.stream) {
+        try {
+          SRC.stream.getTracks().forEach((track) => {
+            try { track.stop(); } catch {}
+          });
+        } catch {}
+        SRC.stream = null;
+        SRC.kind = 'none';
+        SRC.stopOnReset = false;
+      }
       return;
     }
 
     const rawFrame = Number(meta.frame);
     const frame = Number.isFinite(rawFrame) ? rawFrame : (Number.isFinite(Number(window.__REL_LAST_FRAME)) ? Number(window.__REL_LAST_FRAME) : null);
     activeFrame = frame;
-    const prevCount = Number(window.__shotCount) || 0;
-    const shotIdx = prevCount + 1;
+
+    const baseIdx = Number.isFinite(Number(window.__SHOT_IDX)) ? Number(window.__SHOT_IDX) + 1 : (Number(window.__shotCount) || 0) + 1;
+
+    const shotIdx = baseIdx;
+
     window.__shotCount = shotIdx;
     chunks = [];
 
@@ -211,7 +323,7 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
 
     try {
       rec.start();
-      window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 4000;
+      window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 3000;
       stopTimer = setTimeout(() => { try { rec.stop(); } catch {} }, window.__MICROCLIP_MS);
     } catch (err) {
       log(`start failed: ${err}`);
@@ -326,7 +438,7 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
       };
     }
 
-    const duration = Math.min(video.duration || 4, Number(window.__MICROCLIP_MS || 4000) / 1000);
+    const duration = Math.min(video.duration || 3, Number(window.__MICROCLIP_MS || 3000) / 1000);
     for (let t = 0; t <= duration; t += 1 / fps) {
       // eslint-disable-next-line no-await-in-loop
       await seekTo(t);
