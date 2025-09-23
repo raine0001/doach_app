@@ -34,6 +34,12 @@ window.REL_MAX_BALL_MS     ??= 260;    // max ms since last ball point
 window.PROX_IN_CONSEC_MIN  ??= 2;      // inside-prox streak requirement
 window.REL_MIN_SEP_MS      ??= 500;    // min ms between releases
 
+window.__armWhenReadyTimer ??= null;
+window.__readyForScoring ??= false;
+window.__POSE_WARMUP_OK ??= false;
+window.__readyForScoringArmedAtMs ??= 0;
+window.__readyForScoringBallMsAtArm ??= 0;
+
 window.__REL_LAST_FRAME ??= null;
 
 const MICROCLIP_BUFFER_DEFAULT_MS = 3800;
@@ -223,6 +229,7 @@ function armReleaseFallbackTimer(reason = 'auto') {
   try {
     const dwell = Math.max(900, Number(window.MINI_SCORE_MS || 1800));
     try { window.__SCORING_DELEGATED = false; } catch {}
+    disarmRelease('fallback');
     if (window.__releaseFallbackTimer) clearTimeout(window.__releaseFallbackTimer);
     window.__releaseFallbackTimer = setTimeout(() => {
       try {
@@ -238,6 +245,92 @@ function armReleaseFallbackTimer(reason = 'auto') {
     }, dwell);
   } catch {}
 }
+
+function clearArmWhenReadyTimer() {
+  if (window.__armWhenReadyTimer) {
+    try { clearTimeout(window.__armWhenReadyTimer); } catch {}
+    window.__armWhenReadyTimer = null;
+  }
+}
+
+function disarmRelease(reason = 'pending') {
+  clearArmWhenReadyTimer();
+  try { window.setReleaseArmed?.(false); } catch {}
+  window.__readyForScoring = false;
+  window.__POSE_WARMUP_OK = false;
+  window.__readyForScoringArmedAtMs = 0;
+  window.__readyForScoringBallMsAtArm = 0;
+  if (window.DOACH_REL_LOG === true && reason) {
+    try { console.log('[disarmRelease]', reason); } catch {}
+  }
+}
+
+function scheduleArmWhenReady(delay = 320) {
+  if (window.__hoopConfirmed !== true) return;
+  if (window.__readyForScoring === true) return;
+  clearArmWhenReadyTimer();
+  window.__armWhenReadyTimer = setTimeout(() => {
+    armWhenReady().catch(() => {});
+  }, Math.max(0, delay));
+}
+
+async function armWhenReady() {
+  if (window.__hoopConfirmed !== true) return false;
+  if (window.__readyForScoring === true && window.__POSE_WARMUP_OK === true) {
+    clearArmWhenReadyTimer();
+    return true;
+  }
+
+  disarmRelease('arming');
+
+  let pdOk = true;
+  if (typeof waitForPDWarm === 'function') {
+    try { pdOk = await waitForPDWarm(4, 800); } catch { pdOk = false; }
+  }
+  if (!pdOk) {
+    scheduleArmWhenReady(400);
+    return false;
+  }
+
+  const needPose = Number(window.POSE_STREAK_NEED ?? 2);
+  const timeoutMs = Number(window.POSE_WARMUP_TIMEOUT_MS ?? 1200);
+  let streak = 0;
+  const start = performance.now();
+  while ((performance.now() - start) < timeoutMs && streak < needPose) {
+    await new Promise((resolve) => setTimeout(resolve, 36));
+    const poseOk = !!(window.playerState?.keypoints?.length >= 33);
+    streak = poseOk ? (streak + 1) : 0;
+  }
+  if (streak < needPose) {
+    scheduleArmWhenReady(400);
+    return false;
+  }
+  window.__POSE_WARMUP_OK = true;
+
+  const maxMs = Number(window.REL_MAX_BALL_MS ?? 260);
+  const last = window.ballState?.trail?.at?.(-1) || null;
+  const nowMs = performance.now();
+  const lastMs = Number.isFinite(last?.tMs) ? last.tMs : NaN;
+  if (!last || !Number.isFinite(lastMs) || (nowMs - lastMs) > maxMs) {
+    scheduleArmWhenReady(400);
+    return false;
+  }
+
+  const armedAtMs = performance.now();
+  window.__readyForScoringBallMsAtArm = lastMs;
+  window.__readyForScoringArmedAtMs = armedAtMs;
+  window.__readyForScoring = true;
+  window.setReleaseArmed?.(true);
+  clearArmWhenReadyTimer();
+  if (window.DOACH_REL_LOG === true) {
+    try { console.log('[armWhenReady] ARMED', { streak, gapMs: Math.round(nowMs - lastMs), armedAtMs: Math.round(armedAtMs), ballMs: Math.round(lastMs) }); } catch {}
+  }
+  return true;
+}
+
+try { window.addEventListener('hoop:locked', () => { disarmRelease('hoop-locked'); scheduleArmWhenReady(0); }); } catch {}
+try { window.addEventListener('hoop:confirmed', () => { disarmRelease('hoop-confirmed'); scheduleArmWhenReady(0); }); } catch {}
+if (window.__hoopConfirmed === true) scheduleArmWhenReady(0);
 
 function ensureMicroClipWorkerManager() {
   if (window.__microClipWorkerManager) return window.__microClipWorkerManager;
@@ -334,6 +427,8 @@ function ensureMicroClipWorkerManager() {
           this.jobs.delete(id);
           window.dispatchEvent(new CustomEvent('microclip:error', { detail: { id, shot: job.shot, error: errorPayload } }));
           try { window.__SCORING_DELEGATED = false; } catch {}
+          disarmRelease('microclip-error');
+          scheduleArmWhenReady(400);
           armReleaseFallbackTimer('microclip-error');
         }
       };
@@ -409,6 +504,8 @@ function ensureMicroClipWorkerManager() {
           this.jobs.delete(id);
           window.dispatchEvent(new CustomEvent('microclip:error', { detail: { id, shot: job.shot, error: data.error || null } }));
           try { window.__SCORING_DELEGATED = false; } catch {}
+          disarmRelease('microclip-error');
+          scheduleArmWhenReady(400);
           armReleaseFallbackTimer('microclip-error');
           try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
           break;
@@ -419,6 +516,8 @@ function ensureMicroClipWorkerManager() {
           this.jobs.delete(id);
           window.dispatchEvent(new CustomEvent('microclip:cancelled', { detail: { id, shot: job.shot } }));
           try { window.__SCORING_DELEGATED = false; } catch {}
+          disarmRelease('microclip-cancelled');
+          scheduleArmWhenReady(400);
           armReleaseFallbackTimer('microclip-cancelled');
           try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
           break;
@@ -462,6 +561,8 @@ function scheduleMicroClipForRelease({ frame, via, prox, shot }) {
       }
       window.dispatchEvent(new CustomEvent('microclip:skipped', { detail: { shot, releaseFrame: frame, reason: 'insufficient_frames' } }));
       try { window.__SCORING_DELEGATED = false; } catch {}
+      disarmRelease('microclip-skip');
+      scheduleArmWhenReady(400);
       armReleaseFallbackTimer('microclip-skip');
       return;
     }
@@ -492,6 +593,8 @@ function scheduleMicroClipForRelease({ frame, via, prox, shot }) {
     }
     window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shot, releaseFrame: frame, error: payload } }));
     try { window.__SCORING_DELEGATED = false; } catch {}
+    disarmRelease('microclip-error');
+    scheduleArmWhenReady(400);
     armReleaseFallbackTimer('microclip-error');
   }
 }
@@ -592,7 +695,11 @@ window.addEventListener('microclip:done', (event) => {
   // ---- 4) Reset guard when an attempt ends + watchdog for stuck sessions ----
   if (!window.__relGuardResetInstalled) {
     window.__relGuardResetInstalled = true;
-    const reset = () => { window.__releaseEventSent = false; window.__REL_LAST_FIRE_MS = 0; };
+    const reset = () => {
+      window.__releaseEventSent = false; window.__REL_LAST_FIRE_MS = 0;
+      disarmRelease('summary-reset');
+      scheduleArmWhenReady(320);
+    };
     window.addEventListener('shot:summary', reset);
     window.addEventListener('shot:end',     reset);
   }
@@ -768,6 +875,8 @@ window.addEventListener('microclip:done', (event) => {
   if (!window.__captureGateBound) {
     window.__captureGateBound = true;
     window.addEventListener('shot:release', (e) => {
+      let lastTrailPoint = null;
+      let lastTrailMs = NaN;
       try {
         // Do not allow a release unless ball trail exists and is fresh (use ms, not frame deltas)
         try {
@@ -775,11 +884,13 @@ window.addEventListener('microclip:done', (event) => {
           const trail = Array.isArray(bs.trail) ? bs.trail : [];
           const minPts = Number(window.REL_MIN_BALL_POINTS ?? 3);
           if (trail.length < minPts) { window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
-          const last = trail.at?.(-1) || null;
+          lastTrailPoint = trail.at?.(-1) || null;
           const nowMs = performance.now();
           const maxMs = Number(window.REL_MAX_BALL_MS ?? 260);
-          const lastMs = Number.isFinite(last?.tMs) ? last.tMs : nowMs;
-          if ((nowMs - lastMs) > maxMs) { window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
+          const candidateMs = Number(lastTrailPoint?.tMs);
+          if (!lastTrailPoint || !Number.isFinite(candidateMs)) { window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
+          lastTrailMs = candidateMs;
+          if ((nowMs - candidateMs) > maxMs) { window.__releaseEventSent = false; e.stopImmediatePropagation(); return; }
         } catch {}
 
         // Require a proximity streak (or segment-cross) before releases can pass
@@ -794,6 +905,17 @@ window.addEventListener('microclip:done', (event) => {
 
         // Startup anti-ghost: require readiness + pose warmup before any release can pass
         if (window.__readyForScoring !== true) { e.stopImmediatePropagation(); return; }
+        try {
+          const armedAtMs = Number(window.__readyForScoringArmedAtMs || 0);
+          if (armedAtMs > 0) {
+            const sampleMs = Number.isFinite(lastTrailMs) ? lastTrailMs : Number(window.ballState?.trail?.at?.(-1)?.tMs);
+            if (!Number.isFinite(sampleMs) || sampleMs <= armedAtMs) {
+              window.__releaseEventSent = false;
+              e.stopImmediatePropagation();
+              return;
+            }
+          }
+        } catch {}
         if (window.__POSE_WARMUP_OK !== true) { e.stopImmediatePropagation(); return; }
         // Hard-stop guard at session cap/end
         if (window.__sessionEnded === true || (window.__sessionCapped === true && window.__sessionContinue !== true)) { e.stopImmediatePropagation(); return; }
@@ -908,6 +1030,8 @@ window.addEventListener('microclip:done', (event) => {
     });
 
     window.addEventListener('shot:summary', (e) => {
+      disarmRelease('summary');
+      scheduleArmWhenReady(320);
       try { __reportSummaryToServer?.(e?.detail || {}); } catch {}
       try { if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; } } catch {}
       try { window.__TEMP_SCORE_UNTIL = 0; } catch {}
@@ -2663,9 +2787,17 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
       const bw = buf.width, bh = buf.height; if (!bw || !bh) return await sendFrameToDetect(buf, frameIdx).catch(() => ({ objects: [] }));
       const cw = Math.min(w, Math.max(1, bw - x));
       const ch = Math.min(h, Math.max(1, bh - y));
-      const roi = document.createElement('canvas'); roi.width = cw; roi.height = ch; const rctx = roi.getContext('2d', { willReadFrequently: true });
+      let roiCanvas;
+      if (typeof OffscreenCanvas !== 'undefined') {
+        roiCanvas = new OffscreenCanvas(cw, ch);
+      } else {
+        roiCanvas = document.createElement('canvas');
+        roiCanvas.width = cw;
+        roiCanvas.height = ch;
+      }
+      const rctx = roiCanvas.getContext('2d', { willReadFrequently: true });
       rctx.drawImage(buf, x, y, cw, ch, 0, 0, cw, ch);
-      const det = await sendFrameToDetect(roi, frameIdx).catch(() => ({ objects: [] }));
+      const det = await sendFrameToDetect(roiCanvas, frameIdx).catch(() => ({ objects: [] }));
       const objs = (det?.objects || []).map(o => Array.isArray(o.box) ? { ...o, box: [o.box[0]+x, o.box[1]+y, o.box[2]+x, o.box[3]+y] } : o);
       return { ...(det || {}), objects: objs, _source: 'roi' };
     } catch { return await sendFrameToDetect(buf, frameIdx).catch(() => ({ objects: [] })); }
@@ -3193,14 +3325,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
         }
       }
 
-      // YOLO blink â†’ refine near last CANVAS trail point
-      if (!ballCanvas) {
-        const lastPt = window.ballState?.trail?.at?.(-1);
-        if (lastPt && typeof refineBallWithROI === 'function') {
-          const roi = refineBallWithROI(bctx, lastPt, 20);
-          if (roi) ballCanvas = { x: roi.x, y: roi.y };
-        }
-      }
+      // YOLO blink fallback skipped in live RVFC to avoid DOM ROI work.
 
       let updatedThisTick = false;
 
@@ -3613,6 +3738,8 @@ window.resetShots = function resetShots() {
   try { resetReadiness?.('manual reset'); } catch {}
   window.__hoopAutoLocked = false;
   try { window.__REL_LAST_FRAME = null; } catch {}
+  disarmRelease('reset');
+  scheduleArmWhenReady(400);
 };
 
 // 3) Oneâ€‘frame step when paused (nice for slow scrubbing)
@@ -4410,6 +4537,8 @@ window.resetShots = window.resetShots || function () {
 
   try { resetReadiness?.('manual reset'); } catch {}
   window.__hoopAutoLocked = false;
+  disarmRelease('reset');
+  scheduleArmWhenReady(400);
 
   // optional UI cleanups if present
   const table = document.querySelector('#shotTable tbody');
@@ -4441,10 +4570,17 @@ window.resetShots = window.resetShots || function () {
       const x = Math.max(0, x0), y = Math.max(0, y0);
       const w = Math.max(1, Math.min(buf.width  - x, x1 - x0));
       const h = Math.max(1, Math.min(buf.height - y, y1 - y0));
-      const roi = document.createElement('canvas'); roi.width = w; roi.height = h;
-      const rctx = roi.getContext('2d', { willReadFrequently: true });
+      let roiCanvas;
+      if (typeof OffscreenCanvas !== 'undefined') {
+        roiCanvas = new OffscreenCanvas(w, h);
+      } else {
+        roiCanvas = document.createElement('canvas');
+        roiCanvas.width = w;
+        roiCanvas.height = h;
+      }
+      const rctx = roiCanvas.getContext('2d', { willReadFrequently: true });
       rctx.drawImage(buf, x, y, w, h, 0, 0, w, h);
-      const det = await sendFrameToDetect(roi, frameIdx).catch(() => ({ objects: [] }));
+      const det = await sendFrameToDetect(roiCanvas, frameIdx).catch(() => ({ objects: [] }));
       const objs = (det?.objects || []).map(o => Array.isArray(o.box) ? { ...o, box: [o.box[0]+x, o.box[1]+y, o.box[2]+x, o.box[3]+y] } : o);
       return { ...(det||{}), objects: objs };
     } catch { return await sendFrameToDetect(buf, frameIdx).catch(() => ({ objects: [] })); }
