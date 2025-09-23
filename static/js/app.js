@@ -226,6 +226,7 @@ async function cloneFramesForWorker(frames) {
 }
 
 function armReleaseFallbackTimer(reason = 'auto') {
+  if (window.USE_MICROCLIP === true) return;
   try {
     const dwell = Math.max(900, Number(window.MINI_SCORE_MS || 1800));
     try { window.__SCORING_DELEGATED = false; } catch {}
@@ -898,8 +899,15 @@ window.addEventListener('microclip:done', (event) => {
           const enter = Number(window.ballState?.proxEnterFrame ?? NaN);
           const insideStreak = Number(window.ballState?._proxInsideStreak || 0);
           const needInside = Number(window.PROX_IN_CONSEC_MIN ?? 2);
+          const frameIdx = Number(e?.detail?.frame ?? window.__REL_LAST_FRAME ?? NaN);
           if (!Number.isFinite(enter) && insideStreak < needInside) {
             window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+          }
+          if (Number.isFinite(enter) && Number.isFinite(frameIdx)) {
+            const maxLag = Number(window.REL_PROX_MAX_LAG_FRAMES || 120);
+            if ((frameIdx - enter) > maxLag) {
+              window.__releaseEventSent = false; e.stopImmediatePropagation(); return;
+            }
           }
         } catch {}
 
@@ -909,7 +917,13 @@ window.addEventListener('microclip:done', (event) => {
           const armedAtMs = Number(window.__readyForScoringArmedAtMs || 0);
           if (armedAtMs > 0) {
             const sampleMs = Number.isFinite(lastTrailMs) ? lastTrailMs : Number(window.ballState?.trail?.at?.(-1)?.tMs);
-            if (!Number.isFinite(sampleMs) || sampleMs <= armedAtMs) {
+            if (!Number.isFinite(sampleMs)) {
+              window.__releaseEventSent = false;
+              e.stopImmediatePropagation();
+              return;
+            }
+            const minBallMs = Number(window.__readyForScoringBallMsAtArm || armedAtMs);
+            if (Number.isFinite(minBallMs) && sampleMs < minBallMs) {
               window.__releaseEventSent = false;
               e.stopImmediatePropagation();
               return;
