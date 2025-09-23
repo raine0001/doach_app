@@ -391,6 +391,34 @@ export function drawBallArc(ctx, opts={}) {
   ctx.restore();
 }
 
+(function installBallTrackerIngest(){
+  try {
+    if (window.__ballTrackerIngest) return;
+    window.__ballTrackerIngest = true;
+  } catch {
+    return;
+  }
+
+  try { window.updateBall = window.updateBall || updateBall; } catch {}
+
+  window.addEventListener('ball:point', (e) => {
+    try {
+      const d = e?.detail || {};
+      if (!Number.isFinite(d.x) || !Number.isFinite(d.y)) return;
+      (window.updateBall || updateBall)?.(d.x, d.y, {
+        frame: Number.isFinite(d.frame) ? Number(d.frame) : undefined,
+        tMs: Number.isFinite(d.tMs) ? Number(d.tMs) : undefined,
+        conf: Number.isFinite(d.conf) ? Number(d.conf) : undefined,
+        via: d.via || 'evt'
+      });
+    } catch (err) {
+      console.error('[ball:point->updateBall] failed', err);
+    }
+  }, { passive: true });
+
+  try { window.__dbgLine?.('[ingest] ball_tracker bound to ball:point'); } catch {}
+})();
+
 // Back-compat export with a live trail view + mutable fields used across modules
 export const ballState = {
   get trail(){ return state.trail; },

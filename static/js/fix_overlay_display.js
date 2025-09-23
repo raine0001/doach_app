@@ -1149,6 +1149,57 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
   window.__detPending = new Map();
   if (!window.__detWorker) return;
 
+  const emitDetections = (dets, frameIndex, tMs, via='detector') => {
+    try {
+      window.dispatchEvent(new CustomEvent('objects:frame', { detail: { dets: dets || [], frame: frameIndex, tMs, via } }));
+    } catch {}
+
+    const BALL_LABELS = ['ball', 'basketball', 'sports_ball'];
+    const MIN_SCORE = Number(window.BALL_MIN_SCORE ?? 0.3);
+    const isBallLabel = (s) => !!s && BALL_LABELS.includes(String(s).toLowerCase());
+
+    let chosen = null;
+    for (const d of dets || []) {
+      const lab = d?.label ?? d?.class ?? d?.type;
+      const sc = d?.score ?? d?.confidence ?? 0;
+      const box = d?.bbox ?? d?.box ?? d?.rect;
+      if (!isBallLabel(lab) || !Number.isFinite(sc) || sc < MIN_SCORE || !box) continue;
+      let cx = null;
+      let cy = null;
+      if (Array.isArray(box) && box.length === 4) {
+        const [x1, y1, x2, y2] = box.map(Number);
+        if ([x1, y1, x2, y2].every(Number.isFinite)) {
+          cx = (x1 + x2) / 2;
+          cy = (y1 + y2) / 2;
+        }
+      } else {
+        const bx = Number(box.x ?? box.left ?? NaN);
+        const by = Number(box.y ?? box.top ?? NaN);
+        const bw = Number(box.w ?? box.width ?? ((box.right ?? NaN) - (box.x ?? box.left ?? 0)));
+        const bh = Number(box.h ?? box.height ?? ((box.bottom ?? NaN) - (box.y ?? box.top ?? 0)));
+        if ([bx, by, bw, bh].every(Number.isFinite)) {
+          cx = bx + bw / 2;
+          cy = by + bh / 2;
+        }
+      }
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
+      chosen = { x: cx, y: cy, conf: sc };
+      break;
+    }
+
+    if (chosen) {
+      const detail = { x: chosen.x, y: chosen.y, conf: chosen.conf, frame: frameIndex, tMs, via };
+      try { window.dispatchEvent(new CustomEvent('ball:point', { detail })); } catch {}
+      try { window.__dbgLine?.(`[det→ball] f=${frameIndex} conf=${chosen.conf.toFixed(2)} @(${Math.round(chosen.x)},${Math.round(chosen.y)})`); } catch {}
+    } else {
+      try { window.__dbgLine?.(`[det] no ball in f=${frameIndex}`); } catch {}
+    }
+
+    return chosen;
+  };
+
+  window.__detBroadcast = emitDetections;
+
   window.__detWorker.onmessage = (e) => {
     const m = e.data || {};
     if (m.type === 'ready') { window.__detReady = true; return; }
@@ -1159,9 +1210,8 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
       if (Array.isArray(m.objects)) {
         window.__detCache = { objects: m.objects, frameIndex: m.frameIndex, _source: 'worker-late' };
         try {
-          window.dispatchEvent(new CustomEvent('localdet:frame', {
-            detail: { dets: m.objects, frame: m.frameIndex, tMs: performance.now(), via: 'local' }
-          }));
+          const tMs = performance.now();
+          emitDetections(m.objects, m.frameIndex, tMs, 'local');
         } catch {}
       }
       return;
@@ -1170,11 +1220,11 @@ if (typeof window.__LOCAL_DETECTOR === 'undefined') window.__LOCAL_DETECTOR = tr
     if (m.type === 'error') console.warn('[detector.worker] Error:', m.error);
   };
 
-  window.__detWorker.postMessage({
-    type: 'init',
-    modelUrl: '/static/models/best.onnx',
-    fbUrl:    '/static/models/backup_best.onnx',
-    labels:   ['basketball','hoop','net','backboard','player']
+      window.__detWorker.postMessage({
+        type: 'init',
+        modelUrl: '/static/models/best.onnx',
+        fbUrl:    '/static/models/backup_best.onnx',
+        labels:   ['basketball','hoop','net','backboard','player']
   });
 })();
 
@@ -1202,9 +1252,8 @@ try {
           if (Array.isArray(m.objects)) {
             window.__detCache = { objects: m.objects, frameIndex: m.frameIndex, _source: 'worker-late' };
             try {
-              window.dispatchEvent(new CustomEvent('localdet:frame', {
-                detail: { dets: m.objects, frame: m.frameIndex, tMs: performance.now(), via: 'local' }
-              }));
+              const tMs = performance.now();
+              (window.__detBroadcast || (() => null))(m.objects, m.frameIndex, tMs, 'local');
             } catch {}
           }
           return;
@@ -1245,7 +1294,8 @@ async function detectViaServer(canvas, frameIndex, OW, OH) {
     out._source = 'server';
     try {
       if (Array.isArray(out?.objects)) {
-        window.ingestServerDetections?.(out.objects, performance.now(), frameIndex);
+        const tMs = performance.now();
+        (window.__detBroadcast || (()=>{}))(out.objects, frameIndex, tMs, 'server');
       }
     } catch {}
     return out;

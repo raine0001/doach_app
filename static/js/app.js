@@ -26,7 +26,7 @@ window.POSE_WARMUP_FRAMES = 20;          // frames of ok pose before warm status
 window.BALL_MIN_SCORE     = 0.30;        // min detector conf for ball
 window.BALL_LABELS        = ['ball', 'basketball', 'sports_ball', 'sports ball'];
 window.MIN_TRAIL_TO_ARM   = 1;           // at least one fresh sample post-arm
-window.__FORCE_LOCAL_DETECTOR__ = true;  // prefer local worker while stabilizing
+window.__FORCE_LOCAL_DETECTOR__ = window.__FORCE_LOCAL_DETECTOR__ ?? false;
 window.__DEV_ALLOW_STALE_TRAIL__ = false; // set true via console only when debugging
 
 
@@ -196,149 +196,41 @@ function updatePoseWarmup(resultOrBool) {
 window.updatePoseWarmup = updatePoseWarmup;
 
 function ingestServerDetections(dets, tMs = performance.now(), frame) {
-  let best = null;
+  const frameIdx = Number.isFinite(frame) ? Number(frame) : (Number(window.__AN_IDX) || 0);
+  const items = Array.isArray(dets) ? dets : [];
   try {
-    const items = Array.isArray(dets) ? dets : [];
-    try {
-      const summary = items.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
-      window.__dbgLine?.(`[det] ${summary || 'none'}`);
-      if (summary) console.log('[server:det]', summary);
-      else console.log('[server:det] none');
-    } catch {}
-    const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
-    for (const d of items) {
-      const label = d?.label ?? d?.class ?? d?.type;
-      if (!isBallLabel(label)) continue;
-      const score = d?.score ?? d?.confidence ?? 1;
-      if (!Number.isFinite(score) || score < minScore) continue;
-      const box = d?.bbox ?? d?.box ?? d?.rect ?? null;
-      if (!box) continue;
-      let cx = null;
-      let cy = null;
-      if (Array.isArray(box) && box.length === 4) {
-        const [x1, y1, x2, y2] = box.map(Number);
-        if ([x1, y1, x2, y2].every(Number.isFinite)) {
-          cx = (x1 + x2) / 2;
-          cy = (y1 + y2) / 2;
-        }
-      } else {
-        const bx = Number(box.x ?? box.left ?? NaN);
-        const by = Number(box.y ?? box.top ?? NaN);
-        const bw = Number(box.w ?? box.width ?? ((box.right ?? NaN) - (box.x ?? box.left ?? 0)));
-        const bh = Number(box.h ?? box.height ?? ((box.bottom ?? NaN) - (box.y ?? box.top ?? 0)));
-        if ([bx, by, bw, bh].every(Number.isFinite)) {
-          cx = bx + bw / 2;
-          cy = by + bh / 2;
-        }
-      }
-      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
-      best = { x: cx, y: cy, score, tMs };
-      break;
-    }
-    const frameIdx = Number.isFinite(frame) ? Number(frame) : (Number(window.__AN_IDX) || 0);
-    window.dispatchEvent?.(new CustomEvent('objects:frame', {
-      detail: { dets: items, frame: frameIdx, tMs, via: 'server' }
-    }));
+    const summary = items.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
+    window.__dbgLine?.(`[det] ${summary || 'none'}`);
+    if (summary) console.log('[server:det]', summary); else console.log('[server:det] none');
+  } catch {}
+  try {
+    return (window.__detBroadcast || (() => null))(items, frameIdx, tMs, 'server');
   } catch (err) {
     console.warn('[server-dets] ingest error', err);
+    return null;
   }
-  return best;
 }
 window.ingestServerDetections = ingestServerDetections;
 
-(function installBallIngest(){
-  if (window.__ballIngestInstalled) return;
-  window.__ballIngestInstalled = true;
-
-  function getBallLabels() {
-    const fromWindow = Array.isArray(window.BALL_LABELS) ? window.BALL_LABELS : null;
-    return fromWindow || ['ball', 'basketball', 'sports_ball'];
-  }
-
-  function isBallLbl(label) {
-    if (!label) return false;
-    const list = getBallLabels();
-    const needle = String(label).toLowerCase();
-    return list.includes(needle);
-  }
-
-  function selectBall(dets) {
-    const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
-    for (const d of dets || []) {
-      const lab = d?.label ?? d?.class ?? d?.type;
-      const score = d?.score ?? d?.confidence ?? 0;
-      if (!isBallLbl(lab) || !Number.isFinite(score) || score < minScore) continue;
-      const box = d?.bbox ?? d?.box ?? d?.rect;
-      if (!box) continue;
-      let cx = null;
-      let cy = null;
-      if (Array.isArray(box) && box.length === 4) {
-        const [x1, y1, x2, y2] = box.map(Number);
-        if ([x1, y1, x2, y2].every(Number.isFinite)) {
-          cx = (x1 + x2) / 2;
-          cy = (y1 + y2) / 2;
-        }
-      } else {
-        const bx = Number(box.x ?? box.left ?? NaN);
-        const by = Number(box.y ?? box.top ?? NaN);
-        const bw = Number(box.w ?? box.width ?? ((box.right ?? NaN) - (box.x ?? box.left ?? 0)));
-        const bh = Number(box.h ?? box.height ?? ((box.bottom ?? NaN) - (box.y ?? box.top ?? 0)));
-        if ([bx, by, bw, bh].every(Number.isFinite)) {
-          cx = bx + bw / 2;
-          cy = by + bh / 2;
-        }
-      }
-      if (!Number.isFinite(cx) || !Number.isFinite(cy)) continue;
-      return { x: cx, y: cy, score, label: lab };
-    }
-    return null;
-  }
-
-  function handleDetEvent(e, defaultVia) {
-    try {
-      const detail = e?.detail || {};
-      const dets = detail.dets || detail.objects || [];
-      const via = detail.via || defaultVia || 'unknown';
-      if (dets.length && via !== 'server') {
-        try {
-          const summary = dets.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
-          window.__dbgLine?.(`[det] ${summary}`);
-        } catch {}
-      }
-      const ball = selectBall(dets);
-      if (!ball) return;
-      const frame = Number.isFinite(detail.frame) ? Number(detail.frame) : (Number(window.__AN_IDX) || 0);
-      const tMs = Number.isFinite(detail.tMs) ? Number(detail.tMs) : performance.now();
-      window.updateBall?.(ball.x, ball.y, { frame, tMs, conf: ball.score, via });
-    } catch (err) {
-      console.warn('[ball-ingest] event error', err);
-    }
-  }
-
-  window.addEventListener('objects:frame', (e) => handleDetEvent(e, 'server'), { passive: true });
-  window.addEventListener('localdet:frame', (e) => handleDetEvent(e, 'local'), { passive: true });
-
-  window.__dbgLine?.('[ingest] ball ingest harness installed');
-})();
-
-(function chooseDetectorPath() {
+function chooseDetector() {
   try {
-    const wantLocal = window.__FORCE_LOCAL_DETECTOR__ === true || window.localDetectorAvailable?.();
-    if (wantLocal) {
+    const wantLocal = window.__FORCE_LOCAL_DETECTOR__ === true;
+    if (wantLocal && typeof window.enableLocalDetector === 'function') {
       window.__forceServerDetect = false;
       window.__LOCAL_DETECTOR = true;
-      if (window.enableLocalDetector?.()) {
-        console.log('[LocalDetector] enabled (forced)');
-      } else {
-        console.log('[LocalDetector] forcing local but awaiting readiness');
-      }
+      window.enableLocalDetector();
+      window.__dbgLine?.('[LocalDetector] enabled (forced)');
     } else {
       window.useServerDetector?.();
+      window.__dbgLine?.('[ServerDetector] enabled');
     }
   } catch (err) {
     console.warn('[LocalDetector] chooser error', err);
   }
-})();
+}
+
+window.chooseDetector = chooseDetector;
+chooseDetector();
 
 (function bindArcWorker(){
   if (window.__arcBound) return;
@@ -355,6 +247,9 @@ window.ingestServerDetections = ingestServerDetections;
       arc.trail = Array.isArray(arc.trail) ? arc.trail : [];
       arc.trail.push({ x: d.x, y: d.y, frame: d.frame, tMs: d.tMs });
       window.refineArc?.();
+      const tLen = arc.trail?.length || 0;
+      const rLen = arc.refinedTrail?.length || 0;
+      window.__dbgLine?.(`[arc] trail=${tLen} arc=${rLen}`);
     } catch (err) {
       console.warn('[arc] trail-step handler error', err);
     }
@@ -369,14 +264,13 @@ window.ingestServerDetections = ingestServerDetections;
 
   function storeCanon(hb) {
     if (!hb) return null;
-    try {
-      const box = canonHoop?.(hb);
-      if (box && Number.isFinite(box.x)) {
-        window.__canonHoopBox = { ...box };
-        return window.__canonHoopBox;
-      }
-    } catch {}
-    return null;
+    const x = Math.max(0, Math.round(hb.x ?? hb.left ?? 0));
+    const y = Math.max(0, Math.round(hb.y ?? hb.top ?? 0));
+    const w = Math.max(1, Math.round(hb.w ?? hb.width ?? ((hb.right ?? x) - x)));
+    const h = Math.max(1, Math.round(hb.h ?? hb.height ?? ((hb.bottom ?? y) - y)));
+    const box = { x, y, w, h, cx: x + w / 2, cy: y + h / 2 };
+    window.__canonHoopBox = box;
+    return box;
   }
 
   window.addEventListener('hoop:locked', (e) => {
