@@ -198,6 +198,14 @@ function ingestServerDetections(dets, tMs = performance.now(), frame) {
   let best = null;
   try {
     const items = Array.isArray(dets) ? dets : [];
+    try {
+      if (items.length) {
+        const summary = items.map(d => `${d?.label ?? d?.class ?? d?.type}:${Number(d?.score ?? d?.confidence ?? 0).toFixed(2)}`).join(', ');
+        console.log('[server:det]', summary);
+      } else {
+        console.log('[server:det] none');
+      }
+    } catch {}
     const minScore = Number(window.BALL_MIN_SCORE ?? 0.3);
     for (const d of items) {
       const label = d?.label ?? d?.class ?? d?.type;
@@ -233,9 +241,8 @@ function ingestServerDetections(dets, tMs = performance.now(), frame) {
   }
   try {
     if (best && typeof window.updateBall === 'function') {
-      const pt = { x: best.x, y: best.y, tMs: best.tMs, via: 'server', score: best.score };
-      const frameIdx = Number.isFinite(frame) ? frame : 0;
-      window.updateBall(pt, frameIdx);
+      const meta = { frame, tMs: best.tMs, conf: best.score, via: 'server' };
+      window.updateBall(best.x, best.y, meta);
     }
   } catch (err) {
     console.warn('[server-dets] updateBall failed', err);
@@ -273,9 +280,7 @@ window.ingestServerDetections = ingestServerDetections;
       const last = trail.at?.(-1) || null;
       const hoopOk = !!window.__hoopConfirmed || !!window.getLockedHoopBox?.();
       const poseOk = !!window.__POSE_WARMUP_OK;
-      const minTrail = Number(window.MIN_TRAIL_TO_ARM ?? 1);
-      const trailOk = trail.length >= minTrail;
-      const ready = hoopOk && poseOk && trailOk;
+      const ready = hoopOk && poseOk;
       if (ready) {
         if (!window.__shotTrackingArmed) {
           window.__shotTrackingArmed = true;
@@ -284,7 +289,7 @@ window.ingestServerDetections = ingestServerDetections;
           window.__readyForScoringArmedAtMs = armedAt;
           const lastMs = Number(last?.tMs);
           if (Number.isFinite(lastMs)) window.__readyForScoringBallMsAtArm = lastMs;
-          window.__dbgLine?.('[armed] ceremony satisfied');
+          window.__dbgLine?.('[armed] ceremony satisfied (hoop+pose)');
         }
       } else if (window.__shotTrackingArmed) {
         window.__shotTrackingArmed = false;
@@ -1067,6 +1072,13 @@ window.addEventListener('microclip:done', (event) => {
   if (typeof window.safeEmitRelease !== 'function') {
     window.safeEmitRelease = function safeEmitRelease(frame, via='unknown', opts={}) {
       try {
+        if (opts && opts.bypassGate === true) {
+          const detail = { frame, via, tMs: performance.now(), ...opts };
+          window.dispatchEvent(new CustomEvent('shot:release', { detail }));
+          window.__dbgLine?.('[safeEmitRelease] bypass fired');
+          return true;
+        }
+
         // Hard stop at session cap/end
         if (window.__sessionEnded === true || (window.__sessionCapped === true && window.__sessionContinue !== true)) return false;
         try {
@@ -1133,7 +1145,8 @@ window.addEventListener('microclip:done', (event) => {
         (window.__markReleasePose || window.markRelease)?.(frame, markPayload);
         window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
         window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
-        window.dispatchEvent(new CustomEvent('shot:release', { detail: { frame, via } }));
+        const detail = { frame, via, prox, tMs: now, ...opts };
+        window.dispatchEvent(new CustomEvent('shot:release', { detail }));
         window.__REL_LAST_FRAME = frame;
 
         try { __reportReleaseToServer?.({ frame, via, tMs: Date.now(), prox }); } catch {}
@@ -1198,6 +1211,11 @@ window.addEventListener('microclip:done', (event) => {
       let lastTrailPoint = null;
       let lastTrailMs = NaN;
       try {
+        const detail = e?.detail || {};
+        if (detail?.bypassGate === true) {
+          window.__dbgLine?.('[gate:bypass] dev');
+          return;
+        }
         const devAllowStaleTrail = (window.__DEV_ALLOW_STALE_TRAIL__ === true);
         if (window.__shotTrackingArmed !== true) {
           window.__releaseEventSent = false;

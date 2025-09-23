@@ -124,9 +124,32 @@ export function resetBallTrail() {
 export function setBallActive(on=true){ state.active = !!on; }
 
 // Host calls this once per analyzed frame when a detection for the ball exists.
-export function updateBall(point, frameIndex) {
+export function updateBall(arg1, arg2, arg3) {
   if (!state.active) return false;
+
+  let point = null;
+  let frameIndex = null;
+  let meta = {};
+
+  if (typeof arg1 === 'number' && typeof arg2 === 'number') {
+    point = { x: arg1, y: arg2 };
+    meta = (typeof arg3 === 'object' && arg3) ? arg3 : {};
+    frameIndex = Number(meta.frame);
+  } else {
+    point = arg1 || {};
+    meta = (typeof arg3 === 'object' && arg3) ? arg3 : (typeof arg2 === 'object' ? arg2 : {});
+    frameIndex = Number(arg2);
+  }
+
   if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+
+  if (!Number.isFinite(frameIndex)) frameIndex = Number(meta.frame);
+  if (!Number.isFinite(frameIndex)) frameIndex = Number(point.frame);
+  if (!Number.isFinite(frameIndex)) frameIndex = Number(window.__AN_IDX ?? window.__REL_LAST_FRAME ?? 0) || 0;
+
+  const sampleMs = Number.isFinite(meta?.tMs) ? Number(meta.tMs)
+                    : Number.isFinite(point?.tMs) ? Number(point.tMs)
+                    : performance.now();
 
   try { window.ballState = window.ballState || ballState; } catch {}
   const bs = window.ballState || ballState;
@@ -135,60 +158,70 @@ export function updateBall(point, frameIndex) {
   }
 
   // Init KF if needed
-  if (!state.kf) { state.kf = new Kalman2D(1, OPT.KF_PROCESS_NOISE, OPT.KF_MEASURE_NOISE); state.kf.initFrom(point.x, point.y); }
-  const sampleMs = Number.isFinite(point?.tMs) ? Number(point.tMs) : performance.now();
+  if (!state.kf) {
+    state.kf = new Kalman2D(1, OPT.KF_PROCESS_NOISE, OPT.KF_MEASURE_NOISE);
+    state.kf.initFrom(point.x, point.y);
+  }
 
-  // Fill small gaps and clamp large jumps relative to last recorded point
   const last = state.trail.at?.(-1) || null;
   const gap = (last && Number.isFinite(last.frame)) ? (frameIndex - last.frame) : 0;
   if (last && gap > 1) {
-    const fillN = Math.min(gap-1, OPT.GAP_FILL_MAX);
-    for (let i=1;i<=fillN;i++) {
+    const fillN = Math.min(gap - 1, OPT.GAP_FILL_MAX);
+    for (let i = 1; i <= fillN; i++) {
       state.kf.predict(1);
-      const px = state.kf.x[0], py = state.kf.x[1];
-      state.trail.push({ x:px, y:py, frame: last.frame + i , tMs: last.tMs ?? sampleMs });
+      const px = state.kf.x[0];
+      const py = state.kf.x[1];
+      state.trail.push({ x: px, y: py, frame: last.frame + i, tMs: last.tMs ?? sampleMs });
     }
   }
 
-  // Predict to current frame
   const steps = (last && Number.isFinite(last.frame)) ? Math.max(0, frameIndex - (last.frame || frameIndex)) : 1;
-  for (let i=0;i<steps;i++) state.kf.predict(1);
-  // Update with measurement
+  for (let i = 0; i < steps; i++) state.kf.predict(1);
   state.kf.update(point.x, point.y);
 
-  // Clamp big step from previous sample
   let sx = state.kf.x[0], sy = state.kf.x[1];
   if (last) {
-    const dx = sx - last.x, dy = sy - last.y; const d = Math.hypot(dx, dy);
-    if (d > OPT.MAX_STEP) { const r = OPT.MAX_STEP / d; sx = last.x + dx*r; sy = last.y + dy*r; }
+    const dx = sx - last.x;
+    const dy = sy - last.y;
+    const d = Math.hypot(dx, dy);
+    if (d > OPT.MAX_STEP) {
+      const r = OPT.MAX_STEP / d;
+      sx = last.x + dx * r;
+      sy = last.y + dy * r;
+    }
   }
 
-  state.trail.push({ x: sx, y: sy, frame: frameIndex , tMs: sampleMs });
-  try {
-    bs.state = 'TRACKING';
-  } catch {}
+  const sample = {
+    x: sx,
+    y: sy,
+    frame: frameIndex,
+    tMs: sampleMs,
+    conf: Number.isFinite(meta?.conf) ? Number(meta.conf) : Number.isFinite(point?.score) ? Number(point.score) : undefined,
+    via: meta?.via ?? point?.via
+  };
+
+  state.trail.push(sample);
+  try { bs.state = 'TRACKING'; } catch {}
+
   try {
     const prev = state.trail.at?.(-2) || null;
-    const curr = state.trail.at?.(-1) || null;
-    const gapF = (prev && curr && Number.isFinite(prev.frame) && Number.isFinite(curr.frame)) ? (curr.frame - prev.frame) : 0;
-    if (curr) {
-      const detail = { frame: curr.frame, gapF, len: state.trail.length, x: curr.x, y: curr.y, tMs: curr.tMs };
-      if (point?.via) detail.via = point.via;
-      if (Number.isFinite(point?.score)) detail.score = Number(point.score);
-      window.dispatchEvent?.(new CustomEvent('ball:trail-step', { detail }));
-      try {
-        const arc = window.ballArc || {};
-        const refined = Array.isArray(arc.refinedTrail) && arc.refinedTrail.length ? arc.refinedTrail.length : 0;
-        const arcLen = refined || (Array.isArray(arc.trail) ? arc.trail.length : 0);
-        const msg = `[arc] trail=${state.trail.length} arc=${arcLen}`;
-        if (window.__dbgArcLast !== msg) {
-          window.__dbgArcLast = msg;
-          window.__dbgLine?.(msg);
-        }
-      } catch {}
-    }
+    const gapF = prev ? (sample.frame - prev.frame) : 0;
+    const detail = { frame: sample.frame, gapF, len: state.trail.length, x: sample.x, y: sample.y, tMs: sample.tMs };
+    if (sample.via) detail.via = sample.via;
+    if (Number.isFinite(sample.conf)) detail.score = sample.conf;
+    window.dispatchEvent?.(new CustomEvent('ball:trail-step', { detail }));
+    try {
+      const arc = window.ballArc || {};
+      const refined = Array.isArray(arc.refinedTrail) && arc.refinedTrail.length ? arc.refinedTrail.length : 0;
+      const arcLen = refined || (Array.isArray(arc.trail) ? arc.trail.length : 0);
+      const msg = `[arc] trail=${state.trail.length} arc=${arcLen}`;
+      if (window.__dbgArcLast !== msg) {
+        window.__dbgArcLast = msg;
+        window.__dbgLine?.(msg);
+      }
+    } catch {}
   } catch {}
-  // Cap trail size
+
   if (state.trail.length > OPT.MAX_TRAIL_POINTS) state.trail.splice(0, state.trail.length - OPT.MAX_TRAIL_POINTS);
   state.lastFrame = frameIndex;
   return true;

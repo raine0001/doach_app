@@ -15,12 +15,36 @@ if (!self.__ORT_BOOTSTRAPPED__) {
   self.__ORT_BOOTSTRAPPED__ = true;
 }
 const ORT = self.ort;
-let provider = (self.navigator && (self.navigator).gpu) ? 'webgpu' : 'wasm';
+let provider = 'wasm';
 
 // WASM runtime config
 ORT.env.wasm.wasmPaths  = '/static/vendor/onnxruntime-web/1.20.0/';
 try { ORT.env.wasm.numThreads = Math.min(4, (self.navigator && self.navigator.hardwareConcurrency) || 4); } catch { ORT.env.wasm.numThreads = 1; }
 ORT.env.wasm.simd       = true;
+
+async function createSession(modelUrl, extraOpts = {}, { report = true } = {}) {
+  const candidates = [];
+  try { if (typeof navigator !== 'undefined' && navigator?.gpu) candidates.push('webgpu'); } catch {}
+  candidates.push('wasm');
+
+  let lastErr = null;
+  for (const ep of candidates) {
+    try {
+      const session = await ORT.InferenceSession.create(modelUrl, {
+        ...extraOpts,
+        executionProviders: [ep]
+      });
+      if (report) {
+        provider = ep;
+        try { self.postMessage({ type: 'detector:ep', ep, model: modelUrl }); } catch {}
+      }
+      return { session, ep };
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+  throw lastErr || new Error('no execution provider usable');
+}
 
 // ──────────────────────────────────────────────────────────────
 // Config & labels
@@ -236,10 +260,10 @@ self.onmessage = async (e) => {
         : null;
 
       // primary session
-      session = await ORT.InferenceSession.create(msg.modelUrl || MODEL_URL, {
-        executionProviders: [provider],
+      const created = await createSession(msg.modelUrl || MODEL_URL, {
         graphOptimizationLevel: 'all'
       });
+      session = created.session;
       inputName  = session.inputNames[0];
       const meta = session.inputMetadata?.[inputName];
       inputShape = meta?.dimensions || [1,3,MODEL_SIZE,MODEL_SIZE];
@@ -248,10 +272,10 @@ self.onmessage = async (e) => {
 
       // optional fallback
       if (msg.fbUrl) {
-        sessionFB = await ORT.InferenceSession.create(msg.fbUrl, {
-          executionProviders: [provider],
+        const fbCreated = await createSession(msg.fbUrl, {
           graphOptimizationLevel: 'all'
-        });
+        }, { report: false });
+        sessionFB = fbCreated.session;
         inputNameFB  = sessionFB.inputNames[0];
         const metaFB = sessionFB.inputMetadata?.[inputNameFB];
         inputShapeFB = metaFB?.dimensions || [1,3,MODEL_SIZE,MODEL_SIZE];
