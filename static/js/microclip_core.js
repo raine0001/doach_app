@@ -1,35 +1,6 @@
-import { resetAll, setBallActive, updateBall } from './ball_tracker.js';
-import { updateArc as shotArcUpdateArc, proxFromHoop, resetShotFSM as resetShotFSM } from './shot_arc.js';
-import { scoringTick, checkShotConditions, summarizeShot } from './shot_logger.js';
-import { canonHoop } from './hoop_tracker.js';
-
 const DETECTOR_MODEL_URL = '/static/models/best.onnx';
 const DETECTOR_FALLBACK_URL = '/static/models/backup_best.onnx';
 const DETECTOR_LABELS = ['basketball', 'hoop', 'net', 'backboard', 'player'];
-
-if (typeof self.CustomEvent !== 'function') {
-  self.CustomEvent = class CustomEvent {
-    constructor(type, init = {}) {
-      this.type = type;
-      this.detail = init.detail;
-      this.bubbles = !!init.bubbles;
-      this.cancelable = !!init.cancelable;
-      this.timeStamp = Date.now();
-    }
-    preventDefault() { this.defaultPrevented = true; }
-  };
-}
-
-const __nativeDispatchEvent = typeof self.dispatchEvent === 'function' ? self.dispatchEvent.bind(self) : null;
-if (__nativeDispatchEvent) {
-  self.dispatchEvent = function microclipDispatchEvent(event) {
-    try {
-      return __nativeDispatchEvent(event);
-    } catch (_) {
-      return false;
-    }
-  };
-}
 
 let detectorWorker = null;
 let detectorReady = false;
@@ -38,6 +9,16 @@ let resolveDetectorReady = null;
 let rejectDetectorReady = null;
 const detectorPending = new Map();
 let detectorSeq = 0;
+
+const DEFAULT_OPTIONS = {
+  maxTrailPoints: 260,
+  maxStepPx: 64,
+  gapFillMax: 4,
+  progressStride: 6,
+  refineWindow: 18,
+  earlyStopFrames: 20,
+  lingerLimit: 60
+};
 
 function ensureDetectorWorker() {
   if (detectorReady) return Promise.resolve();
@@ -56,6 +37,7 @@ function ensureDetectorWorker() {
       reject(err);
       return;
     }
+
     detectorWorker.postMessage({
       type: 'init',
       modelUrl: DETECTOR_MODEL_URL,
@@ -107,11 +89,13 @@ function detectBitmap(bitmap, width, height, meta) {
         reject(new Error('detector-timeout'));
       }
     }, 2000);
+
     detectorPending.set(reqId, {
       resolve: (result) => { clearTimeout(timeout); resolve(result); },
       reject: (err) => { clearTimeout(timeout); reject(err); },
       meta
     });
+
     detectorWorker.postMessage({ type: 'detect', frameIndex: reqId, bitmap, ow: width, oh: height }, [bitmap]);
   }));
 }
@@ -138,247 +122,122 @@ function adjustDetectorObjects(objs, meta = {}) {
   });
 }
 
-export function normalizeFrames(input) {
-  if (!Array.isArray(input)) return [];
-  const normalized = [];
-  for (let i = 0; i < input.length; i++) {
-    const item = input[i];
-    if (!item) continue;
-    if (item instanceof ImageBitmap) {
-      normalized.push({ bitmap: item, frameIdx: i, ts: null, meta: null });
-    } else if (item.bitmap instanceof ImageBitmap) {
-      const idx = Number.isFinite(item.frameIdx) ? item.frameIdx : i;
-      normalized.push({
-        bitmap: item.bitmap,
-        frameIdx: idx,
-        ts: Number.isFinite(item.ts) ? item.ts : null,
-        meta: item
-      });
-    }
-  }
-  return normalized;
+function normalizeHoop(raw) {
+  if (!raw) return null;
+  const w = Number(raw.w ?? raw.width ?? 0);
+  const h = Number(raw.h ?? raw.height ?? 0);
+  let x = Number(raw.x ?? raw.x1 ?? (raw.cx != null ? raw.cx - w / 2 : 0));
+  let y = Number(raw.y ?? raw.y1 ?? (raw.cy != null ? raw.cy - h / 2 : 0));
+  const cx = Number(raw.cx ?? (x + w / 2));
+  const cy = Number(raw.cy ?? (y + h / 2));
+  const rimTop = Number(raw.rimTop ?? y);
+  return { x, y, w, h, cx, cy, rimTop };
 }
 
-export function disposeFrameCollection(frames) {
-  if (!Array.isArray(frames)) return;
-  for (const entry of frames) {
-    const bmp = entry instanceof ImageBitmap ? entry : entry?.bitmap;
-    if (bmp && typeof bmp.close === 'function') {
-      try { bmp.close(); } catch {}
-    }
-  }
-}
-
-export async function runMicroclipJob(job, { postProgress } = {}) {
-  const frames = Array.isArray(job?.frames) ? job.frames : [];
-  const total = frames.length;
-  if (!total) {
-    return { summary: buildSummary({ status: job?.cancelled ? 'cancelled' : 'empty', framesUsed: 0 }) };
-  }
-
-  const first = frames[0];
-  const width = Number(first.bitmap?.width || first.width);
-  const height = Number(first.bitmap?.height || first.height);
-  if (!(width > 0 && height > 0)) {
-    return { summary: buildSummary({ status: 'invalid', framesUsed: 0 }) };
-  }
-
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext('2d', { willReadFrequently: true });
-
-  prepareShotEnvironment(job, { width, height });
-
-  const detectStride = Math.max(1, Number(job.detectStride) || 6);
-  const hoop = canonHoop(job?.hoop || (job?.meta?.hoop) || {});
-  const hoopAccessor = () => hoop;
-  self.getLockedHoopBox = hoopAccessor;
-
-  let processed = 0;
-  let lastBall = null;
-  let lastDetections = [];
-  let lastFrameIdx = Number.isFinite(first.frameIdx) ? first.frameIdx : 0;
-  let earlyStop = false;
-  const trailSamples = [];
-
-  for (let i = 0; i < total; i++) {
-    if (job.cancelled) break;
-    const frame = frames[i];
-    const frameIdx = Number.isFinite(frame.frameIdx)
-      ? frame.frameIdx
-      : (lastFrameIdx + 1);
-    lastFrameIdx = frameIdx;
-
-    ctx.clearRect(0, 0, width, height);
-    ctx.drawImage(frame.bitmap, 0, 0, width, height);
-
-    let detections = lastDetections;
-    if (!detections.length || (i % detectStride) === 0) {
-      detections = await detectWithROI(ctx, canvas, hoop, frameIdx).catch(() => []);
-      if (detections.length) {
-        lastDetections = detections;
-      }
-    }
-
-    let ballPoint = pickBallCenter(detections, lastBall, hoop);
-    if (!ballPoint && lastBall) {
-      const refined = refineBallWithROI(ctx, lastBall, 18);
-      if (refined) ballPoint = refined;
-    }
-    if (!ballPoint && detections.length) {
-      ballPoint = pickBallCenter(detections, null, hoop, true);
-    }
-    if (!ballPoint && lastBall) {
-      ballPoint = { x: lastBall.x, y: lastBall.y };
-    }
-
-    if (ballPoint) {
-      updateBall(ballPoint, frameIdx);
-      updateProxStampsWorker(frameIdx, ballPoint, hoop);
-      shotArcUpdateArc(frameIdx, ballPoint, hoop);
-      lastBall = ballPoint;
-    }
-
-    scoringTick(frameIdx);
-    checkShotConditions(self.ballState, hoop, frameIdx);
-
-    processed++;
-    if (typeof postProgress === 'function' && (processed === total || processed === 1 || (processed % 6) === 0)) {
-      postProgress({
-        stage: 'processing',
-        frameIndex: processed,
-        framesTotal: total,
-        proxEnter: self.ballState?.proxEnterFrame ?? null,
-        proxExit: self.ballState?.proxExitFrame ?? null
-      });
-    }
-
-    const trail = self.ballState?.trail;
-    if (Array.isArray(trail) && trail.length && (i === total - 1 || (processed % 5) === 0)) {
-      const pt = trail.at(-1);
-      if (pt) trailSamples.push({ x: Math.round(pt.x), y: Math.round(pt.y), frame: pt.frame });
-    }
-
-    frame.bitmap?.close?.();
-
-    const exitFrame = self.ballState?.proxExitFrame;
-    if (Number.isFinite(exitFrame) && (frameIdx - exitFrame) >= 20) {
-      earlyStop = true;
-      break;
-    }
-    const enterFrame = self.ballState?.proxEnterFrame;
-    if (Number.isFinite(enterFrame) && (frameIdx - enterFrame) >= 60) {
-      earlyStop = true;
-      break;
-    }
-  }
-
-  const summary = finalizeSummary({
+function createShotState({ releaseFrame, hoop, options = {} }) {
+  const opts = { ...DEFAULT_OPTIONS, ...options };
+  return {
+    releaseFrame: Number.isFinite(releaseFrame) ? releaseFrame : null,
+    proxEnterFrame: null,
+    proxExitFrame: null,
+    trail: [],
+    arcTrail: [],
+    trailSamples: [],
+    lastBall: null,
+    lastFrame: null,
+    proxInsideStreak: 0,
+    proxOutsideStreak: 0,
     hoop,
-    frameIdx: lastFrameIdx,
-    framesProcessed: processed,
-    trailSamples,
-    cancelled: job.cancelled,
-    earlyStop
-  });
-
-  setBallActive(false);
-  return { summary };
-}
-
-function prepareShotEnvironment(job, dims) {
-  resetShotFSM();
-  resetAll();
-  setBallActive(true);
-  self.ballState.releaseFrame = Number.isFinite(job?.releaseFrame)
-    ? job.releaseFrame
-    : Number.isFinite(job?.meta?.releaseFrame)
-      ? job.meta.releaseFrame
-      : 0;
-  self.ballState.state = 'TRACKING';
-  self.ballState.trail = [];
-  self.ballState.shots = [];
-  self.__shotTrackingArmed = true;
-  self.__hoopConfirmed = true;
-  self.__RESET_SEEN_BELOW = true;
-  self.POSE_FIRST_ONLY = false;
-  self.__fbf = { active: true, startFrame: self.ballState.releaseFrame || 0, stopFrame: -1 };
-  self.__SESSION_ACTIVE = true;
-  self.__shotList = Array.isArray(self.__shotList) ? self.__shotList : [];
-  if (!Array.isArray(self.shotLog)) self.shotLog = [];
-  return dims;
-}
-
-async function detectWithROI(ctx, canvas, hoop, frameIdx) {
-  const width = canvas.width;
-  const height = canvas.height;
-  const roi = computeROI(hoop, width, height);
-
-  const runFull = async () => {
-    const fullBitmap = await createImageBitmap(canvas);
-    const result = await detectBitmap(fullBitmap, width, height, { offsetX: 0, offsetY: 0, frameIdx });
-    return result.objects;
+    options: opts
   };
-
-  if (!roi) {
-    return await runFull();
-  }
-
-  const roiCanvas = new OffscreenCanvas(roi.w, roi.h);
-  const roiCtx = roiCanvas.getContext('2d');
-  roiCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
-  const roiBitmap = await createImageBitmap(roiCanvas);
-  const detection = await detectBitmap(roiBitmap, roi.w, roi.h, { offsetX: roi.x, offsetY: roi.y, frameIdx });
-  const objects = detection.objects || [];
-  const hasBall = objects.some(o => o?.label === 'basketball');
-  if (!hasBall) {
-    return await runFull();
-  }
-  return objects;
 }
 
-function computeROI(hoop, width, height) {
-  if (!hoop || !Number.isFinite(hoop.cx) || !Number.isFinite(hoop.cy)) return null;
-  const scale = Number(self.ROI_SUPERSAMPLE || 1.6);
-  const hoopWidth = Math.max(hoop.w || 100, 60);
-  const hoopHeight = Math.max(hoop.h || 80, 40);
-  const roiW = Math.min(width, Math.round(hoopWidth * scale));
-  const roiH = Math.min(height, Math.round(hoopHeight * scale * 1.8));
-  const cx = hoop.cx;
-  const cy = hoop.cy;
-  let x = Math.max(0, Math.round(cx - roiW / 2));
-  let y = Math.max(0, Math.round(cy - roiH * 0.45));
-  if (x + roiW > width) x = Math.max(0, width - roiW);
-  if (y + roiH > height) y = Math.max(0, height - roiH);
-  return { x, y, w: roiW, h: roiH };
-}
-
-function pickBallCenter(objects, lastPoint, hoop, allowLoose = false) {
-  const balls = (objects || [])
-    .filter(o => o && o.label === 'basketball' && Array.isArray(o.box))
-    .map(o => {
-      const [x1, y1, x2, y2] = o.box;
-      return { cx: (x1 + x2) / 2, cy: (y1 + y2) / 2, area: (x2 - x1) * (y2 - y1), box: o.box, raw: o };
-    });
-  if (!balls.length) return null;
-
-  balls.sort((a, b) => b.area - a.area);
-  const maxStep = Math.max(48, Number(self.BALL_MAX_STEP || 60));
-  if (lastPoint) {
-    let best = null;
-    let bestScore = Infinity;
-    for (const cand of balls) {
-      const dist = Math.hypot(cand.cx - lastPoint.x, cand.cy - lastPoint.y);
-      if (!allowLoose && dist > maxStep * 1.5) continue;
-      if (dist < bestScore) {
-        bestScore = dist;
-        best = cand;
+function updateBallState(state, point, frameIdx) {
+  if (!point) return;
+  if (state.releaseFrame == null) state.releaseFrame = frameIdx;
+  const opts = state.options;
+  let px = point.x;
+  let py = point.y;
+  const last = state.trail.at(-1);
+  if (last) {
+    const gap = frameIdx - last.frame;
+    if (gap > 1 && gap <= opts.gapFillMax) {
+      for (let g = 1; g < gap; g++) {
+        const t = g / gap;
+        state.trail.push({
+          x: last.x + (px - last.x) * t,
+          y: last.y + (py - last.y) * t,
+          frame: last.frame + g,
+          tMs: last.tMs
+        });
       }
     }
-    if (best) return { x: Math.round(best.cx), y: Math.round(best.cy) };
+    const dx = px - last.x;
+    const dy = py - last.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > opts.maxStepPx) {
+      const r = opts.maxStepPx / (dist || 1);
+      px = last.x + dx * r;
+      py = last.y + dy * r;
+    }
   }
 
-  const cand = balls[0];
-  return cand ? { x: Math.round(cand.cx), y: Math.round(cand.cy) } : null;
+  const tMs = typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+  state.trail.push({ x: px, y: py, frame: frameIdx, tMs });
+  if (state.trail.length > opts.maxTrailPoints) state.trail.shift();
+  state.lastBall = { x: px, y: py };
+  state.lastFrame = frameIdx;
+}
+
+function computeProxRect(hoop) {
+  if (!hoop) return null;
+  const proxX = Number(self.proxX) || 200;
+  const proxYAbove = Number(self.proxYAbove) || 170;
+  const proxYBelow = Number(self.proxYBelow) || 100;
+  return {
+    x: hoop.cx - proxX,
+    y: hoop.rimTop - proxYAbove,
+    w: proxX * 2,
+    h: proxYAbove + proxYBelow
+  };
+}
+
+function updateProx(state, frameIdx, ball, hoop) {
+  if (!ball || !hoop) return;
+  const prox = computeProxRect(hoop);
+  if (!prox) return;
+  const inside = ball.x >= prox.x && ball.x <= prox.x + prox.w && ball.y >= prox.y && ball.y <= prox.y + prox.h;
+  if (inside) {
+    state.proxInsideStreak += 1;
+    state.proxOutsideStreak = 0;
+    if (state.proxEnterFrame == null && state.proxInsideStreak >= 2) state.proxEnterFrame = frameIdx;
+  } else {
+    state.proxOutsideStreak += 1;
+    state.proxInsideStreak = 0;
+    if (state.proxExitFrame == null && state.proxOutsideStreak >= 2 && state.proxEnterFrame != null) {
+      state.proxExitFrame = frameIdx;
+    }
+  }
+}
+
+function updateArc(state, ball, frameIdx) {
+  if (!ball) return;
+  const releaseFrame = Number.isFinite(state.releaseFrame) ? state.releaseFrame : state.trail[0]?.frame;
+  if (releaseFrame != null && frameIdx >= releaseFrame) {
+    const lastArc = state.arcTrail.at(-1);
+    if (lastArc && frameIdx - lastArc.frame > 1) {
+      const gap = frameIdx - lastArc.frame;
+      for (let g = 1; g < gap; g++) {
+        const t = g / gap;
+        state.arcTrail.push({
+          x: lastArc.x + (ball.x - lastArc.x) * t,
+          y: lastArc.y + (ball.y - lastArc.y) * t,
+          frame: lastArc.frame + g
+        });
+      }
+    }
+    state.arcTrail.push({ x: ball.x, y: ball.y, frame: frameIdx });
+  }
 }
 
 function refineBallWithROI(ctx, lastPt, win = 18) {
@@ -414,65 +273,150 @@ function refineBallWithROI(ctx, lastPt, win = 18) {
   return bestScore > 2 ? bestPoint : null;
 }
 
-function updateProxStampsWorker(frameIdx, ballCenter, hoopLocked) {
-  if (!ballCenter || !hoopLocked) return;
-  const base = proxFromHoop(hoopLocked);
-  if (!base) return;
-  const pad = Math.max(6, Math.round((hoopLocked.w || 80) * 0.08));
-  const prox = { x: base.x - pad, y: base.y - pad, w: base.w + pad * 2, h: base.h + pad * 2 };
-  const inside = ballCenter.x >= prox.x && ballCenter.x <= prox.x + prox.w && ballCenter.y >= prox.y && ballCenter.y <= prox.y + prox.h;
-  const bs = self.ballState;
-  if (!bs) return;
-  bs._proxInsideStreak = inside ? (bs._proxInsideStreak || 0) + 1 : 0;
-  bs._proxOutsideStreak = !inside ? (bs._proxOutsideStreak || 0) + 1 : 0;
-  if (inside && bs.proxEnterFrame == null && bs._proxInsideStreak >= 2) {
-    bs.proxEnterFrame = frameIdx;
+function pickBallCenter(objects, lastBall, allowLoose = false, maxStep = 60) {
+  const balls = (objects || [])
+    .filter(o => o && o.label === 'basketball' && Array.isArray(o.box))
+    .map(o => {
+      const [x1, y1, x2, y2] = o.box;
+      return { cx: (x1 + x2) / 2, cy: (y1 + y2) / 2, area: Math.max(1, (x2 - x1) * (y2 - y1)) };
+    })
+    .sort((a, b) => b.area - a.area);
+  if (!balls.length) return null;
+
+  if (lastBall) {
+    let best = null;
+    let bestScore = Infinity;
+    for (const cand of balls) {
+      const dist = Math.hypot(cand.cx - lastBall.x, cand.cy - lastBall.y);
+      if (!allowLoose && dist > maxStep * 1.6) continue;
+      if (dist < bestScore) {
+        bestScore = dist;
+        best = cand;
+      }
+    }
+    if (best) return { x: Math.round(best.cx), y: Math.round(best.cy) };
   }
-  if (!inside && bs.proxExitFrame == null && bs._proxOutsideStreak >= 2) {
-    bs.proxExitFrame = frameIdx;
-  }
-  bs._lastInProx = inside;
+
+  const first = balls[0];
+  return first ? { x: Math.round(first.cx), y: Math.round(first.cy) } : null;
 }
 
-function finalizeSummary({ hoop, frameIdx, framesProcessed, trailSamples, cancelled, earlyStop }) {
-  const bs = self.ballState || {};
-  const shots = Array.isArray(bs.shots) ? bs.shots : [];
-  const frozen = shots.at?.(-1);
-  const trail = (frozen?.trail?.length >= 3) ? frozen.trail : (Array.isArray(bs.trail) ? bs.trail : []);
-  let summary = null;
-  if (trail.length >= 3 && hoop) {
-    summary = summarizeShot(trail, frameIdx, hoop, { force: true });
+function computeAngles(trail, count = 6) {
+  if (!Array.isArray(trail) || trail.length < 2) return null;
+  const vectors = [];
+  for (let i = 1; i < trail.length && vectors.length < count; i++) {
+    const a = trail[i - 1];
+    const b = trail[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1.2) continue;
+    const angle = Math.atan2(-dy, dx) * (180 / Math.PI);
+    vectors.push(angle);
   }
+  if (!vectors.length) return null;
+  const sum = vectors.reduce((acc, v) => acc + v, 0);
+  return +(sum / vectors.length).toFixed(2);
+}
 
-  const payload = buildSummary({
-    ...summary,
-    made: summary?.made ?? null,
-    arcHeight: summary?.arcHeight ?? null,
-    entryAngle: summary?.entryAngle ?? null,
-    releaseAngle: summary?.releaseAngle ?? null,
-    releaseFrame: bs.releaseFrame ?? null,
-    frameStart: summary?.frameStart ?? trail.at?.(0)?.frame ?? null,
-    frameEnd: summary?.frameEnd ?? frameIdx ?? null,
-    proxEnter: bs.proxEnterFrame ?? null,
-    proxExit: bs.proxExitFrame ?? null,
-    framesUsed: framesProcessed,
-    status: cancelled ? 'cancelled' : (summary ? 'ok' : 'incomplete'),
-    trailSample: sampleTrail(trailSamples, trail)
+function computeEntryAngle(trail, count = 6) {
+  if (!Array.isArray(trail) || trail.length < 2) return null;
+  const vectors = [];
+  for (let i = trail.length - 1; i > 0 && vectors.length < count; i--) {
+    const a = trail[i - 1];
+    const b = trail[i];
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 1.2) continue;
+    const angle = Math.atan2(-dy, dx) * (180 / Math.PI);
+    vectors.push(angle);
+  }
+  if (!vectors.length) return null;
+  const sum = vectors.reduce((acc, v) => acc + v, 0);
+  return +(sum / vectors.length).toFixed(2);
+}
+
+function computeMade(state, hoop) {
+  if (!hoop) return null;
+  if (state.proxEnterFrame == null) return null;
+  const trail = state.trail;
+  if (!trail.length) return null;
+  const last = trail[trail.length - 1];
+  const rimBottom = hoop.rimTop + hoop.h;
+  const insideX = last.x >= hoop.x && last.x <= hoop.x + hoop.w;
+  if (state.proxExitFrame != null && insideX && last.y > rimBottom + 40) return true;
+  if (state.proxExitFrame == null && last.y < hoop.rimTop + 20) return null;
+  if (last.y > rimBottom + 10) return false;
+  return null;
+}
+
+function sampleTrail(trail) {
+  if (!Array.isArray(trail) || !trail.length) return [];
+  const stride = 5;
+  const out = [];
+  for (let i = 0; i < trail.length; i += stride) {
+    const p = trail[i];
+    out.push({ x: Math.round(p.x), y: Math.round(p.y), frame: p.frame });
+  }
+  const last = trail.at(-1);
+  if (last) out.push({ x: Math.round(last.x), y: Math.round(last.y), frame: last.frame });
+  const seen = new Set();
+  return out.filter((p) => {
+    const key = `${p.frame}:${p.x}:${p.y}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
+}
 
-  if (earlyStop && payload.status === 'ok') {
-    payload.status = 'ok-early-stop';
+function computeArcHeight(state, hoop) {
+  if (!hoop) return null;
+  const trail = state.arcTrail.length ? state.arcTrail : state.trail;
+  if (!trail.length) return null;
+  const apex = trail.reduce((acc, p) => (p.y < acc.y ? p : acc), trail[0]);
+  return Math.round((hoop.rimTop ?? hoop.y) - apex.y);
+}
+
+function finalizeSummary(state, meta) {
+  const { hoop, framesProcessed, cancelled, earlyStop } = meta;
+  const trail = state.trail.slice();
+  if (!trail.length) {
+    return buildSummary({ status: cancelled ? 'cancelled' : 'incomplete', framesUsed: framesProcessed });
   }
-  if (cancelled) payload.status = 'cancelled';
 
-  return payload;
+  const arcHeight = computeArcHeight(state, hoop);
+  const releaseAngle = computeAngles(trail);
+  const entryAngle = computeEntryAngle(trail);
+  const made = computeMade(state, hoop);
+  const frameStart = trail[0]?.frame ?? null;
+  const frameEnd = trail.at(-1)?.frame ?? null;
+
+  let status = cancelled ? 'cancelled' : 'ok';
+  if (!trail.length) status = 'incomplete';
+  if (earlyStop && status === 'ok') status = 'ok-early-stop';
+
+  return buildSummary({
+    made,
+    arcHeight,
+    releaseAngle,
+    entryAngle,
+    trailSample: sampleTrail(trail),
+    proxEnter: state.proxEnterFrame,
+    proxExit: state.proxExitFrame,
+    framesUsed: framesProcessed,
+    status,
+    releaseFrame: state.releaseFrame,
+    frameStart,
+    frameEnd
+  });
 }
 
 function buildSummary({
   made = null,
   arcHeight = null,
-  entryAngle = null,
   releaseAngle = null,
+  entryAngle = null,
   trailSample = [],
   proxEnter = null,
   proxExit = null,
@@ -498,31 +442,193 @@ function buildSummary({
   };
 }
 
-function sampleTrail(samples, trail) {
-  if (Array.isArray(samples) && samples.length) return dedupeSamples(samples);
-  if (!Array.isArray(trail) || !trail.length) return [];
-  const stride = 5;
-  const out = [];
-  for (let i = 0; i < trail.length; i += stride) {
-    const p = trail[i];
-    if (p) out.push({ x: Math.round(p.x), y: Math.round(p.y), frame: p.frame });
-  }
-  const last = trail.at?.(-1);
-  if (last) out.push({ x: Math.round(last.x), y: Math.round(last.y), frame: last.frame });
-  return dedupeSamples(out);
+async function detectWithROI(ctx, canvas, hoop, frameIdx) {
+  const width = canvas.width;
+  const height = canvas.height;
+
+  const fullDetect = async () => {
+    const bmp = await createImageBitmap(canvas);
+    const result = await detectBitmap(bmp, width, height, { offsetX: 0, offsetY: 0, frameIdx });
+    return result.objects;
+  };
+
+  const prox = normalizeHoop(hoop);
+  if (!prox) return await fullDetect();
+
+  const roi = computeROIFromHoop(prox, width, height);
+  if (!roi) return await fullDetect();
+
+  const roiCanvas = new OffscreenCanvas(roi.w, roi.h);
+  const roiCtx = roiCanvas.getContext('2d');
+  roiCtx.drawImage(canvas, roi.x, roi.y, roi.w, roi.h, 0, 0, roi.w, roi.h);
+  const roiBitmap = await createImageBitmap(roiCanvas);
+  const detection = await detectBitmap(roiBitmap, roi.w, roi.h, {
+    offsetX: roi.x,
+    offsetY: roi.y,
+    scaleX: 1,
+    scaleY: 1,
+    frameIdx
+  });
+  const objects = detection.objects || [];
+  const hasBall = objects.some(o => o?.label === 'basketball');
+  if (hasBall) return objects;
+  return await fullDetect();
 }
 
-function dedupeSamples(list) {
-  const out = [];
-  const seen = new Set();
-  for (const item of list) {
-    if (!item) continue;
-    const key = `${item.frame}:${Math.round(item.x)}:${Math.round(item.y)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ x: Math.round(item.x), y: Math.round(item.y), frame: item.frame });
+function computeROIFromHoop(hoop, width, height) {
+  const scale = Number(self.ROI_SUPERSAMPLE || 1.6);
+  const w = Math.min(width, Math.round(Math.max(hoop.w, 80) * scale));
+  const h = Math.min(height, Math.round(Math.max(hoop.h, 80) * scale * 1.8));
+  let x = Math.max(0, Math.round(hoop.cx - w / 2));
+  let y = Math.max(0, Math.round(hoop.cy - h * 0.45));
+  if (x + w > width) x = Math.max(0, width - w);
+  if (y + h > height) y = Math.max(0, height - h);
+  return { x, y, w, h };
+}
+
+function updateTrailSamples(state, frameIdx) {
+  const trail = state.trail;
+  if (!trail.length) return;
+  const last = trail.at(-1);
+  if (!last) return;
+  state.trailSamples.push({ x: Math.round(last.x), y: Math.round(last.y), frame: frameIdx });
+  if (state.trailSamples.length > state.options.maxTrailPoints) state.trailSamples.shift();
+}
+
+export async function runMicroclipJob(job, { postProgress } = {}) {
+  const frames = Array.isArray(job?.frames) ? job.frames : [];
+  const total = frames.length;
+  if (!total) {
+    return { summary: buildSummary({ status: job?.cancelled ? 'cancelled' : 'empty', framesUsed: 0 }) };
   }
-  return out;
+
+  const first = frames[0];
+  const width = Number(first.bitmap?.width || first.width);
+  const height = Number(first.bitmap?.height || first.height);
+  if (!(width > 0 && height > 0)) {
+    return { summary: buildSummary({ status: 'invalid', framesUsed: 0 }) };
+  }
+
+  const canvas = new OffscreenCanvas(width, height);
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+  const hoop = normalizeHoop(job?.hoop || job?.meta?.hoop || null);
+  const releaseFrame = Number.isFinite(job?.releaseFrame) ? job.releaseFrame : Number(job?.meta?.releaseFrame) || null;
+  const state = createShotState({ releaseFrame, hoop });
+
+  let processed = 0;
+  let earlyStop = false;
+  let lastDetections = [];
+  let lastFrameIdx = Number.isFinite(first.frameIdx) ? first.frameIdx : 0;
+
+  for (let i = 0; i < total; i++) {
+    if (job.cancelled) break;
+    const frame = frames[i];
+    const frameIdx = Number.isFinite(frame.frameIdx) ? frame.frameIdx : lastFrameIdx + 1;
+    lastFrameIdx = frameIdx;
+
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(frame.bitmap, 0, 0, width, height);
+
+    let detections = lastDetections;
+    const stride = Math.max(1, Number(job.detectStride) || state.options.progressStride);
+    if (!detections.length || (i % stride) === 0) {
+      try {
+        detections = await detectWithROI(ctx, canvas, hoop, frameIdx);
+        if (detections.length) lastDetections = detections;
+      } catch {
+        detections = [];
+      }
+    }
+
+    let ballPoint = pickBallCenter(detections, state.lastBall, false, state.options.maxStepPx);
+    if (!ballPoint && state.lastBall) {
+      const refined = refineBallWithROI(ctx, state.lastBall, state.options.refineWindow);
+      if (refined) ballPoint = refined;
+    }
+    if (!ballPoint && detections.length) {
+      ballPoint = pickBallCenter(detections, state.lastBall, true, state.options.maxStepPx * 2);
+    }
+    if (!ballPoint && state.lastBall) ballPoint = { x: state.lastBall.x, y: state.lastBall.y };
+
+    if (ballPoint) {
+      updateBallState(state, ballPoint, frameIdx);
+      updateProx(state, frameIdx, ballPoint, hoop);
+      updateArc(state, ballPoint, frameIdx);
+    }
+
+    processed++;
+    if (typeof postProgress === 'function') {
+      if (processed === 1 || processed === total || (processed % state.options.progressStride) === 0) {
+        postProgress({
+          stage: 'processing',
+          frameIndex: frameIdx,
+          framesProcessed: processed,
+          framesTotal: total,
+          proxEnter: state.proxEnterFrame,
+          proxExit: state.proxExitFrame,
+          trailLength: state.trail.length
+        });
+      }
+    }
+
+    if (frame.bitmap && typeof frame.bitmap.close === 'function') {
+      try { frame.bitmap.close(); } catch {}
+    }
+
+    updateTrailSamples(state, frameIdx);
+
+    const exitFrame = state.proxExitFrame;
+    if (Number.isFinite(exitFrame) && frameIdx - exitFrame >= state.options.earlyStopFrames) {
+      earlyStop = true;
+      break;
+    }
+    const enterFrame = state.proxEnterFrame;
+    if (Number.isFinite(enterFrame) && frameIdx - enterFrame >= state.options.lingerLimit) {
+      earlyStop = true;
+      break;
+    }
+  }
+
+  const summary = finalizeSummary(state, {
+    hoop,
+    framesProcessed: processed,
+    cancelled: job.cancelled,
+    earlyStop
+  });
+
+  return { summary };
+}
+
+export function disposeFrameCollection(frames) {
+  if (!Array.isArray(frames)) return;
+  for (const entry of frames) {
+    const bmp = entry instanceof ImageBitmap ? entry : entry?.bitmap;
+    if (bmp && typeof bmp.close === 'function') {
+      try { bmp.close(); } catch {}
+    }
+  }
+}
+
+export function normalizeFrames(input) {
+  if (!Array.isArray(input)) return [];
+  const normalized = [];
+  for (let i = 0; i < input.length; i++) {
+    const item = input[i];
+    if (!item) continue;
+    if (item instanceof ImageBitmap) {
+      normalized.push({ bitmap: item, frameIdx: i, ts: null, meta: null });
+    } else if (item.bitmap instanceof ImageBitmap) {
+      const idx = Number.isFinite(item.frameIdx) ? item.frameIdx : i;
+      normalized.push({
+        bitmap: item.bitmap,
+        frameIdx: idx,
+        ts: Number.isFinite(item.ts) ? item.ts : null,
+        meta: item
+      });
+    }
+  }
+  return normalized;
 }
 
 export function serializeError(error) {

@@ -33,6 +33,8 @@ const MICROCLIP_BUFFER_DEFAULT_MS = 3800;
 
 window.USE_MICROCLIP ??= false;
 
+window.__SCORING_DELEGATED ??= false;
+
 class MicroClipRingBuffer {
   constructor(opts = {}) {
     this.windowMs = Number(opts.windowMs) > 0 ? Number(opts.windowMs) : Number(window.MICROCLIP_BUFFER_MS || MICROCLIP_BUFFER_DEFAULT_MS);
@@ -210,6 +212,26 @@ async function cloneFramesForWorker(frames) {
   return clones;
 }
 
+function armReleaseFallbackTimer(reason = 'auto') {
+  try {
+    const dwell = Math.max(900, Number(window.MINI_SCORE_MS || 1800));
+    try { window.__SCORING_DELEGATED = false; } catch {}
+    if (window.__releaseFallbackTimer) clearTimeout(window.__releaseFallbackTimer);
+    window.__releaseFallbackTimer = setTimeout(() => {
+      try {
+        if (!window.__lastSummary) {
+          const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null, status: reason };
+          window.recordShotSummary?.(summary);
+          window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
+        }
+        if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
+      } catch {} finally {
+        try { window.__releaseFallbackTimer = null; } catch {}
+      }
+    }, dwell);
+  } catch {}
+}
+
 function ensureMicroClipWorkerManager() {
   if (window.__microClipWorkerManager) return window.__microClipWorkerManager;
 
@@ -278,7 +300,7 @@ function ensureMicroClipWorkerManager() {
             state.framesTotal = payload.length;
           });
           job.status = 'processing';
-          window.dispatchEvent(new CustomEvent('microclip:started', { detail: { id, shot: job.shot, framesTotal: payload.length } }));
+          window.dispatchEvent(new CustomEvent('microclip:started', { detail: { id, shot: job.shot, framesTotal: payload.length, nFrames: payload.length } }));
           try { window.setSessionStatus?.('Scoring...'); } catch {}
           const transfer = payload.map((entry) => entry.bitmap);
           this.worker.postMessage({
@@ -304,6 +326,8 @@ function ensureMicroClipWorkerManager() {
           });
           this.jobs.delete(id);
           window.dispatchEvent(new CustomEvent('microclip:error', { detail: { id, shot: job.shot, error: errorPayload } }));
+          try { window.__SCORING_DELEGATED = false; } catch {}
+          armReleaseFallbackTimer('microclip-error');
         }
       };
       run();
@@ -328,10 +352,23 @@ function ensureMicroClipWorkerManager() {
           job.lastProgress = data;
           this.updateShotState(job, (state) => {
             state.status = 'processing';
-            if (Number.isFinite(data.frameIndex)) state.framesProcessed = data.frameIndex;
+            if (Number.isFinite(data.framesProcessed)) state.framesProcessed = data.framesProcessed;
             if (Number.isFinite(data.framesTotal)) state.framesTotal = data.framesTotal;
+            if (Number.isFinite(data.trailLength)) state.trailLength = data.trailLength;
+            if (Number.isFinite(data.proxEnter)) state.proxEnter = data.proxEnter;
+            if (Number.isFinite(data.proxExit)) state.proxExit = data.proxExit;
           });
-          window.dispatchEvent(new CustomEvent('microclip:progress', { detail: { id, shot: job.shot, progress: data } }));
+          window.dispatchEvent(new CustomEvent('microclip:progress', { detail: {
+            id,
+            shot: job.shot,
+            frame: data.frameIndex,
+            framesProcessed: data.framesProcessed,
+            framesTotal: data.framesTotal,
+            trailLength: data.trailLength,
+            proxEnter: data.proxEnter ?? null,
+            proxExit: data.proxExit ?? null,
+            progress: { ...data, id }
+          } }));
           break;
         case 'result':
           job.status = 'done';
@@ -342,7 +379,16 @@ function ensureMicroClipWorkerManager() {
           });
           this.unregister(job);
           this.jobs.delete(id);
-          window.dispatchEvent(new CustomEvent('microclip:done', { detail: { id, shot: job.shot, summary: data.summary || null } }));
+          const summaryPayload = data.summary || null;
+          const summaryDetail = summaryPayload ? {
+            made: summaryPayload.made ?? null,
+            arcHeight: summaryPayload.arcHeight ?? null,
+            entryAngle: summaryPayload.entryAngle ?? null,
+            releaseAngle: summaryPayload.releaseAngle ?? null,
+            trailLength: Array.isArray(summaryPayload.trailSample) ? summaryPayload.trailSample.length : undefined
+          } : {};
+          window.dispatchEvent(new CustomEvent('microclip:done', { detail: { id, shot: job.shot, summary: summaryPayload, ...summaryDetail } }));
+          try { window.__SCORING_DELEGATED = false; } catch {}
           try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
           break;
         case 'error':
@@ -355,6 +401,8 @@ function ensureMicroClipWorkerManager() {
           this.unregister(job);
           this.jobs.delete(id);
           window.dispatchEvent(new CustomEvent('microclip:error', { detail: { id, shot: job.shot, error: data.error || null } }));
+          try { window.__SCORING_DELEGATED = false; } catch {}
+          armReleaseFallbackTimer('microclip-error');
           try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
           break;
         case 'cancelled':
@@ -363,6 +411,8 @@ function ensureMicroClipWorkerManager() {
           this.unregister(job);
           this.jobs.delete(id);
           window.dispatchEvent(new CustomEvent('microclip:cancelled', { detail: { id, shot: job.shot } }));
+          try { window.__SCORING_DELEGATED = false; } catch {}
+          armReleaseFallbackTimer('microclip-cancelled');
           try { window.setSessionStatus?.('SESSION IN PROGRESS...'); } catch {}
           break;
         default:
@@ -404,16 +454,26 @@ function scheduleMicroClipForRelease({ frame, via, prox, shot }) {
         shot.microclip = { id: null, status: 'clip-missing', reason: 'insufficient_frames', releaseFrame: frame };
       }
       window.dispatchEvent(new CustomEvent('microclip:skipped', { detail: { shot, releaseFrame: frame, reason: 'insufficient_frames' } }));
+      try { window.__SCORING_DELEGATED = false; } catch {}
+      armReleaseFallbackTimer('microclip-skip');
       return;
     }
     const manager = ensureMicroClipWorkerManager();
+    const hoopLocked = typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null;
+    let jobHoop = null;
+    if (hoopLocked && typeof canonHoop === 'function') {
+      try {
+        const Hc = canonHoop(hoopLocked);
+        jobHoop = { x: Hc.x1, y: Hc.y1, w: Hc.w, h: Hc.h, cx: Hc.cx, cy: Hc.cy, rimTop: Hc.rimTop ?? Hc.y1 };
+      } catch {}
+    }
     const jobInfo = {
       shot: shot || null,
       clip,
       releaseFrame: frame,
       releaseTime: clip.frames?.[clip.releaseOffset ?? 0]?.wallClockMs ?? performance.now(),
       fps: clip.fps ?? (Number(window.__videoFPS) || null),
-      hoop: typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null,
+      hoop: jobHoop,
       detectStride: Number(window.MICROCLIP_DETECT_STRIDE || MICROCLIP_DETECT_STRIDE_DEFAULT),
       prox: prox || null
     };
@@ -424,6 +484,8 @@ function scheduleMicroClipForRelease({ frame, via, prox, shot }) {
       shot.microclip = { id: null, status: 'error', error: payload, releaseFrame: frame };
     }
     window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shot, releaseFrame: frame, error: payload } }));
+    try { window.__SCORING_DELEGATED = false; } catch {}
+    armReleaseFallbackTimer('microclip-error');
   }
 }
 
@@ -434,6 +496,7 @@ window.addEventListener('microclip:done', (event) => {
       window.__releaseFallbackTimer = null;
     }
   } catch {}
+  try { window.__SCORING_DELEGATED = false; } catch {}
   const detail = event?.detail || {};
   const summary = detail.summary || null;
   if (!summary) return;
@@ -651,27 +714,16 @@ window.addEventListener('microclip:done', (event) => {
             list.push(shotEntry);
             try { window.__SHOT_IDX = list.length - 1; } catch {}
             if (window.USE_MICROCLIP === true) {
+              try { if (window.__releaseFallbackTimer) { clearTimeout(window.__releaseFallbackTimer); window.__releaseFallbackTimer = null; } } catch {}
+              try { window.__SCORING_DELEGATED = true; } catch {}
               try { scheduleMicroClipForRelease({ frame, via, prox, shot: shotEntry }); } catch (err) { console.warn('[microclip] schedule failed', err); }
             }
           }
         } catch {}
 
-        try {
-          const dwell = Math.max(900, Number(window.MINI_SCORE_MS || 1800));
-          if (window.__releaseFallbackTimer) clearTimeout(window.__releaseFallbackTimer);
-          window.__releaseFallbackTimer = setTimeout(() => {
-            try {
-              if (!window.__lastSummary) {
-                const summary = { made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
-                window.recordShotSummary?.(summary);
-                window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
-              }
-              if (window.ballState) { window.ballState.releaseFrame = null; window.ballState.state = 'IDLE'; }
-            } catch {} finally {
-              try { window.__releaseFallbackTimer = null; } catch {}
-            }
-          }, dwell);
-        } catch {}
+        if (window.USE_MICROCLIP !== true) {
+          armReleaseFallbackTimer('fallback');
+        }
 
         return true;
       } catch { return false; }
