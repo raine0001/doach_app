@@ -132,6 +132,7 @@ window.__REL_LAST_FRAME ??= null;
 
 if (typeof window.__dbgBlock !== 'function') {
   window.__dbgBlock = function(reason, extra = {}) {
+    try { window.dispatchEvent(new CustomEvent('gate:block', { detail: { reason, extra } })); } catch {}
     try {
       const payload = JSON.stringify(extra);
       window.__dbgLine?.(`[gate:block] ${reason} ${payload}`);
@@ -143,6 +144,7 @@ if (typeof window.__dbgBlock !== 'function') {
 
 if (typeof window.__dbgMicroclip !== 'function') {
   window.__dbgMicroclip = function(type, payload) {
+    try { window.dispatchEvent(new CustomEvent('microclip:echo', { detail: { type, payload } })); } catch {}
     try {
       const safe = JSON.stringify(payload, (key, value) => {
         if (Array.isArray(value) && value.length > 12) return value.slice(0, 12);

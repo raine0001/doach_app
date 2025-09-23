@@ -156,5 +156,166 @@
     setInterval(loadSessions, 4000);
     setInterval(loadActive, 5000);
   </script>
+<!-- ===== Doach Admin Debug ===== -->
+<section id="doach-admin-debug" style="margin:16px 0;">
+  <h2 style="margin:0 0 8px;">Doach Live Debug</h2>
+
+  <!-- Controls -->
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
+    <button id="adm-dbg-pause">⏸ pause</button>
+    <button id="adm-dbg-clear">🗑 clear</button>
+    <button id="adm-dbg-download">⬇ download</button>
+    <label style="margin-left:12px;display:flex;align-items:center;gap:6px;">
+      <input type="checkbox" id="adm-dbg-autoscroll" checked> autoscroll
+    </label>
+  </div>
+
+  <!-- Snap Stats -->
+  <div id="adm-dbg-stats" style="display:grid;grid-template-columns:repeat(6, minmax(120px,1fr));gap:8px;margin-bottom:8px;font:12px/1.35 monospace;">
+    <div class="tile" data-k="armed"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">armed:<b>?</b></div>
+    <div class="tile" data-k="ready"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">ready:<b>?</b></div>
+    <div class="tile" data-k="pose"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">pose:<b>?</b></div>
+    <div class="tile" data-k="hoop"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">hoop:<b>?</b></div>
+    <div class="tile" data-k="trail"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">trail:<b>0</b></div>
+    <div class="tile" data-k="frame"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">frame:<b>0</b></div>
+  </div>
+
+  <!-- Last Key Events -->
+  <div style="display:grid;grid-template-columns:repeat(3, minmax(220px,1fr));gap:8px;margin-bottom:8px;font:12px/1.35 monospace;">
+    <div id="adm-last-release" style="padding:8px;border:1px solid #666;border-radius:6px;">last release:<br><b>—</b></div>
+    <div id="adm-last-summary" style="padding:8px;border:1px solid #666;border-radius:6px;">last summary:<br><b>—</b></div>
+    <div id="adm-last-gate"    style="padding:8px;border:1px solid #666;border-radius:6px;">last gate block:<br><b>—</b></div>
+  </div>
+
+  <!-- Log -->
+  <pre id="adm-dbg-log" style="background:#0b0f12;color:#cfe8ff;border:1px solid #2a6;border-radius:8px;padding:8px;margin:0;max-height:42vh;overflow:auto;font:12px/1.35 monospace;"></pre>
+</section>
+
+<script>
+(function adminDebugInstall(){
+  if (window.__admDbgInstalled) return; window.__admDbgInstalled = true;
+
+  const logEl = document.getElementById('adm-dbg-log');
+  const tiles = {};
+  document.querySelectorAll('#adm-dbg-stats .tile').forEach(t=>{
+    tiles[t.dataset.k] = t.querySelector('b');
+  });
+  const elLastRelease = document.getElementById('adm-last-release').querySelector('b');
+  const elLastSummary = document.getElementById('adm-last-summary').querySelector('b');
+  const elLastGate    = document.getElementById('adm-last-gate').querySelector('b');
+
+  const btnPause = document.getElementById('adm-dbg-pause');
+  const btnClear = document.getElementById('adm-dbg-clear');
+  const btnDown  = document.getElementById('adm-dbg-download');
+  const chkAuto  = document.getElementById('adm-dbg-autoscroll');
+
+  let paused = false;
+  let buf = [];
+  const CAP = 2000;
+
+  function ts(){ return new Date().toLocaleTimeString(); }
+
+  function write(line){
+    if (paused) return;
+    buf.push(line);
+    if (buf.length > CAP) buf = buf.slice(-CAP);
+    logEl.textContent += line + '
+';
+    if (logEl.textContent.split('
+').length > CAP) {
+      const lines = logEl.textContent.split('
+');
+      logEl.textContent = lines.slice(-CAP).join('
+');
+    }
+    if (chkAuto.checked) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  btnPause.onclick = () => { paused = !paused; btnPause.textContent = paused ? '▶ resume' : '⏸ pause'; };
+  btnClear.onclick = () => { buf = []; logEl.textContent = ''; };
+  btnDown.onclick  = () => {
+    const blob = new Blob([buf.join('
+')], {type:'text/plain'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `doach-debug-${Date.now()}.log`;
+    document.body.appendChild(a); a.click(); a.remove();
+  };
+
+  function patchDbgLine(){
+    if (window.__admDbgPatched) return;
+    if (typeof window.__dbgLine !== 'function') return;
+    const prev = window.__dbgLine;
+    window.__dbgLine = function patched(t){
+      try { prev && prev(t); } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent('dbg:line', { detail: { t, at: Date.now() }}));
+      } catch {}
+      write(`[${ts()}] ${t}`);
+    };
+    window.__admDbgPatched = true;
+  }
+  patchDbgLine();
+  let tries = 0;
+  const iv = setInterval(()=>{
+    if (!window.__admDbgPatched) patchDbgLine();
+    if (++tries > 40 || window.__admDbgPatched) clearInterval(iv);
+  }, 250);
+
+  if (typeof window.__dbgLine !== 'function') {
+    window.__dbgLine = (t)=> {
+      try { window.dispatchEvent(new CustomEvent('dbg:line', { detail: { t, at: Date.now() }})); } catch {}
+      write(`[${ts()}] ${t}`);
+    };
+  }
+
+  window.addEventListener('shot:release', e=>{
+    const d = e?.detail||{};
+    elLastRelease.textContent = `via=${d.via||'?'} frame=${d.frame||'?'} tMs=${d.tMs||'?'}`;
+  }, { passive:true });
+
+  window.addEventListener('shot:summary', e=>{
+    const s = e?.detail||{};
+    elLastSummary.textContent = `made=${s.made} arcH=${s.arcHeight} rel=${s.releaseAngle} entry=${s.entryAngle}`;
+  }, { passive:true });
+
+  window.addEventListener('gate:block', e=>{
+    const d = e?.detail||{};
+    elLastGate.textContent = `${d.reason||'unknown'} ${JSON.stringify(d.extra||{})}`;
+    write(`[${ts()}] [gate:block] ${d.reason||'unknown'} ${JSON.stringify(d.extra||{})}`);
+  }, { passive:true });
+
+  window.addEventListener('microclip:echo', e=>{
+    const d = e?.detail||{};
+    write(`[${ts()}] [microclip:${d.type}] ${JSON.stringify(d.payload).slice(0, 160)}`);
+  }, { passive:true });
+
+  setInterval(()=>{
+    try {
+      const bs = window.ballState || {};
+      tiles.armed.textContent = !!window.__shotTrackingArmed;
+      tiles.ready.textContent = !!window.__readyForScoring;
+      tiles.pose.textContent  = !!window.__POSE_WARMUP_OK;
+      tiles.hoop.textContent  = !!window.__hoopConfirmed;
+
+      const trailLen = Array.isArray(bs.trail) ? bs.trail.length : 0;
+      tiles.trail.textContent = trailLen;
+
+      const f = Number(window.__AN_IDX)||0;
+      tiles.frame.textContent = f;
+    } catch {}
+  }, 300);
+
+  if (!window.__dbgBlock) {
+    window.__dbgBlock = function(reason, extra){
+      try {
+        window.dispatchEvent(new CustomEvent('gate:block', { detail: { reason, extra }}));
+      } catch {}
+      window.__dbgLine?.(`[gate:block] ${reason} ${JSON.stringify(extra||{})}`);
+    };
+  }
+
+})();
+</script>
 </body>
 </html>
