@@ -1878,14 +1878,15 @@ if (typeof window.safeEmitRelease !== 'function') {
       const armed = (window.__shotTrackingArmed === true);
       const confirmed = (window.__hoopConfirmed === true);
       const H = window.getLockedHoopBox?.();
+      const minSepMs  = Number(window.REL_MIN_SEP_MS ?? 500);
+      const sinceMs   = now - (Number(window.__REL_LAST_FIRE_MS)||0);
+      const sameFrame = Number.isFinite(window.__REL_LAST_FRAME) && window.__REL_LAST_FRAME === frame;
+      if (sameFrame || sinceMs < minSepMs) return false;
+      const cd = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1200);
+      if (sinceMs < cd) return false;
+
       if (!bypass) {
         if (!armed || !confirmed || !H) return false;
-        const minSepMs = Number(window.REL_MIN_SEP_MS ?? 500);
-        const sinceMs = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
-        const sameFrame = Number.isFinite(window.__REL_LAST_FRAME) && window.__REL_LAST_FRAME === frame;
-        if (sameFrame || sinceMs < minSepMs) return false;
-        const cd = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1200);
-        if (sinceMs < cd || window.__releaseEventSent) return false;
         if (window.__RESET_SEEN_BELOW === false) return false;
         const hist = (window.playerState?.frameHistory || []).slice(-5);
         let approved = false; let t = {};
