@@ -691,7 +691,7 @@ window.__hoopConfirmed = false;
 
 function requireHoopOrPrompt() {
   if (isHoopReady()) return true;
-  showPromptMessage('ðŸ“ Tap the hoop to begin setup', 3000);
+  showPromptMessage('Tap the hoop to begin setup', 3000);
   if (!window.__hoopPickArmed) {
     window.__hoopPickArmed = true;
     window.enableHoopPickOnce?.();   // arm picker again if needed
@@ -779,7 +779,7 @@ function startHoopPromptLoop() {
 
   const tick = () => {
     if (!isHoopReady()) {
-      showPromptMessage('ðŸ“ Tap the hoop to begin setup', 3000);
+      showPromptMessage('Tap the hoop to begin setup', 3000);
       if (!window.__hoopPickArmed) {
         window.__hoopPickArmed = true;
         window.enableHoopPickOnce?.();
@@ -1368,25 +1368,125 @@ try {
 } catch {}
 
 // end session shot summary table
+const SHOT_SUMMARY_TEXT = {
+  modalTitle: 'Shot Summary',
+  finalizing: 'Finalizing...',
+  exportCsv: 'Export CSV',
+  close: 'Close',
+  headerEntry: 'Entry (\u00b0)',
+  headerRelease: 'Release (\u00b0)',
+  pending: 'Pending',
+  noValue: '--',
+  make: 'Make',
+  makeBest: 'Make*',
+  miss: 'Miss',
+  buttons: { make: 'Make', miss: 'Miss', replay: 'Replay', ai: 'AI Review' }
+};
+
 function getShotList(){ return (window.__shotList ||= []); }
 
-// Build & show the centered full-session modal
+
+function formatShotResult(shot, isBest) {
+  if (!shot || shot.pending) return SHOT_SUMMARY_TEXT.pending;
+  if (shot.made === true) return isBest ? SHOT_SUMMARY_TEXT.makeBest : SHOT_SUMMARY_TEXT.make;
+  if (shot.made === false) return SHOT_SUMMARY_TEXT.miss;
+  return SHOT_SUMMARY_TEXT.pending;
+}
+
+function formatArcValue(value) {
+  const num = Number(value);
+  if (Number.isFinite(num)) {
+    const rounded = Math.round(num);
+    if (rounded !== 0) return String(rounded);
+  }
+  return SHOT_SUMMARY_TEXT.noValue;
+}
+
+function formatAngleValue(value) {
+  if (value == null || value === '') return SHOT_SUMMARY_TEXT.noValue;
+  return String(value);
+}
+
+function buildSummaryActionBar(idx) {
+  const wrap = document.createElement('div');
+  wrap.style.display = 'flex';
+  wrap.style.gap = '6px';
+  const buttons = [
+    { cls: 'btn-make',   text: SHOT_SUMMARY_TEXT.buttons.make,   title: 'Mark Make' },
+    { cls: 'btn-miss',   text: SHOT_SUMMARY_TEXT.buttons.miss,   title: 'Mark Miss' },
+    { cls: 'btn-replay', text: SHOT_SUMMARY_TEXT.buttons.replay, title: 'Replay' },
+    { cls: 'btn-ai',     text: SHOT_SUMMARY_TEXT.buttons.ai,     title: 'AI Review' }
+  ];
+  buttons.forEach((cfg) => {
+    const btn = document.createElement('button');
+    btn.className = `vc-btn ${cfg.cls}`;
+    btn.title = cfg.title;
+    btn.dataset.id = String(idx + 1);
+    btn.textContent = cfg.text;
+    wrap.appendChild(btn);
+  });
+  return wrap;
+}
+
+function buildSummaryRow(idx, shot, isBest) {
+  const tr = document.createElement('tr');
+  tr.setAttribute('data-shot-idx', idx + 1);
+  if (isBest) tr.setAttribute('data-best', '1');
+
+  const resultCell = formatShotResult(shot, isBest);
+  const arcCell = formatArcValue(shot?.arcHeight);
+  const entryCell = formatAngleValue(shot?.entryAngle);
+  const releaseCell = formatAngleValue(shot?.releaseAngle);
+  const coachSource = shot && !shot.pending
+    ? (shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || '')
+    : '';
+  const coachText = coachSource ? coachSource : SHOT_SUMMARY_TEXT.pending;
+
+  tr.innerHTML = `
+    <td class="num">${idx + 1}</td>
+    <td class="result" title="${isBest ? 'Best shot' : ''}">${resultCell}</td>
+    <td class="arc">${arcCell}</td>
+    <td class="entry">${entryCell}</td>
+    <td class="release">${releaseCell}</td>
+    <td class="coach"></td>
+    <td class="fix"></td>`;
+
+  const coachCell = tr.querySelector('.coach');
+  if (coachCell) {
+    coachCell.textContent = coachText;
+    coachCell.title = coachSource || '';
+  }
+
+  const fixCell = tr.querySelector('.fix');
+  if (fixCell) {
+    fixCell.appendChild(buildSummaryActionBar(idx));
+  }
+
+  if (shot && shot.pending) {
+    tr.querySelectorAll('.result, .arc, .entry, .release, .coach').forEach((cell) => {
+      cell.textContent = SHOT_SUMMARY_TEXT.pending;
+    });
+  }
+
+  return tr;
+}
+
 function renderFullShotTable() {
   ensureShotTableStyles();
   const list = getShotList();
   const root = ensureHudRoot();
 
-  // Choose a best shot (highest local rating among makes) to highlight
-  let __bestIdx = -1; let __bestScore = -1;
+  let bestIdx = -1;
+  let bestScore = -1;
   try {
     const golden = window.DOACH_MEM?.get?.()?.golden || null;
     for (let i = 0; i < list.length; i++) {
-      const s = list[i];
-      if (!s || !s.made) continue;
-      const r = (typeof window.computeShotRating === 'function')
-        ? Number(window.computeShotRating(s.poseSnapshot || null, golden))
+      const shot = list[i];
+      if (!shot || !shot.made) continue;
+      const rating = (typeof window.computeShotRating === 'function')
+        ? Number(window.computeShotRating(shot.poseSnapshot || null, golden))
         : -1;
-      if (Number.isFinite(r) && r > __bestScore) { __bestScore = r; __bestIdx = i; }
+      if (Number.isFinite(rating) && rating > bestScore) { bestScore = rating; bestIdx = i; }
     }
   } catch {}
 
@@ -1414,91 +1514,47 @@ function renderFullShotTable() {
   modal.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
-        <span>ðŸ“‹ Shot Summary (${list.length}/${formatCapDisplay(getSessionCap())})</span>
-        <span id=\"sessFinalBadge\" style=\"display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;\">Finalizingâ€¦</span>
+        <span>${SHOT_SUMMARY_TEXT.modalTitle} (${list.length}/${formatCapDisplay(getSessionCap())})</span>
+        <span id="sessFinalBadge" style="display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;">${SHOT_SUMMARY_TEXT.finalizing}</span>
       </div>
       <div>
-        <button id="exportCSV" class="vc-btn" title="Export CSV">â¬‡ï¸Ž CSV</button>
-        <button id="closeFull" class="vc-btn">âœ–</button>
+        <button id="exportCSV" class="vc-btn" title="Export CSV">${SHOT_SUMMARY_TEXT.exportCsv}</button>
+        <button id="closeFull" class="vc-btn">${SHOT_SUMMARY_TEXT.close}</button>
       </div>
     </div>
-    <div id=\"sessReviewLine\" style=\"display:none;opacity:.95;margin:4px 0 10px;line-height:1.35\"></div>
+    <div id="sessReviewLine" style="display:none;opacity:.95;margin:4px 0 10px;line-height:1.35"></div>
     <table class="hud-table">
       <colgroup>
         <col id="cNum"><col id="cRes"><col id="cArc"><col id="cEntry"><col id="cRel"><col><col id="cFix">
       </colgroup>
       <thead>
         <tr>
-          <th>#</th><th>Result</th><th>Arc</th><th>EntryÂ°</th><th>ReleaseÂ°</th><th>Doach Summary</th><th>Correct</th>
+          <th>#</th><th>Result</th><th>Arc</th><th>${SHOT_SUMMARY_TEXT.headerEntry}</th><th>${SHOT_SUMMARY_TEXT.headerRelease}</th><th>Doach Summary</th><th>Correct</th>
         </tr>
       </thead>
       <tbody></tbody>
     </table>
   `;
 
+  const tbody = modal.querySelector('tbody');
+  if (tbody) {
+    tbody.textContent = '';
+    list.forEach((shot, idx) => {
+      const row = buildSummaryRow(idx, shot, idx === bestIdx);
+      tbody.appendChild(row);
+    });
+  }
 
-  const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  const pickCoach = (s) => s.doach || s.coach || s.coachText || s.feedback || s.summary || s.text || '';
+  const closeBtn = modal.querySelector('#closeFull');
+  if (closeBtn) closeBtn.onclick = () => { modal.style.display = 'none'; };
+  const exportBtn = modal.querySelector('#exportCSV');
+  if (exportBtn) exportBtn.onclick = () => exportSessionCSV(list);
 
-  const tb = modal.querySelector('tbody');
-  list.forEach((s, i) => {
-    const coach = pickCoach(s);
-    const tr = document.createElement('tr');
-    tr.setAttribute('data-shot-idx', i + 1);
-    if (i === __bestIdx) tr.setAttribute('data-best', '1');
-    tr.innerHTML = `
-      <td class="num">${i+1}</td>
-      <td class="result" title="${i===__bestIdx ? 'Best shot' : ''}">${s.made ? (i===__bestIdx ? 'â­ï¸ âœ…' : 'âœ…') : 'âŒ'}</td>
-      <td class="arc">${Math.round(s.arcHeight ?? 0) || 'â€“'}</td>
-      <td class="entry">${s.entryAngle ?? 'â€“'}</td>
-      <td class="release">${s.releaseAngle ?? 'â€“'}</td>
-      <td class="coach">${coach ? esc(coach) : 'â€”'}</td>
-      <td class="fix">
-        <div style="display:flex;gap:6px">
-          <button class="vc-btn btn-make"  title="Mark Make" data-id="${i+1}">âœ…</button>
-          <button class="vc-btn btn-miss"  title="Mark Miss" data-id="${i+1}">âŒ</button>
-          <button class="vc-btn btn-ai"    title="AI Review" data-id="${i+1}">ðŸ¤–</button>
-        </div>
-      </td>`;
-
-    // Inject a Replay button between Miss and AI Review
-    try {
-      const bar = tr.querySelector('td.fix > div');
-      if (bar) {
-        const aiBtn = bar.querySelector('.btn-ai');
-        const replay = document.createElement('button');
-        replay.className = 'vc-btn btn-replay';
-        replay.title = 'Replay';
-        replay.dataset.id = String(i + 1);
-        replay.textContent = 'â–¶';
-        if (aiBtn) bar.insertBefore(replay, aiBtn); else bar.appendChild(replay);
-      }
-    } catch {}
-
-    try {
-      if (s && s.pending === true) {
-        const setTxt = (cls, val) => { try { const el = tr.querySelector('.' + cls); if (el) el.textContent = val; } catch {} };
-        setTxt('result',  'pending');
-        setTxt('arc',     'pending');
-        setTxt('entry',   'pending');
-        setTxt('release', 'pending');
-        const coachEl = tr.querySelector('.coach');
-        if (coachEl && (!coachEl.textContent || coachEl.textContent === 'Ã¢â‚¬â€')) coachEl.textContent = 'pending';
-      }
-    } catch {}
-    tb.appendChild(tr);
-  });
-
-  modal.querySelector('#closeFull').onclick = () => modal.style.display = 'none';
-  modal.querySelector('#exportCSV').onclick = () => exportSessionCSV(list);
   modal.style.display = 'block';
   try { modal.style.zIndex = '10060'; } catch {}
   return modal;
 }
 
-// Cap prompt removed; auto-end handles finish
-
-// keep the data
 function exportSessionCSV(list){
   const pickCoach = (s) => s.doach || s.coach || s.coachText || s.feedback || s.summary || s.text || '';
   const rows = [['#','result','arc','entry','release','doach_summary']];
@@ -1552,43 +1608,14 @@ window.recordShotSummary = async function recordShotSummary(summary) {
   summary.idx = Math.max(0, idx - 1);
   summary.coachIdx = summary.idx;
 
-  // If the full table is open, update existing pending row or append now
+  // If the full table is open, rebuild it so copy stays clean
   const modal = document.getElementById('fullShotModal');
-  if (modal) {
-    const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    const tb  = modal.querySelector('tbody');
-    if (tb) {
-      let tr = modal.querySelector(`tr[data-shot-idx="${idx}"]`);
-      if (!tr) {
-        tr = document.createElement('tr');
-        tr.setAttribute('data-shot-idx', idx);
-        tr.innerHTML = `
-          <td class="num">${idx}</td>
-          <td class="result"></td>
-          <td class="arc"></td>
-          <td class="entry"></td>
-          <td class="release"></td>
-          <td class="coach"></td>
-          <td class="fix"><div style="display:flex;gap:6px"></div></td>`;
-        tb.appendChild(tr);
-        // Inject buttons (including Replay)
-        try {
-          const bar = tr.querySelector('td.fix > div');
-          const mk = document.createElement('button'); mk.className='vc-btn btn-make'; mk.title='Mark Make'; mk.dataset.id=String(idx); mk.textContent='âœ…'; bar.appendChild(mk);
-          const ms = document.createElement('button'); ms.className='vc-btn btn-miss'; ms.title='Mark Miss'; ms.dataset.id=String(idx); ms.textContent='âŒ'; bar.appendChild(ms);
-          const rp = document.createElement('button'); rp.className='vc-btn btn-replay'; rp.title='Replay'; rp.dataset.id=String(idx); rp.textContent='â–¶'; bar.appendChild(rp);
-          const ai = document.createElement('button'); ai.className='vc-btn btn-ai'; ai.title='AI Review'; ai.dataset.id=String(idx); ai.textContent='ðŸ¤–'; bar.appendChild(ai);
-        } catch {}
-      }
-      // Update existing row cells
-      try { const c = tr.querySelector('.coach'); if (c) { c.textContent = summary.doach ? esc(summary.doach) : 'â€”'; c.title = esc(summary.doach||''); } } catch {}
-      try { const e = tr.querySelector('.result');  if (e) e.textContent = summary.made ? 'âœ…' : 'âŒ'; } catch {}
-      try { const e = tr.querySelector('.arc');     if (e) e.textContent = (Math.round(summary.arcHeight ?? 0) || 'â€“'); } catch {}
-      try { const e = tr.querySelector('.entry');   if (e) e.textContent = (summary.entryAngle ?? 'â€“'); } catch {}
-      try { const e = tr.querySelector('.release'); if (e) e.textContent = (summary.releaseAngle ?? 'â€“'); } catch {}
-    }
+  if (modal && modal.style.display === 'block') {
+    try {
+      renderFullShotTable();
+      if (typeof wireFullShotModalActions === 'function') wireFullShotModalActions();
+    } catch {}
   }
-
   // HUD counters
   const { taken, made, acc } = computeTotals(list);
   const start = (window.__sessionStart ||= Date.now());
@@ -1650,19 +1677,37 @@ function wireFullShotModalActions() {
   const tbody = modal.querySelector('tbody');
   if (!tbody) return;
 
-  // Update one table rowâ€™s UI after a correction
+  // Update one table row's UI after a correction
   function refreshRowUI(idx) {
     const list = window.__shotList || [];
-    const s = list[idx - 1];
+    const shot = list[idx - 1];
     const tr = modal.querySelector(`tr[data-shot-idx="${idx}"]`);
-    if (!s || !tr) return;
+    if (!shot || !tr) return;
 
-    tr.querySelector('.result').textContent = s.made ? 'âœ…' : 'âŒ';
+    const isBest = tr.getAttribute('data-best') === '1';
+    const setCell = (selector, value) => {
+      const cell = tr.querySelector(selector);
+      if (cell) cell.textContent = value;
+    };
 
-    // Recompute accuracy badge and HUD numbers from current list
+    if (shot.pending) {
+      ['.result', '.arc', '.entry', '.release', '.coach'].forEach((selector) => setCell(selector, SHOT_SUMMARY_TEXT.pending));
+    } else {
+      setCell('.result', formatShotResult(shot, isBest));
+      setCell('.arc', formatArcValue(shot.arcHeight));
+      setCell('.entry', formatAngleValue(shot.entryAngle));
+      setCell('.release', formatAngleValue(shot.releaseAngle));
+      const coachCell = tr.querySelector('.coach');
+      if (coachCell) {
+        const coachCopy = shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || SHOT_SUMMARY_TEXT.pending;
+        coachCell.textContent = coachCopy || SHOT_SUMMARY_TEXT.pending;
+        coachCell.title = coachCopy ? String(coachCopy) : '';
+      }
+    }
+
     const { taken, made, acc } = computeTotals(list);
     try {
-      updateSessionHUD({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
+      updateSessionHUD({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart || Date.now())) / 1000) });
     } catch {}
   }
 
@@ -1730,10 +1775,10 @@ export function showShotBanner(summary, ms = 2500) {
   const acc  = list.length ? Math.round((made / list.length) * 100) : 0;
 
   el.innerHTML = `
-    <strong>${summary.made ? 'âœ… Made' : 'âŒ Missed'} Shot</strong><br>
+    <strong>${summary.made ? 'Made' : 'Missed'} Shot</strong><br>
     Arc Height: ${Math.round(summary.arcHeight || 0)}px<br>
-    Entry Angle: ${summary.entryAngle ?? 'â€“'}Â°<br>
-    Release Angle: ${summary.releaseAngle ?? 'â€“'}Â°<br>
+    Entry Angle: ${summary.entryAngle ?? SHOT_SUMMARY_TEXT.noValue}&#176;<br>
+    Release Angle: ${summary.releaseAngle ?? SHOT_SUMMARY_TEXT.noValue}&#176;<br>
     Accuracy: ${acc}% (${made}/${list.length})`;
   el.style.display = 'block';
   clearTimeout(el.__t);

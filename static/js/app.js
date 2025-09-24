@@ -301,16 +301,26 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
 
   const ACCEPT_FRAME_WIN_MS = 400;
   const ACCEPT_COOLDOWN_MS = 900;
+  const RELEASE_LOCK_MS = 1500;
   let __lastAccept = { t: 0, f: -1 };
+  let __releaseLockedUntil = 0;
+
+  function lockReleases(ms) {
+    __releaseLockedUntil = performance.now() + Math.max(0, Number(ms) || 0);
+  }
+
+  function canAcceptNow() {
+    return performance.now() >= __releaseLockedUntil;
+  }
 
   function fromReleaseGate(detail){
     if (detail?.poseApproved === true) return true;
     if (detail?.gate?.released === true) return true;
-    const via = String(detail?.via || '');
-    return via.startsWith('pose-');
+    return false;
   }
 
   function acceptRelease(detail){
+    if (!canAcceptNow()) return false;
     if (!fromReleaseGate(detail)) return false;
     const now = performance.now();
     const f = Number(detail?.frame) || -1;
@@ -319,10 +329,11 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
     if ((now - __lastAccept.t) < ACCEPT_COOLDOWN_MS) return false;
 
     __lastAccept = { t: now, f };
+    lockReleases(RELEASE_LOCK_MS);
     return true;
   }
 
-  window.addEventListener('hud:start-session', () => { __lastAccept = { t: 0, f: -1 }; });
+  window.addEventListener('hud:start-session', () => { __lastAccept = { t: 0, f: -1 }; lockReleases(0); });
 
   function stopTracks(tracks) {
     tracks.forEach((track) => { try { track.stop(); } catch {} });
@@ -381,6 +392,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
       totals.attempts = (Number(totals.attempts) || 0) + 1;
       window.dispatchEvent(new CustomEvent('microclip:started', { detail: { shotId, shotIdx: shotId, ms: window.__MICROCLIP_MS } }));
+      lockReleases(window.__MICROCLIP_MS);
     };
     recorder.ondataavailable = (evt) => { if (evt?.data?.size) chunks.push(evt.data); };
     recorder.onerror = (evt) => {
@@ -389,6 +401,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
       if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
+      lockReleases(0);
     };
     recorder.onstop = async () => {
       try {
@@ -433,6 +446,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       } finally {
         if (shouldStopTracks) stopTracks(tracks);
         window.__clipBusy = false;
+        lockReleases(0);
       }
     };
 
@@ -450,6 +464,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
       if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
+      lockReleases(0);
     }
   }
 
@@ -2786,7 +2801,7 @@ export function enableHoopPickOnce() {
   ov.style.cursor        = 'crosshair';
   ov.style.zIndex        = '100';
   vid.style.pointerEvents = 'none';
-  if (promptEl) { promptEl.style.display = 'block'; promptEl.textContent = '📍 Tap the hoop to lock it'; }
+  if (promptEl) { promptEl.style.display = 'block'; promptEl.textContent = 'Tap the hoop to lock it'; }
 
   // Refresh rect/mapping now that picking is armed
   syncOverlayToVideo?.();
@@ -3383,7 +3398,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (!getLockedHoopBox?.()) {
       // refuse to start; surface prompt
       const prompt = document.getElementById('overlayPrompt');
-      if (prompt) { prompt.textContent = '📍 Tap the hoop to begin setup'; prompt.style.display = 'block'; }
+      if (prompt) { prompt.textContent = ' Tap the hoop to begin setup'; prompt.style.display = 'block'; }
       return;
     }
     // stop any warmup and pre-detect loops
@@ -3513,7 +3528,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const hoopLocked = !!getLockedHoopBox?.();
     if (!hoopLocked) {
       const prompt = document.getElementById('overlayPrompt');
-      if (prompt) { prompt.textContent = '📍 Tap the hoop to begin setup'; prompt.style.display = 'block'; }
+      if (prompt) { prompt.textContent = 'Tap the hoop to begin setup'; prompt.style.display = 'block'; }
       videoPlayer.pause();
       return;
     }
@@ -3839,7 +3854,7 @@ window.handleVideoUpload = async function (event) {
   // required for hoop selection
   // 🟢 arm the one-shot hoop picker and show the prompt
   if (prompt) {
-    prompt.textContent = '📍 Tap the hoop to begin setup';
+    prompt.textContent = 'Tap the hoop to begin setup';
     prompt.style.display = 'block';
   }
   // avoid double-binding if called again
@@ -4952,7 +4967,7 @@ window.requireHoopOrPrompt = function requireHoopOrPrompt() {
   if (locked) return true;
   const prompt = document.getElementById('overlayPrompt');
   if (prompt) {
-    prompt.textContent = '📍 Tap the hoop to begin setup';
+    prompt.textContent = 'Tap the hoop to begin setup';
     prompt.style.display = 'block';
   }
   return false;
