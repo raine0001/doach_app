@@ -385,18 +385,26 @@ def api_session_add_shot(sid):
 def api_microclip_upload():
     clip = request.files.get('clip')
     if not clip:
-        return jsonify({'ok': False, 'error': 'no file'}), 400
-    session_id = request.form.get('sessionId') or f'sess_{int(time.time())}'
-    shot_idx = request.form.get('shotIdx') or '0'
-    safe_sid = secure_filename(session_id) or f'sess_{int(time.time())}'
-    session_dir = Path(_session_path(safe_sid))
-    clips_dir = session_dir / 'clips'
+        return jsonify(ok=False, error='no file'), 400
+    session_id = request.form.get('sessionId') or 'sess_unknown'
+    shot_id = request.form.get('shotId') or '0'
+    safe_sid = secure_filename(session_id) or 'sess_unknown'
+    safe_shot = ''.join(ch for ch in str(shot_id) if ch.isdigit()) or '0'
+    clips_dir = Path(_session_path(safe_sid)) / 'clips'
     clips_dir.mkdir(parents=True, exist_ok=True)
-    filename = f'shot-{shot_idx}.webm'
+    filename = f'shot-{safe_shot}.webm'
     dest_path = clips_dir / filename
     clip.save(dest_path)
-    rel_path = os.path.join('sessions', safe_sid, 'clips', filename)
+    rel_path = f'sessions/{safe_sid}/clips/{filename}'
+    # enqueue background job here (fbf worker reads this path)
     return jsonify(ok=True, path=rel_path)
+
+@app.post('/api/microclip/result')
+def api_microclip_result():
+    payload = request.get_json(silent=True) or {}
+    # persist as you like (jsonl, db, etc.)
+    # then notify the frontend through polling, SSE, or websockets as needed
+    return jsonify(ok=True)
 
 @app.post('/api/sessions/<sid>/shot_video')
 def api_session_shot_video(sid):

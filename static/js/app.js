@@ -1,4 +1,3 @@
-﻿// app.js with overlay drawing integrated
 // app.js with overlay drawing integrated
 // boot marker for E2E
 try { window.__appJsLoaded = true; } catch {}
@@ -34,7 +33,7 @@ const _arcTick = (opts = {}) => __shotArcCall('updateShotArcTick', () => null)(o
 const proxFromHoop = (...args) => __shotArcCall('proxFromHoop', () => null)(...args);
 
 // Global defaults (overridable via console when needed)
-window.POSE_WARMUP_FRAMES = 20;          // frames of ok pose before warm status
+window.POSE_WARMUP_FRAMES = window.POSE_WARMUP_FRAMES || 18;          // frames of ok pose before warm status
 window.BALL_MIN_SCORE     = 0.30;        // min detector conf for ball
 window.BALL_LABELS        = ['ball', 'basketball', 'sports_ball', 'sports ball'];
 window.MIN_TRAIL_TO_ARM   = 1;           // at least one fresh sample post-arm
@@ -48,7 +47,7 @@ window.POSE_REQUIRE_PLAYER_BOX ??= true;   // must see a 'player'/'person' box
 window.POSE_MIN_IOU_PLAYER     ??= 0.18;   // overlap with player box
 window.POSE_MIN_H              ??= 110;    // min pose height (px)
 window.POSE_MIN_AREA_FRAC      ??= 0.006;  // min area vs frame (0.6%)
-window.POSE_BELOW_RIM_MIN      ??= 80;     // ankles must be â‰¥80px BELOW rim y
+window.POSE_BELOW_RIM_MIN      ??= 80;     // ankles must be ≥80px BELOW rim y
 window.POSE_STREAK_NEED        ??= 2;      // require 2 consecutive frames to accept
 window.REL_MIN_BALL_POINTS ??= 3;      // minimum ball samples before release
 window.REL_MAX_BALL_MS     ??= 260;    // max ms since last ball point
@@ -75,515 +74,317 @@ window.__REQUIRE_TRAIL_FOR_CLIP ??= false;
 window.__clipBusy ??= false;
 window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window.__shotCount) : 0;
 
-(function installMicroClip(){
+// ===== ShotStore (pose-only MVP) ============================================
+window.__SHOT_ID = 0;
+window.__shots = new Map();
+window.__shotsStore = window.__shots;
+
+
+function getSortedShots() {
+  return [...window.__shots.values()].sort((a, b) => a.idx - b.idx);
+}
+
+function summarizeSession() {
+  const shots = getSortedShots();
+  const cues = shots.map((s) => s.coach).filter(Boolean);
+  const highReleaseRe = /high(er)? release|above.*shoulder/i;
+  const elbowUnderRe = /elbow.*under (the )?ball/i;
+  const arcMoreRe = /add(ing)? more arc|taller finish/i;
+  const themes = {
+    highRelease: cues.filter((t) => highReleaseRe.test(t)).length,
+    elbowUnder: cues.filter((t) => elbowUnderRe.test(t)).length,
+    arcMore: cues.filter((t) => arcMoreRe.test(t)).length
+  };
+  return { shots: shots.length, cues: cues.length, themes, notes: cues };
+}
+
+function syncShotBridge() {
+  try {
+    const records = getSortedShots();
+    window.__shotList = records.map((rec) => ({
+      idx: rec.idx,
+      id: rec.id,
+      coach: rec.coach ?? null,
+      created_at: rec.created_at,
+      pending: false,
+      ...rec
+    }));
+    window.dispatchEvent(new CustomEvent('session:summary', { detail: summarizeSession() }));
+  } catch {}
+}
+
+function createShot() {
+  const id = ++window.__SHOT_ID; // 1-based
+  const rec = { id, idx: id, created_at: Date.now(), coach: null, pending: true };
+  window.__shots.set(id, rec);
+  window.__SHOT_IDX = id;
+  window.__shotCount = id;
+  syncShotBridge();
+  window.dispatchEvent(new CustomEvent('shots:update', { detail: { id, rec } }));
+  return rec;
+}
+function updateShot(id, patch) {
+  const rec = window.__shots.get(id);
+  if (!rec) return;
+  Object.assign(rec, patch);
+  window.__shots.set(id, rec);
+  syncShotBridge();
+  window.dispatchEvent(new CustomEvent('shots:update', { detail: { id, rec } }));
+}
+
+window.summarizeSession = summarizeSession;
+window.getShotRecords = getSortedShots;
+
+window.__CLIPS_AVAILABLE = (() => {
+  try {
+    if (typeof MediaRecorder !== 'function') return false;
+    return ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+      .some((mime) => { try { return MediaRecorder.isTypeSupported(mime); } catch { return false; } });
+  } catch {
+    return false;
+  }
+})();
+window.__ENABLE_CLIPS__ = window.__ENABLE_CLIPS__ === true;
+window.USE_MICROCLIP = window.__ENABLE_CLIPS__;
+if (!Array.isArray(window.__shotList)) window.__shotList = [];
+syncShotBridge();
+
+(function installMicroClip()
+{
   if (window.__microClipInstalled) return;
   window.__microClipInstalled = true;
 
-  const SRC = { stream: null, kind: 'none', stopOnReset: false };
-  let rec = null;
-  let chunks = [];
-  let stopTimer = null;
-  let activeFrame = null;
+  window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 3000;
+  window.__clipBusy = !!window.__clipBusy;
 
-  function log(msg) { try { window.__dbgLine?.(`[microclip] ${msg}`); } catch {} }
-
-  function ensureSource() {
-    const liveStream = SRC.stream && typeof SRC.stream.getTracks === 'function' && SRC.stream.getTracks().some((t) => t.readyState === 'live');
-    if (liveStream) return SRC;
-
-    const canvas = document.getElementById('doach-canvas-overlay');
-
-    if (canvas && typeof canvas.captureStream === 'function') {
-
-      try {
-
-        SRC.stream = canvas.captureStream(30);
-
-        SRC.kind = 'canvas';
-
-        SRC.stopOnReset = false;
-        if (SRC.stream) return SRC;
-
-      } catch (err) {
-        log('[microclip] canvas capture failed: ' + err);
-      }
-    }
-
-    const videoEl = document.getElementById('videoPlayer') || document.querySelector('video');
-
-    if (videoEl) {
-      const srcObj = videoEl.srcObject;
-
-      if (srcObj && typeof srcObj.getTracks === 'function') {
-
-        try {
-
-          const tracks = typeof srcObj.getVideoTracks === 'function' ? srcObj.getVideoTracks() : srcObj.getTracks();
-
-          const videoTracks = Array.isArray(tracks) ? tracks.filter(track => !track || track.kind === 'video') : [];
-
-          if (videoTracks.length) {
-
-            let stream = null;
-
-            let cloned = false;
-
-            try {
-
-              const clones = videoTracks.map(track => (typeof track.clone === 'function') ? track.clone() : track);
-
-              cloned = clones.some((track, idx) => track !== videoTracks[idx]);
-
-              stream = new MediaStream(clones);
-
-            } catch (cloneErr) {
-
-              log('[microclip] clone stream failed: ' + cloneErr);
-
-              try {
-
-                stream = new MediaStream(videoTracks);
-
-              } catch (attachErr) {
-
-                log('[microclip] attach srcObject tracks failed: ' + attachErr);
-
-              }
-
-            }
-
-            if (stream) {
-
-              SRC.stream = stream;
-
-              SRC.kind = 'camera';
-
-              SRC.stopOnReset = cloned;
-
-              return SRC;
-
-            }
-
-          }
-        } catch (err) {
-          log('[microclip] camera stream probe failed: ' + err);
-        }
-      }
-
-      if (typeof videoEl.captureStream === 'function') {
-
-        try {
-
-          if (videoEl.paused) { videoEl.play().catch(() => {}); }
-
-          SRC.stream = videoEl.captureStream();
-
-          SRC.kind = 'video';
-
-          SRC.stopOnReset = false;
-
-          if (SRC.stream) return SRC;
-
-        } catch (err) {
-          log('[microclip] video capture failed: ' + err);
-        }
-      }
-    }
-
-    SRC.stream = null;
-    SRC.kind = 'none';
-    SRC.stopOnReset = false;
-    return SRC;
+  function stopTracks(tracks) {
+    tracks.forEach((track) => { try { track.stop(); } catch {} });
   }
 
-  function resetRecorder() {
-    if (stopTimer) {
-      clearTimeout(stopTimer);
-      stopTimer = null;
+  async function startMicroClip({ shotId, releaseFrame = null }) {
+    if (typeof MediaRecorder !== 'function') {
+      updateShot(shotId, { clip: { status: 'error', reason: 'unsupported', frame: releaseFrame } });
+      window.__clipBusy = false;
+      return;
     }
-    if (SRC.stopOnReset && SRC.stream) {
+
+    const video = document.getElementById('videoPlayer') || document.querySelector('video');
+    const stream = (() => {
+      if (!video) return null;
       try {
-        SRC.stream.getTracks().forEach((track) => {
-          try { track.stop(); } catch {}
-        });
+        if (typeof video.captureStream === 'function') {
+          const clone = video.captureStream();
+          if (clone) return clone;
+        }
       } catch {}
-      SRC.stream = null;
-      SRC.kind = 'none';
-      SRC.stopOnReset = false;
-    }
-    rec = null;
-    chunks = [];
-    activeFrame = null;
-  }
+      return video.srcObject || null;
+    })();
 
-  async function uploadClip(shotIdx, blob, frame) {
-    const uploadUrl = window.__MICROCLIP_UPLOAD_URL || '/api/microclip/upload';
-    const form = new FormData();
-    form.append('sessionId', window.__SESSION_ID || `sess_${Date.now()}`);
-    form.append('shotIdx', String(shotIdx));
-    const clipName = `shot-${shotIdx}.webm`;
-    if (typeof File === 'function') {
-      form.append('clip', new File([blob], clipName, { type: blob.type }));
-    } else {
-      form.append('clip', blob, clipName);
-    }
-    try {
-      const response = await fetch(uploadUrl, { method: 'POST', body: form });
-      let data = null;
-      try { data = await response.json(); } catch {}
-      const savedPath = data && typeof data === 'object' ? (data.path ?? null) : null;
-      window.dispatchEvent(new CustomEvent('microclip:saved', { detail: { shotIdx, ok: response.ok, path: savedPath, frame } }));
-      log(`saved ${response.ok ? 'ok' : 'err'} ${savedPath ?? ''}`);
-    } catch (err) {
-      window.dispatchEvent(new CustomEvent('microclip:saved', { detail: { shotIdx, ok: false, error: String(err), frame } }));
-      log(`save:error ${err}`);
-    }
-  }
-
-  function startClip(meta = {}) {
-    if (typeof window.MediaRecorder !== 'function') {
-      log('MediaRecorder unsupported');
-      window.__clipBusy = false;
-      return;
-    }
-    const source = ensureSource();
-    if (!source.stream) {
-      log('no capture stream');
-      window.__clipBusy = false;
-      return;
-    }
-    if (rec && rec.state === 'recording') {
-      log('already recording');
+    if (!stream) {
+      updateShot(shotId, { clip: { status: 'error', reason: 'no-stream', frame: releaseFrame } });
       window.__clipBusy = false;
       return;
     }
 
-    const optsList = [
+    const tracks = (typeof stream.getTracks === 'function') ? stream.getTracks().slice() : [];
+    const shouldStopTracks = tracks.length > 0 && (!video || stream !== video.srcObject);
+
+    const mimeOpts = [
       { mimeType: 'video/webm;codecs=vp9' },
       { mimeType: 'video/webm;codecs=vp8' },
       { mimeType: 'video/webm' }
     ];
-    let opts = {};
-    for (const candidate of optsList) {
-      try { if (MediaRecorder.isTypeSupported(candidate.mimeType)) { opts = candidate; break; } } catch {}
-    }
+    const opts = mimeOpts.find((opt) => {
+      try { return MediaRecorder.isTypeSupported(opt.mimeType); } catch { return false; }
+    }) || {};
+
+    let recorder;
     try {
-      rec = new MediaRecorder(source.stream, opts);
+      recorder = new MediaRecorder(stream, opts);
     } catch (err) {
-      log('MediaRecorder failed: ' + err);
-      if (SRC.stopOnReset && SRC.stream) {
-        try {
-          SRC.stream.getTracks().forEach((track) => {
-            try { track.stop(); } catch {}
-          });
-        } catch {}
-        SRC.stream = null;
-        SRC.kind = 'none';
-        SRC.stopOnReset = false;
-      }
+      updateShot(shotId, { clip: { status: 'error', reason: String(err), frame: releaseFrame } });
+      if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
       return;
     }
 
-    const rawFrame = Number(meta.frame);
-    const frame = Number.isFinite(rawFrame) ? rawFrame : (Number.isFinite(Number(window.__REL_LAST_FRAME)) ? Number(window.__REL_LAST_FRAME) : null);
-    activeFrame = frame;
-
-    const providedIdx = Number.isFinite(Number(meta.shotIdx)) ? Number(meta.shotIdx) : null;
-
-    const baseIdx = (providedIdx !== null)
-
-      ? providedIdx
-
-      : (Number.isFinite(Number(window.__SHOT_IDX)) ? Number(window.__SHOT_IDX) + 1 : (Number(window.__shotCount) || 0) + 1);
-
-    const shotIdx = baseIdx;
-
-    try { window.__SHOT_IDX = shotIdx; } catch {}
-
-    window.__shotCount = shotIdx;
-
-    chunks = [];
-
-    rec.onstart = () => {
-      window.dispatchEvent(new CustomEvent('microclip:started', { detail: { shotIdx, via: source.kind, opts, frame } }));
-      log(`start shot=${shotIdx} via=${source.kind} fmt=${opts.mimeType || 'default'}`);
+    const chunks = [];
+    recorder.onstart = () => {
+      updateShot(shotId, { clip: { status: 'recording', ms: window.__MICROCLIP_MS, frame: releaseFrame } });
+      window.dispatchEvent(new CustomEvent('microclip:started', { detail: { shotId, shotIdx: shotId, ms: window.__MICROCLIP_MS } }));
     };
-    rec.ondataavailable = (evt) => { if (evt?.data?.size) chunks.push(evt.data); };
-    rec.onerror = (evt) => {
-      window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotIdx, frame, msg: String(evt?.error || evt) } }));
-      log(`error ${evt?.error || evt}`);
+    recorder.ondataavailable = (evt) => { if (evt?.data?.size) chunks.push(evt.data); };
+    recorder.onerror = (evt) => {
+      const reason = String(evt?.error || evt || 'error');
+      updateShot(shotId, { clip: { status: 'error', reason, frame: releaseFrame } });
+      window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
+      if (shouldStopTracks) stopTracks(tracks);
+      window.__clipBusy = false;
     };
-    rec.onstop = async () => {
+    recorder.onstop = async () => {
       try {
         if (!chunks.length) {
-          log('no data captured');
-          window.__clipBusy = false;
+          updateShot(shotId, { clip: { status: 'error', reason: 'no-data', frame: releaseFrame } });
+          window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: 'no-data' } }));
           return;
         }
         const blob = new Blob(chunks, { type: opts.mimeType || 'video/webm' });
-        const fileUrl = URL.createObjectURL(blob);
-        const detail = { shotIdx, url: fileUrl, size: blob.size, type: blob.type, durMs: window.__MICROCLIP_MS, frame: activeFrame };
+        const fileName = `shot-${shotId}.webm`;
+        const detail = {
+          shotId,
+          shotIdx: shotId,
+          blobType: blob.type,
+          bytes: blob.size,
+          ms: window.__MICROCLIP_MS,
+          fileName,
+          frame: releaseFrame
+        };
+        try { detail.url = URL.createObjectURL(blob); } catch {}
         window.dispatchEvent(new CustomEvent('microclip:done', { detail }));
-        log(`done shot=${shotIdx} bytes=${blob.size}`);
-        uploadClip(shotIdx, blob, activeFrame).catch(() => {});
-        window.dispatchEvent(new CustomEvent('microclip:analyze', { detail: { shotIdx, src: fileUrl, blobType: blob.type, frame: activeFrame } }));
-      } catch (err) {
-        window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotIdx, frame: activeFrame, msg: String(err) } }));
-        log(`stop:error ${err}`);
+
+        try {
+          const fd = new FormData();
+          fd.append('sessionId', window.__SESSION_ID || `sess_${Date.now()}`);
+          fd.append('shotId', String(shotId));
+          const file = (typeof File === 'function') ? new File([blob], fileName, { type: blob.type }) : blob;
+          fd.append('clip', file, fileName);
+          const res = await fetch('/api/microclip/upload', { method: 'POST', body: fd });
+          const json = await res.json().catch(() => null);
+          const clipPatch = { status: res.ok ? 'saved' : 'error', path: json?.path || null, bytes: blob.size, frame: releaseFrame, ms: window.__MICROCLIP_MS };
+          updateShot(shotId, { clip: clipPatch });
+          window.dispatchEvent(new CustomEvent('microclip:saved', { detail: { shotId, shotIdx: shotId, ok: res.ok, path: json?.path || null, bytes: blob.size, frame: releaseFrame } }));
+          if (!res.ok) {
+            window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: json?.error || 'upload-failed' } }));
+          }
+        } catch (uploadErr) {
+          const reason = String(uploadErr);
+          updateShot(shotId, { clip: { status: 'error', reason, frame: releaseFrame } });
+          window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
+        }
       } finally {
-        resetRecorder();
+        if (shouldStopTracks) stopTracks(tracks);
+        window.__clipBusy = false;
       }
     };
 
     try {
-      rec.start();
-      window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 3000;
-      stopTimer = setTimeout(() => { try { rec.stop(); } catch {} }, window.__MICROCLIP_MS);
+      recorder.start();
+      const duration = Number(window.__MICROCLIP_MS) || 3000;
+      setTimeout(() => {
+        try {
+          if (recorder.state !== 'inactive') recorder.stop();
+        } catch {}
+      }, duration);
     } catch (err) {
-      log(`start failed: ${err}`);
-      resetRecorder();
+      const reason = String(err);
+      updateShot(shotId, { clip: { status: 'error', reason, frame: releaseFrame } });
+      window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
+      if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
     }
   }
 
-  function __microclipShouldRecord() {
-
-    if (window.__REQUIRE_TRAIL_FOR_CLIP !== true) return true;
-
-    const have = Array.isArray(window.ballState?.trail) ? window.ballState.trail.length : 0;
-
-    const need = Number(window.MICROCLIP_MIN_TRAIL || 4);
-
-    if (have < need) {
-
-      try { window.__dbgLine?.(`[microclip:skip] min-trail have=${have} need=${need}`); } catch {}
-
-      return false;
-
-    }
-
-    return true;
-
-  }
+  window.startMicroClip = startMicroClip;
+  window.__startMicroClip = startMicroClip;
 
   window.addEventListener('shot:release', (event) => {
-
-    if (window.__clipBusy) return;
-
-    if (!__microclipShouldRecord()) return;
-
-    const detail = event?.detail || {};
-
-    const nextIdx = Number.isFinite(Number(window.__SHOT_IDX)) ? Number(window.__SHOT_IDX) + 1 : 1;
-
-    try { window.__SHOT_IDX = nextIdx; } catch {}
-
-    window.__clipBusy = true;
-
-    startClip({ frame: detail.frame, shotIdx: nextIdx });
-
-  }, { passive: true });
-
-  const __resetClipBusy = () => { window.__clipBusy = false; };
-
-  window.addEventListener('microclip:done', __resetClipBusy);
-
-  window.addEventListener('microclip:error', __resetClipBusy);
-
-  window.addEventListener('microclip:cancelled', __resetClipBusy);
-
-  window.addEventListener('microclip:started', () => {
+    const incoming = (event?.detail && typeof event.detail === 'object') ? event.detail : {};
+    const shot = createShot();
+    incoming.idx = incoming.idx ?? shot.id;
+    incoming.shotId = incoming.shotId ?? shot.id;
+const detail = { ...incoming };
+const poseSnapshot = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+  ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+  : null;
+updateShot(shot.id, { release: detail, poseSnapshot, pending: true });
     const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
     totals.attempts = Number(totals.attempts || 0) + 1;
-  });
+    if (window.__ENABLE_CLIPS__ !== true || window.__CLIPS_AVAILABLE !== true) return;
+    if (window.__clipBusy) return;
+    window.__clipBusy = true;
+    const releaseFrame = Number.isFinite(Number(detail.frame)) ? Number(detail.frame) : null;
+    startMicroClip({ shotId: shot.id, releaseFrame });
+  }, { passive: true });
+  window.__sessionTotals = window.__sessionTotals || { attempts: 0, made: 0 };
+
+  function __shotsGetId(detail) {
+    if (detail && typeof detail === 'object') {
+      const raw = detail.shotId ?? detail.id ?? detail.idx;
+      const id = Number(raw);
+      if (Number.isFinite(id) && id > 0) return id;
+    }
+    const last = Number(window.__SHOT_ID) || 0;
+    return last > 0 ? last : 0;
+  }
+
+  function __maybeBumpMade(shotId, made) {
+    if (made !== true) return;
+    const rec = window.__shots.get(shotId);
+    const already = rec?.summary?.made === true || rec?.fbf?.made === true;
+    if (already) return;
+    const totals = window.__sessionTotals = window.__sessionTotals || { attempts: 0, made: 0 };
+    totals.made = Number(totals.made || 0) + 1;
+  }
+
   window.addEventListener('shot:summary', (event) => {
     const detail = event?.detail || {};
-    if (detail && detail.made === true) {
-      const idx = Number.isFinite(Number(detail.idx)) ? Number(detail.idx) : Number(window.__SHOT_IDX);
-      const store = window.__shotsStore;
-      if (Number.isFinite(idx) && store) {
-        const existing = store[String(idx)];
-        if (existing && existing.made === true) return;
-      }
-      const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
-      totals.made = Number(totals.made || 0) + 1;
-    }
+    const shotId = __shotsGetId(detail);
+    if (!shotId) return;
+    const summary = {
+      made: detail.made ?? null,
+      arcHeight: detail.arcHeight ?? detail.arc ?? null,
+      entryAngle: detail.entryAngle ?? null,
+      releaseAngle: detail.releaseAngle ?? null,
+      status: detail.status || 'summary'
+    };
+    updateShot(shotId, { summary, pending: false });
+    __maybeBumpMade(shotId, summary.made);
+  });
+
+  window.addEventListener('fbf:result', (event) => {
+    const detail = event?.detail || {};
+    const shotId = __shotsGetId(detail);
+    if (!shotId) return;
+    const payload = {
+      made: detail.made ?? null,
+      arcHeight: detail.arcHeight ?? null,
+      entryAngle: detail.entryAngle ?? null,
+      releaseAngle: detail.releaseAngle ?? null
+    };
+    updateShot(shotId, { fbf: payload, summary: { ...payload, status: 'fbf' }, pending: false });
+    __maybeBumpMade(shotId, payload.made);
+  });
+
+  window.addEventListener('shot:feedback', (event) => {
+    const detail = event?.detail;
+    const shotId = __shotsGetId(detail);
+    if (!shotId) return;
+    const text = typeof detail === 'string' ? detail : (detail?.text ?? detail?.message ?? detail?.feedback ?? null);
+    if (text == null) return;
+    updateShot(shotId, { coach: text });
   });
 
   window.addEventListener('hud:start-session', () => {
-    try { window.__shotCount = 0; window.__sessionTotals = { attempts: 0, made: 0 }; } catch {}
+    if (window.__shots instanceof Map) {
+      window.__shots.clear();
+    } else {
+      window.__shots = new Map();
+    }
+    window.__shotsStore = window.__shots;
+    window.__SHOT_ID = 0;
+    window.__SHOT_IDX = 0;
+    window.__sessionTotals = { attempts: 0, made: 0 };
+    syncShotBridge();
+    window.dispatchEvent(new CustomEvent('shots:update', { detail: { id: null, rec: null } }));
   });
-  window.addEventListener('hud:end-session', () => { try { window.__shotCount = 0; } catch {} });
-  window.__startMicroClip = startClip;
+
+  window.addEventListener('hud:end-session', () => {
+    window.__clipBusy = false;
+    window.dispatchEvent(new CustomEvent('session:summary', { detail: summarizeSession() }));
+  });
+
 })();
 
-if (!window.__shotsStore) {
-  window.__shotsStore = Object.create(null);
-  window.__shots = window.__shotsStore;
-}
-
-function __upsertShotRecord(idx, patch) {
-  if (!Number.isFinite(idx)) return;
-  const key = String(idx);
-  const store = window.__shotsStore;
-  const base = store[key] || { idx };
-  store[key] = { ...base, ...patch, idx };
-  try { window.dispatchEvent(new CustomEvent('shots:update', { detail: { idx, shot: store[key] } })); } catch {}
-}
-
-window.getShotRecords = function getShotRecords() {
-  try { return Object.values(window.__shotsStore).sort((a, b) => (a.idx || 0) - (b.idx || 0)); } catch { return []; }
-};
-
-window.addEventListener('shot:summary', (event) => {
-  const detail = event?.detail || {};
-  const idx = Number.isFinite(Number(detail.idx)) ? Number(detail.idx) : Number(window.__SHOT_IDX);
-  if (!Number.isFinite(idx)) return;
-  __upsertShotRecord(idx, {
-    made: detail.made,
-    arcHeight: detail.arcHeight ?? detail.arc,
-    entryAngle: detail.entryAngle,
-    releaseAngle: detail.releaseAngle,
-    status: detail.status || 'summary',
-    frameRelease: detail.frame ?? detail.frameRelease
-  });
-});
-
-window.addEventListener('microclip:saved', (event) => {
-  const detail = event?.detail || {};
-  const idx = Number(detail.shotIdx);
-  if (!Number.isFinite(idx)) return;
-  __upsertShotRecord(idx, { clipPath: detail.path || null, clipOk: detail.ok !== false, clipFrame: detail.frame });
-});
-
-window.addEventListener('shot:feedback', (event) => {
-  const detail = event?.detail || {};
-  const idx = Number.isFinite(Number(detail.idx)) ? Number(detail.idx) : Number(window.__SHOT_IDX);
-  if (!Number.isFinite(idx)) return;
-  const coachText = (typeof detail === 'string') ? detail : (detail.text ?? detail.message ?? detail.feedback ?? null);
-  if (coachText == null) return;
-  __upsertShotRecord(idx, { coach: coachText });
-});
-
-(function installMicroClipFBF(){
-  if (window.__fbfInstalled) return;
-  window.__fbfInstalled = true;
-
-  function log(msg) { try { window.__dbgLine?.(`[fbf] ${msg}`); } catch {} }
-
-  window.addEventListener('microclip:analyze', async (event) => {
-    const detail = event?.detail || {};
-    const src = detail.src;
-    if (!src) return;
-    const shotIdx = detail.shotIdx ?? null;
-    const frame = detail.frame ?? null;
-
-    const video = document.createElement('video');
-    video.src = src;
-    video.muted = true;
-    video.playsInline = true;
-
-    try {
-      await video.play().catch(() => {});
-      video.pause();
-      await new Promise((resolve) => {
-        if (video.readyState >= 1) return resolve();
-        video.addEventListener('loadedmetadata', () => resolve(), { once: true });
-      });
-    } catch (err) {
-      log(`metadata error ${err}`);
-      setTimeout(() => { try { URL.revokeObjectURL(src); } catch {} }, 60000);
-      return;
-    }
-
-    const fps = Number(window.MICROCLIP_FBF_FPS || 30);
-    const canvas = document.createElement('canvas');
-    canvas.width = video.videoWidth || 1280;
-    canvas.height = video.videoHeight || 720;
-    const ctx = canvas.getContext('2d');
-    const trail = [];
-
-    async function seekTo(time) {
-      const target = Math.min(video.duration || time, Math.max(0, time));
-      return new Promise((resolve) => {
-        let resolved = false;
-        const finish = () => {
-          if (resolved) return;
-          resolved = true;
-          resolve();
-        };
-        video.addEventListener('seeked', finish, { once: true });
-        try { video.currentTime = target; } catch (err) {
-          video.removeEventListener('seeked', finish);
-          resolve();
-        }
-        setTimeout(finish, 350);
-      });
-    }
-
-    function detectPoint() {
-      const hoop = window.getCanonicalHoopBox?.() || window.getLockedHoopBox?.();
-      const roi = (() => {
-        if (!hoop) {
-          const w = Math.round(canvas.width * 0.3);
-          const h = Math.round(canvas.height * 0.25);
-          const x = Math.round(Math.max(0, canvas.width * 0.55 - w * 0.5));
-          const y = Math.round(Math.max(0, canvas.height * 0.05));
-          return { x, y, w, h };
-        }
-        return {
-          x: Math.max(0, Math.floor(hoop.x - hoop.w * 0.4)),
-          y: Math.max(0, Math.floor(hoop.y - hoop.h * 0.4)),
-          w: Math.min(canvas.width, Math.floor(hoop.w * 2.4)),
-          h: Math.min(canvas.height, Math.floor(hoop.h * 2.6))
-        };
-      })();
-      const image = ctx.getImageData(roi.x, roi.y, roi.w, roi.h);
-      const data = image.data;
-      let best = -1;
-      let idx = 0;
-      for (let i = 0; i < data.length; i += 4) {
-        const lum = data[i] * 0.3 + data[i + 1] * 0.59 + data[i + 2] * 0.11;
-        if (lum > best) {
-          best = lum;
-          idx = i;
-        }
-      }
-      const p = (idx / 4) | 0;
-      return {
-        x: roi.x + (p % roi.w),
-        y: roi.y + ((p / roi.w) | 0)
-      };
-    }
-
-    const duration = Math.min(video.duration || 3, Number(window.__MICROCLIP_MS || 3000) / 1000);
-    for (let t = 0; t <= duration; t += 1 / fps) {
-      // eslint-disable-next-line no-await-in-loop
-      await seekTo(t);
-      try { ctx.drawImage(video, 0, 0, canvas.width, canvas.height); } catch {}
-      const point = detectPoint();
-      const sample = { x: point.x, y: point.y, frame: Math.round(t * fps), tMs: Math.round(t * 1000) };
-      trail.push(sample);
-      window.dispatchEvent(new CustomEvent('ball:trail-step', { detail: { frame: sample.frame, len: trail.length, x: sample.x, y: sample.y, tMs: sample.tMs } }));
-    }
-
-    const hoop = window.getCanonicalHoopBox?.() || window.getLockedHoopBox?.();
-    const made = classifyMakeMiss(trail, hoop);
-    window.dispatchEvent(new CustomEvent('shot:summary', { detail: { frame, made, arcHeight: null, releaseAngle: null, entryAngle: null, status: 'fbf', trail } }));
-    log(`analyzed shot=${shotIdx ?? '?'} pts=${trail.length} made=${made}`);
-    setTimeout(() => { try { URL.revokeObjectURL(src); } catch {} }, 60000);
-  });
-
-  function classifyMakeMiss(trail, hoop) {
-    if (!hoop || !Array.isArray(trail) || trail.length < 6) return null;
-    const centerX = hoop.x + hoop.w / 2;
-    const nearHoop = trail.some((p) => Math.abs(p.x - centerX) <= hoop.w && p.y <= (hoop.y + hoop.h * 1.5));
-    const ys = trail.map((p) => p.y);
-    const travel = Math.max(...ys) - Math.min(...ys);
-    return nearHoop && travel > 40;
-  }
-})();
 
 function __cloneForLog(obj) {
   try { return JSON.parse(JSON.stringify(obj)); } catch { return null; }
@@ -842,6 +643,117 @@ function updatePoseWarmup(resultOrBool) {
   return window.__POSE_WARMUP_OK;
 }
 window.updatePoseWarmup = updatePoseWarmup;
+
+
+const POSE_NEED_WARM_STREAK = 18;
+const POSE_COOLDOWN_MS = 1600;
+const POSE_UPTREND_DELTA = 4;
+let __poseArmed = false;
+let __poseLastReleaseMs = 0;
+const __poseWristHistory = [];
+window.__POSE_ONLY_MODE = true;
+window.POSE_WARMUP_FRAMES = POSE_NEED_WARM_STREAK;
+
+function computeElbowAngleDeg(shoulder, elbow, wrist) {
+  try {
+    const v1x = shoulder.x - elbow.x;
+    const v1y = shoulder.y - elbow.y;
+    const v2x = wrist.x - elbow.x;
+    const v2y = wrist.y - elbow.y;
+    const dot = v1x * v2x + v1y * v2y;
+    const len = (Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y)) || 1;
+    const angle = Math.acos(Math.max(-1, Math.min(1, dot / len)));
+    return angle * 180 / Math.PI;
+  } catch {
+    return 0;
+  }
+}
+
+function normalizePoint(p) {
+  if (!p) return null;
+  const x = Number(p.x);
+  const y = Number(p.y);
+  return (Number.isFinite(x) && Number.isFinite(y)) ? { x, y } : null;
+}
+
+function pickPoseSide(keypoints) {
+  const right = {
+    shoulder: normalizePoint(keypoints[12]),
+    elbow: normalizePoint(keypoints[14]),
+    wrist: normalizePoint(keypoints[16])
+  };
+  if (right.shoulder && right.elbow && right.wrist) return right;
+  const left = {
+    shoulder: normalizePoint(keypoints[11]),
+    elbow: normalizePoint(keypoints[13]),
+    wrist: normalizePoint(keypoints[15])
+  };
+  if (left.shoulder && left.elbow && left.wrist) return left;
+  return null;
+}
+
+function poseReleaseTick(frameIdx) {
+  const keypoints = window.playerState?.keypoints;
+  const ok = Array.isArray(keypoints) && keypoints.length >= 17;
+  updatePoseWarmup(ok);
+  if (!ok) {
+    __poseArmed = false;
+    __poseWristHistory.length = 0;
+    return;
+  }
+  const poseSide = pickPoseSide(keypoints);
+  if (!poseSide) {
+    __poseArmed = false;
+    __poseWristHistory.length = 0;
+    return;
+  }
+  const { shoulder, elbow, wrist } = poseSide;
+  const elbowAngleDeg = computeElbowAngleDeg(shoulder, elbow, wrist);
+  const wristAboveShoulder = wrist.y < shoulder.y;
+  const now = performance.now();
+  __poseWristHistory.push({ y: wrist.y, t: now });
+  if (__poseWristHistory.length > 4) __poseWristHistory.shift();
+  let wristUpTrend = false;
+  if (__poseWristHistory.length >= 2) {
+    const curr = __poseWristHistory[__poseWristHistory.length - 1];
+    const prev = __poseWristHistory[__poseWristHistory.length - 2];
+    if (Number.isFinite(prev.y) && Number.isFinite(curr.y)) {
+      wristUpTrend = (prev.y - curr.y) >= POSE_UPTREND_DELTA;
+    }
+    if (!wristUpTrend && __poseWristHistory.length >= 3) {
+      const prev2 = __poseWristHistory[__poseWristHistory.length - 3];
+      if (Number.isFinite(prev2.y) && Number.isFinite(prev.y)) {
+        wristUpTrend = ((prev2.y - prev.y) >= (POSE_UPTREND_DELTA / 2)) && ((prev.y - curr.y) >= (POSE_UPTREND_DELTA / 2));
+      }
+    }
+  }
+  const warmed = window.__POSE_WARMUP_OK === true && (window.__POSE_STREAK__ || 0) >= POSE_NEED_WARM_STREAK;
+  const cooled = (now - __poseLastReleaseMs) >= POSE_COOLDOWN_MS;
+  if (!warmed) {
+    __poseArmed = false;
+  } else if (!__poseArmed && cooled) {
+    __poseArmed = true;
+  }
+  const trig = wristUpTrend && (elbowAngleDeg >= 150) && wristAboveShoulder;
+  if (__poseArmed && trig && cooled) {
+    const frameForEmit = Number.isFinite(frameIdx) ? frameIdx : null;
+    const emitted = window.safeEmitRelease?.(frameForEmit, 'pose', {
+      bypassGate: true,
+      pose: { elbowAngleDeg, wristAboveShoulder, wristUpTrend }
+    }) === true;
+    if (emitted) {
+      __poseArmed = false;
+      __poseLastReleaseMs = now;
+      __poseWristHistory.length = 0;
+    }
+  }
+}
+window.poseReleaseTick = poseReleaseTick;
+
+window.addEventListener('analyzer:frame-done', (event) => {
+  const idx = Number(event?.detail?.__frameIdx);
+  poseReleaseTick(Number.isFinite(idx) ? idx : null);
+}, { passive: true });
 
 function ingestServerDetections(dets, tMs = performance.now(), frame) {
   const frameIdx = Number.isFinite(frame) ? Number(frame) : (Number(window.__AN_IDX) || 0);
@@ -1839,25 +1751,23 @@ window.addEventListener('microclip:done', (event) => {
   } catch {}
 
   // ---- 5) Single safe end Release_shot point emitter  --------------------
-  if (typeof window.safeEmitRelease !== 'function') {
-    window.safeEmitRelease = function safeEmitRelease(frame, via='unknown', opts={}) {
-      try {
-        if (opts && opts.bypassGate === true) {
-          const detail = { frame, via, tMs: performance.now(), ...opts };
-          window.dispatchEvent(new CustomEvent('shot:release', { detail }));
-          window.__dbgLine?.('[safeEmitRelease] bypass fired');
-          return true;
-        }
+if (typeof window.safeEmitRelease !== 'function') {
+  window.safeEmitRelease = function safeEmitRelease(frame, via = 'unknown', opts = {}) {
+    try {
+      const bypass = opts?.bypassGate === true;
+      if (window.__POSE_ONLY_MODE === true && !bypass) {
+        return false;
+      }
 
-        // Hard stop at session cap/end
+      // Hard stop when session already ended/capped
+      if (!bypass) {
         if (window.__sessionEnded === true || (window.__sessionCapped === true && window.__sessionContinue !== true)) return false;
         try {
           const capSrc = (typeof window.getSessionCap === 'function')
             ? window.getSessionCap()
             : (window.SESSION_SIZE ?? 10);
-          const cap   = Number(capSrc);
+          const cap = Number(capSrc);
           const taken = Array.isArray(window.__shotList) ? window.__shotList.length : Number(window.__SCORE_SHOT_COUNT || 0);
-          // Block when we've already logged cap attempts; the current (cap-th) release occurs when taken == cap-1
           if (window.__sessionContinue === true) {
             try { window.__sessionCapped = false; } catch {}
             try { window.__capAwait = false; } catch {}
@@ -1866,63 +1776,57 @@ window.addEventListener('microclip:done', (event) => {
             return false;
           }
         } catch {}
+      }
 
-        // Basic preconditions
-        const armed = (window.__shotTrackingArmed === true);
-        const confirmed = (window.__hoopConfirmed === true);
-        const H = window.getLockedHoopBox?.();
+      const now = performance.now();
+      const armed = (window.__shotTrackingArmed === true);
+      const confirmed = (window.__hoopConfirmed === true);
+      const H = window.getLockedHoopBox?.();
+      if (!bypass) {
         if (!armed || !confirmed || !H) return false;
-
-        // Cooldown + â€œalready firedâ€ guard
-        const now = performance.now();
         const minSepMs = Number(window.REL_MIN_SEP_MS ?? 500);
-        const sinceMs  = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
+        const sinceMs = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
         const sameFrame = Number.isFinite(window.__REL_LAST_FRAME) && window.__REL_LAST_FRAME === frame;
         if (sameFrame || sinceMs < minSepMs) return false;
-        const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1200);
+        const cd = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1200);
         if (sinceMs < cd || window.__releaseEventSent) return false;
-
-        // Require wrist-drop reset since the previous release
         if (window.__RESET_SEEN_BELOW === false) return false;
-
-        // Canonical gate approval (pose-first authority lives in release_gate.js)
         const hist = (window.playerState?.frameHistory || []).slice(-5);
-        let approved = false, t = {};
+        let approved = false; let t = {};
         if (typeof window.releaseGate === 'function') {
-          const g = window.releaseGate(hist) || { released:false, tests:{} };
+          const g = window.releaseGate(hist) || { released: false, tests: {} };
           approved = !!g.released; t = g.tests || {};
         }
         if (!approved) return false;
-
-        // Optional: strict HUD parity (0.26 weights all-four) to match your HUD visuals
         try {
           const useUp = (window.REL_SCORE_USE_UPTREND === true);
-          const wA=0.26,wB=0.26,wC=0.26,wD=0.26, tot=wA+wB+wC+wD;
-          const sc = (t.wristAboveElbow?wA:0)+(t.elbowExtended?wB:0)+(t.alignOK?wC:0)+((useUp?t.wristUpTrend:t.wristAboveShoulder)?wD:0);
+          const wA = 0.26, wB = 0.26, wC = 0.26, wD = 0.26, tot = wA + wB + wC + wD;
+          const sc = (t.wristAboveElbow ? wA : 0) + (t.elbowExtended ? wB : 0) + (t.alignOK ? wC : 0) + ((useUp ? t.wristUpTrend : t.wristAboveShoulder) ? wD : 0);
           if (!(Number.isFinite(sc) && sc >= (tot - 1e-6))) return false;
         } catch {}
+      }
 
-        // Proximity (compute if not provided)
-        let prox = opts?.prox || null;
-        try {
-          if (!prox && typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function') {
-            prox = window.proxFromHoop(window.canonHoop(H));
-          }
-        } catch {}
+      let prox = opts?.prox || null;
+      try {
+        if (!prox && typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function') {
+          prox = window.proxFromHoop(window.canonHoop(H));
+        }
+      } catch {}
 
-        // Mark + dispatch (canonical)
-        const markPayload = { ...opts, prox, via, requirePose: true, __fromSafe: true };
-        (window.__markReleasePose || window.markRelease)?.(frame, markPayload);
-        window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
-        window.__releaseEventSent = true; window.__REL_LAST_FIRE_MS = now; window.__REL_LAST_VIA = via;
-        const detail = { frame, via, prox, tMs: now, ...opts };
-        window.dispatchEvent(new CustomEvent('shot:release', { detail }));
-        window.__REL_LAST_FRAME = frame;
+      const markPayload = { ...opts, prox, via, requirePose: true, __fromSafe: true };
+      (window.__markReleasePose || window.markRelease)?.(frame, markPayload);
+      window.dispatchEvent(new CustomEvent('pose:release', { detail: { frame, via } }));
+      window.__releaseEventSent = true;
+      window.__REL_LAST_FIRE_MS = now;
+      window.__REL_LAST_VIA = via;
+      window.__REL_LAST_FRAME = frame;
+      const detail = { frame, via, prox, tMs: now, ...opts };
+      window.dispatchEvent(new CustomEvent('shot:release', { detail }));
 
-        try { __reportReleaseToServer?.({ frame, via, tMs: Date.now(), prox }); } catch {}
+      try { __reportReleaseToServer?.({ frame, via, tMs: Date.now(), prox }); } catch {}
+      try { window.__lastSummary = null; } catch {}
 
-        try { window.__lastSummary = null; } catch {}
-
+      if (window.__POSE_ONLY_MODE !== true) {
         try {
           const list = (window.__shotList ||= []);
           const last = list.at?.(-1) || null;
@@ -1933,7 +1837,7 @@ window.addEventListener('microclip:done', (event) => {
               : null;
             const shotEntry = { pending: true, frameRelease: frame, tMs: Date.now(), poseSnapshot: snap };
             list.push(shotEntry);
-            try { window.__SHOT_IDX = list.length - 1; } catch {}
+            try { window.__SHOT_IDX = window.__SHOT_ID; } catch {}
             if (window.USE_MICROCLIP === true) {
               try { if (window.__releaseFallbackTimer) { clearTimeout(window.__releaseFallbackTimer); window.__releaseFallbackTimer = null; } } catch {}
               try { window.__SCORING_DELEGATED = true; } catch {}
@@ -1941,26 +1845,20 @@ window.addEventListener('microclip:done', (event) => {
             }
           }
         } catch {}
+      }
 
-        if (window.USE_MICROCLIP !== true) {
-          armReleaseFallbackTimer('fallback');
-        }
+      if (window.USE_MICROCLIP !== true && window.__POSE_ONLY_MODE !== true) {
+        armReleaseFallbackTimer('fallback');
+      }
 
-        return true;
-      } catch { return false; }
-    };
-  }
+      return true;
+    } catch {
+      return false;
+    }
+  };
+}
 
-  if (!window.__hardCapEnd) {
-    window.__hardCapEnd = function(reason='cap'){
-      try { window.__sessionCapped = true; window.__sessionEnded = true; window.__SESSION_ACTIVE = false; } catch {}
-      try { window.stopPoseReleaseSampler?.(); window.stopFrameAnalysis?.(); } catch {}
-      try { window.setSessionStatus?.('Session complete'); } catch {}
-      try { window.dispatchEvent(new CustomEvent('hud:end-session', { detail: { reason } })); } catch {}
-    };
-  }
-
-  if (!window.__hardCapListener) {
+if (!window.__hardCapListener) {
     window.__hardCapListener = true;
     window.addEventListener('shot:summary', () => {
       try { window.__SESSION_SHOT_COUNT = Number(window.__SESSION_SHOT_COUNT || 0) + 1; } catch {}
@@ -2154,7 +2052,7 @@ window.addEventListener('microclip:done', (event) => {
           } catch {}
         }
 
-        // Ball freshness sanity: use timestamps so cross-clock drift doesn�t kill releases
+        // Ball freshness sanity: use timestamps so cross-clock drift doesn?t kill releases
         try {
           const nowMs = performance.now();
           const lastPt = window.ballState?.trail?.at?.(-1) || null;
@@ -2250,7 +2148,7 @@ window.addEventListener('microclip:done', (event) => {
             ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
             : null;
           list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
-          try { window.__SHOT_IDX = (list.length - 1); } catch {}
+          try { window.__SHOT_IDX = window.__SHOT_ID; } catch {}
         }
         const taken = list.length;
         const made = (window.shotLog?.filter?.(s => s.made).length || 0);
@@ -2400,7 +2298,7 @@ window.PROX_OUT_CONSEC_MIN = 2;    // frames outside required before EXIT latch
 window.PROX_EXIT_PAD        = 4;   // extra px below bottom to confirm EXIT
 
 // ---- Pure pose-gate helper for release latch (pose-only) ----
-// Accepts the last N frames of keypoints (3â€“5), returns tests and immediate decision.
+// Accepts the last N frames of keypoints (3–5), returns tests and immediate decision.
 // Caller can apply a multi-tick streak if desired.
 function release_gate(lastFrames) {
   try { return releaseGate(lastFrames); } catch (e) { return { released:false, passed:0, tests:{}, reason:'error' }; }
@@ -2410,7 +2308,7 @@ function release_gate(lastFrames) {
 export function attachHoop(hoopLocked) {
   if (!hoopLocked) return;
 
-  // Pull size, allow 0 â†’ fallback to previous or a sensible default
+  // Pull size, allow 0 → fallback to previous or a sensible default
   const prev = ballState.hoop || {};
   let w = Number(hoopLocked.w ?? hoopLocked.width  ?? prev.w ?? 0);
   let h = Number(hoopLocked.h ?? hoopLocked.height ?? prev.h ?? 0);
@@ -2565,7 +2463,7 @@ async function pickPreferredCameraId() {
       }
     } catch {} if (preferFacing) return null;
 
-    // Ensure labels are populated â€” requires one permissive getUserMedia call
+    // Ensure labels are populated — requires one permissive getUserMedia call
     try {
       const ua = (navigator.userAgent || '').toLowerCase();
       const isMobile = /android|iphone|ipad|ipod|mobile/.test(ua);
@@ -2654,7 +2552,7 @@ export async function startCamera() {
         constraints = { audio: false, video: vc };
         stream = await navigator.mediaDevices.getUserMedia(constraints);
       } else {
-        // Already using facingMode â€” relax to ideal or flip to user if environment fails
+        // Already using facingMode — relax to ideal or flip to user if environment fails
         const want = String(preferFacing || 'environment').toLowerCase();
         const alt = want === 'environment' ? 'user' : 'environment';
         try {
@@ -2670,7 +2568,7 @@ export async function startCamera() {
     } catch (e2) {
       console.warn('[camera] gUM failed (fallback):', e2?.name, e2?.message);
       const msg = (err?.name === 'NotAllowedError' || e2?.name === 'NotAllowedError')
-        ? 'Camera permission blocked â€” enable camera for this site in your browser settings and reload.'
+        ? 'Camera permission blocked — enable camera for this site in your browser settings and reload.'
         : 'No camera found or in use by another app. Check OS permissions and try again.';
       window.showPrompt?.(msg);
       return false;
@@ -2696,8 +2594,8 @@ export async function startCamera() {
   
 
   try { await v.play(); } catch (e) {
-    console.warn('[camera] video.play() blocked â€” call from a user gesture.');
-    // Even if autoplay is blocked, stream is live â€” clear prompt so user can tap play
+    console.warn('[camera] video.play() blocked — call from a user gesture.');
+    // Even if autoplay is blocked, stream is live — clear prompt so user can tap play
     window.hidePrompt?.();
     return false;
   }
@@ -2705,7 +2603,7 @@ export async function startCamera() {
   // Reset counters/guards at the start of a live session as well
   try { window.resetReleaseSessionCounters?.(); } catch {}
 
-  // âœ… Arm overlay for picking BEFORE any sync so pointer-events stay 'auto'
+  // ✅ Arm overlay for picking BEFORE any sync so pointer-events stay 'auto'
 
   try { startPreDetection?.(v); } catch {}
   try { initPoseDetector?.(); } catch {}
@@ -2809,7 +2707,7 @@ export function enableHoopPickOnce() {
   ov.style.cursor        = 'crosshair';
   ov.style.zIndex        = '100';
   vid.style.pointerEvents = 'none';
-  if (promptEl) { promptEl.style.display = 'block'; promptEl.textContent = 'ðŸ“ Tap the hoop to lock it'; }
+  if (promptEl) { promptEl.style.display = 'block'; promptEl.textContent = '📍 Tap the hoop to lock it'; }
 
   // Refresh rect/mapping now that picking is armed
   syncOverlayToVideo?.();
@@ -2842,7 +2740,7 @@ export function enableHoopPickOnce() {
     };
     window.__coachPaintRaf = requestAnimationFrame(paint);
 
-    // NEW: while on coach plane (live), actively sample pose at ~8â€“10 fps
+    // NEW: while on coach plane (live), actively sample pose at ~8–10 fps
     // so playerState keeps updating immediately after hoop lock.
     try { clearInterval(window.__coachPoseInterval); } catch {}
     const POSE_MS = Math.max(80, Number(window.COACH_POSE_MS || 120));
@@ -2970,7 +2868,7 @@ export function enableHoopPickOnce() {
       };
       window.__coachPaintRaf = requestAnimationFrame(paint);
     } else {
-      // ðŸŽžï¸ UPLOAD: run the full analyzer
+      // 🎞️ UPLOAD: run the full analyzer
       requestAnimationFrame(() => window.startFrameAnalysis?.());
     }
   }
@@ -2984,7 +2882,7 @@ export function enableHoopPickOnce() {
     try {
       e.preventDefault?.(); e.stopPropagation?.();
 
-      // 1) Use your proven locker (same as uploads): sets the real â€œlocked hoopâ€
+      // 1) Use your proven locker (same as uploads): sets the real “locked hoop”
       handleHoopSelection?.(e, ov, window.lastDetectedFrame, promptEl);
 
       // 2) Immediately mirror the locked box into ball_tracker so proximity math works this frame
@@ -3057,7 +2955,7 @@ function __courtRoiOK(ls) {
   const ank = __anklesY(ls);
   const rim = __rimTopY();
   if (!Number.isFinite(ank) || !Number.isFinite(rim)) return false;
-  // y grows downward â†’ "below rim" means ank > rim + margin
+  // y grows downward → "below rim" means ank > rim + margin
   return (ank >= rim + Number(window.POSE_BELOW_RIM_MIN || 80));
 }
 function isPoseBelievable(ls, objects, canvasEl) {
@@ -3101,10 +2999,10 @@ function poseBeliefLatched(isOK) {
 // but keep the canvas drawing buffer equal to the video *intrinsic* size
 // ensureOverlayCss now lives in fix_overlay_display.js
 
-// Debug: click tracer for the overlay â€” logs CSS px + VIDEO px, pe/z, scale/dpr.
+// Debug: click tracer for the overlay — logs CSS px + VIDEO px, pe/z, scale/dpr.
 // Safe to call multiple times; call removeOverlayTracer() to unbind.
 
-// â”€â”€â”€ Readiness gate for scoring / analysis â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ─── Readiness gate for scoring / analysis ───────────────────────────────
 window.__readyForScoring  = false;  // becomes true after stable warm frames
 window.__detectorsWarmed  = false;  // flipped by your prewarm or first success
 let __warmFrames          = 0;
@@ -3174,20 +3072,20 @@ window.onNewVideoLoaded   = () => resetReadiness('new video');
 window.onHoopRelocked     = () => resetReadiness('hoop changed');
 window.onSeekOrPause      = () => resetReadiness('seek/pause');
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// Lightweight warmâ€‘up for detector + pose (no overlay pollution)
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
+// Lightweight warm‑up for detector + pose (no overlay pollution)
+// ───────────────────────────────────────────────────────────────
 window.__detectorsWarmed = false;
 let __prewarmToken = null;
 
 /**
  * Warm the object detector and pose once, without touching the overlay.
- * Safe to call multiple times; it will noâ€‘op for the same video source.
+ * Safe to call multiple times; it will no‑op for the same video source.
  */
 export async function prewarmDetectors(videoEl) {
   if (!videoEl) return;
 
-  // guard: perâ€‘video token so we donâ€™t reâ€‘prewarm on the same source
+  // guard: per‑video token so we don’t re‑prewarm on the same source
   const token = videoEl.currentSrc || videoEl.srcObject || 'in-memory-stream';
   if (__prewarmToken === token && window.__detectorsWarmed) return;
 
@@ -3251,10 +3149,10 @@ export async function prewarmDetectors(videoEl) {
   await new Promise(r => setTimeout(r, 80));
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 // Tiny ~#fps pre-detect loop to warm models & seed readiness
 // Stops automatically when __readyForScoring OR analyzer starts.
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 const __preDet = { on:false, raf:0, frame:0 };
 
 export function startPreDetection(videoEl) {
@@ -3291,7 +3189,7 @@ export function startPreDetection(videoEl) {
         let objects = [];
         if (typeof kickDetect === 'function') {
           // fire-and-forget; consume whatever latest results exist
-          // When forced to server (no worker), kickDetect ultimately calls sendFrameToDetect â€”
+          // When forced to server (no worker), kickDetect ultimately calls sendFrameToDetect —
           // let the cadence be limited by MIN_DT below.
           const now = performance.now();
           if (now - __lastPD >= MIN_DT) {
@@ -3300,7 +3198,7 @@ export function startPreDetection(videoEl) {
           }
           if (Array.isArray(window.__lastDetObjects)) objects = window.__lastDetObjects;
         } else {
-          // direct, blocking detect for warmup â†’ throttle to TARGET_FPS
+          // direct, blocking detect for warmup → throttle to TARGET_FPS
           const now = performance.now();
           if (now - __lastPD >= MIN_DT) {
             __lastPD = now;
@@ -3341,7 +3239,7 @@ export function startPreDetection(videoEl) {
         // Advance readiness gate; will flip __readyForScoring when stable
         tickReadiness?.(objects, poses);
 
-        // Stop as soon as weâ€™re ready (or analyzer has started)
+        // Stop as soon as we’re ready (or analyzer has started)
         const __isLive = !!(videoEl && videoEl.srcObject); if (!__isLive && window.__readyForScoring) { stopPreDetection(); return; }
       }
     } catch (e) {
@@ -3367,7 +3265,7 @@ export function stopPreDetection() {
   __preDet.raf = 0;
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  end pre detection logic
+// ──────────────────────────  end pre detection logic
 
 // ---- Boot & event wires ----
 document.addEventListener('DOMContentLoaded', () => {
@@ -3381,17 +3279,17 @@ document.addEventListener('DOMContentLoaded', () => {
     frameEl.style.position = 'relative';
   }
 
-  // mount the âš™ï¸ preferences on the frame (optional)
+  // mount the ⚙️ preferences on the frame (optional)
   try { mountPrefs?.(frameEl || document.body); } catch {}
 
   // one true start function (idempotent)
   window.startFrameAnalysis = async () => {
     // In release-only mode, skip analyzer entirely (sampler-only)
-    try { if (window.__RELEASE_ONLY === true) { console.log('[analyze] skipped â€” releaseOnly'); return; } } catch {}
+    try { if (window.__RELEASE_ONLY === true) { console.log('[analyze] skipped — releaseOnly'); return; } } catch {}
     if (!getLockedHoopBox?.()) {
       // refuse to start; surface prompt
       const prompt = document.getElementById('overlayPrompt');
-      if (prompt) { prompt.textContent = 'ðŸ“ Tap the hoop to begin setup'; prompt.style.display = 'block'; }
+      if (prompt) { prompt.textContent = '📍 Tap the hoop to begin setup'; prompt.style.display = 'block'; }
       return;
     }
     // stop any warmup and pre-detect loops
@@ -3400,7 +3298,7 @@ document.addEventListener('DOMContentLoaded', () => {
     window.analyzeVideoFrameByFrame?.(videoPlayer, overlay);
   };
 
-  // metadata â†’ size map + warmup
+  // metadata → size map + warmup
   videoPlayer.addEventListener('loadedmetadata', async () => {
     try { initHUDForVideo?.(videoPlayer); } catch {}
     // reset pick state on every new source
@@ -3409,7 +3307,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     syncOverlayToVideo();
 
-    // ðŸ‘‡ Auto-arm pick for uploaded videos (not live camera)
+    // 👇 Auto-arm pick for uploaded videos (not live camera)
     const isLive = !!videoPlayer.srcObject;
     if (!isLive) {
       try { window.USE_FBF_DURING_SHOT = true; } catch {}
@@ -3423,7 +3321,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // (keep your prewarm + optional pre-detect)
     if (window.__RELEASE_ONLY === true) {
-      try { console.log('[PD] skipped â€” releaseOnly'); } catch {}
+      try { console.log('[PD] skipped — releaseOnly'); } catch {}
     } else {
       try {
         await prewarmDetectors?.(videoPlayer);
@@ -3435,10 +3333,10 @@ document.addEventListener('DOMContentLoaded', () => {
     try { installBallMotionFallback(videoPlayer); } catch {}
   }, { once: true });
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ────────────────────────────────────────────────────────────────────────────
   // Pose-release sampler: polls releaseGate() and emits via safeEmitRelease()
   // Keeps the HUD visual-only; canonical events come from this producer.
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ────────────────────────────────────────────────────────────────────────────
   (function installPoseReleaseSampler(){
     if (window.__poseSamplerInstalled) return;
     window.__poseSamplerInstalled = true;
@@ -3494,7 +3392,7 @@ document.addEventListener('DOMContentLoaded', () => {
   try { new ResizeObserver(resync).observe(videoPlayer); } catch {}
   document.addEventListener('fullscreenchange', resync);
 
-  // Pause â†’ stop analysis + pre-detect, reset readiness a bit
+  // Pause → stop analysis + pre-detect, reset readiness a bit
   videoPlayer.addEventListener('pause', () => {
     // If FBF owns the pause, do NOT tear down analysis
     if (window.__fbfActive === true || window.__FBF_OWNING_PAUSE === true) return;
@@ -3519,26 +3417,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const hoopLocked = !!getLockedHoopBox?.();
     if (!hoopLocked) {
       const prompt = document.getElementById('overlayPrompt');
-      if (prompt) { prompt.textContent = 'ðŸ“ Tap the hoop to begin setup'; prompt.style.display = 'block'; }
+      if (prompt) { prompt.textContent = '📍 Tap the hoop to begin setup'; prompt.style.display = 'block'; }
       videoPlayer.pause();
       return;
     }
     videoPlayer.paused ? videoPlayer.play() : videoPlayer.pause();
   };
 
-  // Play â†’ enforce gate & start analysis
+  // Play → enforce gate & start analysis
   // account for hoop selection on live video
   videoPlayer.addEventListener('play', async () => {
-    // ðŸ”¹ Live camera must keep playing so you can see & pick the hoop
+    // 🔹 Live camera must keep playing so you can see & pick the hoop
     const isLive = !!videoPlayer.srcObject;
     if (isLive) {
-      console.log('â–¶ï¸ Live camera streaming');
+      console.log('▶️ Live camera streaming');
       // Let pre-warm or picker flow start analysis later; do NOT pause here.
       try { window.startPoseReleaseSampler?.(); } catch {}
       return;
     }
 
-    // ðŸ”¹ Uploaded videos keep the original gate (pause until hoop is locked)
+    // 🔹 Uploaded videos keep the original gate (pause until hoop is locked)
     const hoopLocked = !!getLockedHoopBox?.();
     console.log('[gate check]', {
       hasHoop: hoopLocked,
@@ -3551,7 +3449,7 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       if (!window.__preflightReady) {
         try { videoPlayer.pause(); } catch {}
-        try { window.setSessionStatus?.('Preparing analyzerâ€¦'); } catch {}
+        try { window.setSessionStatus?.('Preparing analyzer…'); } catch {}
         try { installPreDetectorFor?.(videoPlayer); } catch {}
         try { startPreDetection?.(videoPlayer); } catch {}
         // Wait for PD warmup (lead frames) or up to 5s (~10 fps => ~4s lead)
@@ -3563,15 +3461,15 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     } catch {}
 
-    console.log('â–¶ï¸ Video playback started');
+    console.log('▶️ Video playback started');
     window.startFrameAnalysis?.();
     // NEW: begin polling the canonical gate for pose releases
     try { window.startPoseReleaseSampler?.(); } catch {}
   });
 
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ────────────────────────────────────────────────────────────────────────────
   // Shot lifecycle helpers (kept; used by the unified pose-release pipeline)
-  // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  // ────────────────────────────────────────────────────────────────────────────
 
   // Report frontend release to backend (anchor for arc)
   window.__reportReleaseToServer = async function __reportReleaseToServer(detail){
@@ -3615,7 +3513,10 @@ document.addEventListener('DOMContentLoaded', () => {
       const list = (window.__shotList || []);
       let idx = null;
       try { if (Number.isFinite(window.__SHOT_IDX)) idx = Number(window.__SHOT_IDX); } catch {}
-      if (idx == null && Array.isArray(list) && list.length) idx = list.length - 1;
+      if (idx == null) {
+        const shotId = Number(window.__SHOT_ID);
+        if (Number.isFinite(shotId) && shotId > 0) idx = shotId;
+      }
       const payload = {
         idx,
         t: Date.now(),
@@ -3663,7 +3564,7 @@ document.addEventListener('DOMContentLoaded', () => {
       window.removeEventListener('shot:release', onRel);
     };
     window.addEventListener('shot:release', onRel);
-    console.log('[watch:arm] release @ frame', target, `(Â±${tolerance} fr) ~ t=${(target/fps).toFixed(2)}s`);
+    console.log('[watch:arm] release @ frame', target, `(±${tolerance} fr) ~ t=${(target/fps).toFixed(2)}s`);
   };
   window.watchReleaseAtTime = (hhmmss) => {
     try {
@@ -3675,7 +3576,7 @@ document.addEventListener('DOMContentLoaded', () => {
     } catch(e) { console.warn('[watch] bad time', hhmmss, e); }
   };
 
-  // Seek â†’ small readiness reset (useful for scrub/step)
+  // Seek → small readiness reset (useful for scrub/step)
   videoPlayer.addEventListener('seeked', () => {
     try { window.onSeekOrPause?.(); } catch {}
   });
@@ -3738,7 +3639,7 @@ try {
   s.src = '/tools/arc_contract.js';
   s.async = true;
   s.onload = () => console.log('[arc] contract loaded');
-  s.onerror = () => console.warn('[arc] contract not found â€” metrics will be skipped');
+  s.onerror = () => console.warn('[arc] contract not found — metrics will be skipped');
   document.head.appendChild(s);
 })();
 
@@ -3806,10 +3707,10 @@ window.handleVideoUpload = async function (event) {
   try {
     ensureOverlayCss?.();
 
-    // âœ… init overlay WITHOUT a fake detector â€” pose attaches later
+    // ✅ init overlay WITHOUT a fake detector — pose attaches later
     initOverlay?.(overlayEl);
 
-    // optional pre-detect warmup, if youâ€™ve got it
+    // optional pre-detect warmup, if you’ve got it
     try { startPreDetection?.(video); } catch (e) {
       console.warn('predetect start failed:', e);
     }
@@ -3826,7 +3727,7 @@ window.handleVideoUpload = async function (event) {
         return;
       }
       try { stopPreDetection?.(); } catch {}
-      console.log('[analyze] starting main loopâ€¦');
+      console.log('[analyze] starting main loop…');
       try { runAnalyzer?.(video, overlayEl); } catch { window.legacyAnalyzeVideoFrameByFrame?.(video, overlayEl); }
     };
 
@@ -3840,9 +3741,9 @@ window.handleVideoUpload = async function (event) {
   try { installOverlayTracer?.(); } catch {}
 
   // required for hoop selection
-  // ðŸŸ¢ arm the one-shot hoop picker and show the prompt
+  // 🟢 arm the one-shot hoop picker and show the prompt
   if (prompt) {
-    prompt.textContent = 'ðŸ“ Tap the hoop to begin setup';
+    prompt.textContent = '📍 Tap the hoop to begin setup';
     prompt.style.display = 'block';
   }
   // avoid double-binding if called again
@@ -3855,9 +3756,9 @@ window.handleVideoUpload = async function (event) {
   try { createPlaybackControls?.(video); } catch {}
 };
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 // Analyzer (event-driven, no time-warping of the video element)
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 
 // ========= globals =========
 let __analyzing = false;
@@ -3908,7 +3809,7 @@ window.stopFrameAnalysis = function stopFrameAnalysis() {
 };
 
 // Use frame-by-frame during the shot window
-// Enable FBF during the shot window (pose release â†’ FBF start)
+// Enable FBF during the shot window (pose release → FBF start)
 window.USE_FBF_DURING_SHOT = false; // disable visible FBF by default; backend handles analysis
 
 // startTracking: kicks analyzer for #videoPlayer + #overlay
@@ -3920,7 +3821,7 @@ window.startTracking = function startTracking() {
 };
 window.stopTracking = window.stopFrameAnalysis;
 
-// optional legacy â€œreal-timeâ€ hook (off by default)
+// optional legacy “real-time” hook (off by default)
 window.useRealTimeTracking = false;
 (function attachRealtimePlayHook() {
   const v = document.getElementById('videoPlayer');
@@ -3938,7 +3839,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
 
 //---------------------------------------------------------------------------------//
 //                     ----------  FBF  ----------                                 // 
-// Frame-By-Frame shot window â€” deterministic, faster pacing, safe scorer ordering //
+// Frame-By-Frame shot window — deterministic, faster pacing, safe scorer ordering //
 //---------------------------------------------------------------------------------//
 
 (function installShotWindowFBF(){
@@ -3958,7 +3859,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
     const finish = (via='?') => {
       if (!done) {
         done = true;
-        console.log('[fbf/wait]', via, 'from', startT.toFixed(3), 'â†’', videoEl.currentTime.toFixed(3));
+        console.log('[fbf/wait]', via, 'from', startT.toFixed(3), '→', videoEl.currentTime.toFixed(3));
         cleanup();
         resolve();
       }
@@ -3992,7 +3893,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
     buf.width = vw; buf.height = vh;
   }
   bctx.drawImage(videoEl, 0, 0, buf.width, buf.height);
-  // Keep overlayâ†’video mapping sane while paused
+  // Keep overlay→video mapping sane while paused
   try { ensureOverlayCss?.(); syncOverlayToVideo?.(); } catch {}
 
   // 1) DETECT + POSE (prefer ROI near hoop if available)
@@ -4039,7 +3940,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
   let objects = det?.objects || [];
   try { stabilizeLockedHoop?.(objects); } catch {}
   try { objects = filterObjectsToLockedHoop?.(objects) ?? objects; } catch {}
-  // 2) Stabilize hoop â†’ read center â†’ attach TL (tracker expects TL)
+  // 2) Stabilize hoop → read center → attach TL (tracker expects TL)
   try { stabilizeLockedHoop?.(objects); } catch {}
   
   
@@ -4089,7 +3990,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
     }
   }
 
-  // 6b) YOLO center (CANVAS â€” detector runs on buf == canvas size)
+  // 6b) YOLO center (CANVAS — detector runs on buf == canvas size)
   if (!updatedThisTick) {
     try {
       const ballObj = objects.find(o => isBallLabel(o.label) && Array.isArray(o.box));
@@ -4119,7 +4020,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
     } catch {}
   }
 
-  // 6c) YOLO blink â†’ micro-track near last trail point
+  // 6c) YOLO blink → micro-track near last trail point
   if (!updatedThisTick) {
     const last = window.ballState?.trail?.at?.(-1);
     if (last) {
@@ -4196,7 +4097,7 @@ window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
       const prox = makeProxRectFromCanon(Hc);
       const lastPt = window.ballState?.trail?.at?.(-1) || null;
       if (prox && lastPt && lastPt.y > (prox.y + prox.h + 8)) {
-        console.log('[fbf] stop â€” ball below prox');
+        console.log('[fbf] stop — ball below prox');
         return false; // signal caller to end FBF loop
       }
     }
@@ -4260,13 +4161,13 @@ async function runShotFBF() {
 
   window.__fbfActive = true;
   window.__ignoreSlowWhileFBF = true;
-  window.setSessionStatus?.('Analyzing shotâ€¦');
+  window.setSessionStatus?.('Analyzing shot…');
   try { videoEl.pause(); } catch {}
 
   try { ensureOverlayCss?.(); syncOverlayToVideo?.(); } catch {}
 
   const srcFps  = getFPS();
-  const dt      = (1 / srcFps) + 1e-4;  // avoid â€œseeked to the same timeâ€
+  const dt      = (1 / srcFps) + 1e-4;  // avoid “seeked to the same time”
   const visFps  = Math.max(1, Number(window.FBF_VISUAL_FPS) || 10);
   const buf     = document.createElement('canvas');
   const bctx    = buf.getContext('2d', { willReadFrequently: true });
@@ -4316,7 +4217,7 @@ async function runShotFBF() {
   }
 
   window.__fbfActive = false;
-  window.setSessionStatus?.('SESSION IN PROGRESSâ€¦');
+  window.setSessionStatus?.('SESSION IN PROGRESS…');
   try { videoEl.playbackRate = 1; videoEl.play(); } catch {}
   try { analyzeVideoFrameByFrame?.(videoEl, canvasEl); } catch {}
 
@@ -4343,7 +4244,7 @@ async function runShotFBF() {
         if (prox && raw) {
           const [x1,y1,x2,y2] = raw.box; const by = (y1+y2)/2;
           const m = Number(window.FBF_STOP_BELOW_MARGIN || 8);
-          if (by > (prox.y + prox.h + m)) { console.log('[fbf] skipped start â€” ball already below prox'); return; }
+          if (by > (prox.y + prox.h + m)) { console.log('[fbf] skipped start — ball already below prox'); return; }
         }
       }
     } catch {}
@@ -4409,10 +4310,10 @@ async function runShotFBF() {
   } catch {}
 })();
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
+// ─────────────────────────────────────────────────────────────── //
 //           ----------------  RVFC ----------------               //
 // ========= RVFC analyzer (no manual stepping/scrubbing) =========//
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
+// ─────────────────────────────────────────────────────────────── //
 
 window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(videoEl, canvasEl) {
   if (videoEl && videoEl.srcObject) {
@@ -4523,7 +4424,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
         markPoseWarmStatus(true);
         poseMarked = true;
       } else if (Array.isArray(poses) && Array.isArray(poses[0]) && poses[0].length >= 33) {
-        // Fallback: first pose in result (normalized â†’ scaled inside updatePlayerTracker)
+        // Fallback: first pose in result (normalized → scaled inside updatePlayerTracker)
         updatePlayerTracker?.(poses[0], frameIdx);
         markPoseWarmStatus(true);
         poseMarked = true;
@@ -4536,7 +4437,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
       window.lastDetectedFrame = { __frameIdx: frameIdx, objects, poses };
       bufferDetectedObjects?.(objects);
 
-      // ---- Ball choose + update (VIDEOâ†’CANVAS mapping safe, strong fallback) ----
+      // ---- Ball choose + update (VIDEO→CANVAS mapping safe, strong fallback) ----
       // 1) best YOLO ball by area (DET is on buf==canvas, so boxes are CANVAS px)
       const ballDet = (objects || [])
       .filter(o => isBallLabel(o.label) && Array.isArray(o.box))
@@ -4613,7 +4514,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
             }
           } catch {}
           const st = _arcTick?.({ frame: frameIdx, pose: playerState, ballPt, hoopBox: hoopLocked }) || {};
-          // Belt & suspenders: if FSM says released but markRelease didnâ€™t latch, latch it
+          // Belt & suspenders: if FSM says released but markRelease didn’t latch, latch it
           try {
             const s = (window.ballState ||= {});
             if (st.released && !(Number.isFinite(s.releaseFrame))) {
@@ -4688,7 +4589,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
             }
           } catch {}
         } else if (hoopLocked) {
-          // No ball point yet â€” pose-only backstop to latch release (unified gate)
+          // No ball point yet — pose-only backstop to latch release (unified gate)
           try {
             const s = (window.ballState ||= {});
             const kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length >= 33) ? playerState.keypoints : null;
@@ -4735,7 +4636,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
       tickReadiness?.(objects, poses);
       updateDebugOverlay?.(poses, objects, frameIdx);
       drawLiveOverlay?.(objects, playerState);
-      // Scoring + shot logging in RVFC (live) mode â€” always tick when hoop is locked
+      // Scoring + shot logging in RVFC (live) mode — always tick when hoop is locked
       try {
         if (hoopLocked) {
           if (window.USE_MICROCLIP !== true) scoringTick?.(frameIdx);
@@ -4874,9 +4775,9 @@ try {
   }
 } catch {}
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
+// ─────────────────────────────────────────────────────────────── //
 //              ------------ helpers ----------------              //
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
+// ─────────────────────────────────────────────────────────────── //
 
 // Build the proximity rect from a center-safe hoop box + UI prefs
 function makeProxRectFromCanon(Hc) {
@@ -4927,7 +4828,7 @@ function refineBallWithROI(ctx, lastPt, win = 18) {
   return best.score < 1 ? null : { x: best.xx, y: best.yy };
 }
 
-// --- Fill a tiny temporal gap between the last two points (â‰¤3 frames) ---
+// --- Fill a tiny temporal gap between the last two points (≤3 frames) ---
 function fillRecentGapInPlace(state) {
   const tr = state?.trail; if (!Array.isArray(tr) || tr.length < 2) return;
   const a = tr[tr.length - 2], b = tr[tr.length - 1];
@@ -4955,7 +4856,7 @@ window.requireHoopOrPrompt = function requireHoopOrPrompt() {
   if (locked) return true;
   const prompt = document.getElementById('overlayPrompt');
   if (prompt) {
-    prompt.textContent = 'ðŸ“ Tap the hoop to begin setup';
+    prompt.textContent = '📍 Tap the hoop to begin setup';
     prompt.style.display = 'block';
   }
   return false;
@@ -4977,7 +4878,7 @@ window.resetShots = function resetShots() {
   scheduleArmWhenReady(400);
 };
 
-// 3) Oneâ€‘frame step when paused (nice for slow scrubbing)
+// 3) One‑frame step when paused (nice for slow scrubbing)
   window.stepFrame = function stepFrame(dt = 1 / 30) {
   const v = document.getElementById('videoPlayer');
   if (!v) return;
@@ -5194,7 +5095,7 @@ window.onNewVideoLoaded = () => { try { resetReadiness?.('new video'); } catch {
 window.onHoopRelocked   = () => { try { resetReadiness?.('hoop changed'); } catch {} };
 window.onSeekOrPause    = () => { try { resetReadiness?.('seek/pause'); } catch {} };
 
-// 6) Preâ€‘detect controls (exposed so other modules can start/stop explicitly)
+// 6) Pre‑detect controls (exposed so other modules can start/stop explicitly)
 window.startPreDetection = window.startPreDetection || function() {};
 window.stopPreDetection  = window.stopPreDetection  || function() {};
 
@@ -5204,7 +5105,7 @@ if (typeof window.__forceServerDetect === 'undefined') {
   window.__forceServerDetect = false;
 }
 
-// 8) Realâ€‘time tracking (legacy path) â€“ keep guarded and noâ€‘op unless enabled.
+// 8) Real‑time tracking (legacy path) – keep guarded and no‑op unless enabled.
 window.useRealTimeTracking = false;
 (function attachRealtimePlayHook() {
   const v = document.getElementById('videoPlayer');
@@ -5216,11 +5117,11 @@ window.useRealTimeTracking = false;
   });
 })();
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 // Active player selection: instant lock by ball proximity,
 // stable keep via IoU, plus a small voting fallback.
 // Also exposes a one-click manual picker.
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 
 window.activePlayerBox = null;      // {x,y,w,h,cx,cy}
 let _activeLastSeenFrame = -1;
@@ -5230,7 +5131,7 @@ let _voteCount = 0;
 
 const VOTE_NEED   = Number.isFinite(window.ACTIVE_VOTE_NEED)   ? Number(window.ACTIVE_VOTE_NEED)   : 3;   // frames to confirm when ball isn't clearly "owned"
 const KEEP_FRAMES = Number.isFinite(window.ACTIVE_KEEP_FRAMES) ? Number(window.ACTIVE_KEEP_FRAMES) : 45;  // keep lock after last IoU match
-const IOU_KEEP    = Number.isFinite(window.ACTIVE_IOU_KEEP)    ? Number(window.ACTIVE_IOU_KEEP)    : 0.35;// keep following if overlap â‰¥ this
+const IOU_KEEP    = Number.isFinite(window.ACTIVE_IOU_KEEP)    ? Number(window.ACTIVE_IOU_KEEP)    : 0.35;// keep following if overlap ≥ this
 const SMOOTH      = Number.isFinite(window.ACTIVE_SMOOTH)      ? Number(window.ACTIVE_SMOOTH)      : 0.75;// EMA smoothing factor when keeping lock
 
 function _toBox(arr4) {
@@ -5333,16 +5234,16 @@ export function updateActivePlayer(objects, frameIdx) {
     }
   }
 
-  // 2) Instant â€œpossessionâ€ owner: ball center inside an expanded box
+  // 2) Instant “possession” owner: ball center inside an expanded box
   if (bc) {
     let owner = null, bestD = Infinity;
     const OWN_KX = Number.isFinite(window.ACTIVE_OWN_KX) ? Number(window.ACTIVE_OWN_KX) : 0.35;
     const OWN_KY = Number.isFinite(window.ACTIVE_OWN_KY) ? Number(window.ACTIVE_OWN_KY) : 0.25;
     const OWN_ALLOW = Number.isFinite(window.ACTIVE_OWN_ALLOW) ? Number(window.ACTIVE_OWN_ALLOW) : 0.45;
     for (const p of players) {
-      // expand horizontally/vertically to include outstretched arms; scaleâ€‘aware
+      // expand horizontally/vertically to include outstretched arms; scale‑aware
       const zone = _inflate(p, OWN_KX, OWN_KY);
-      // adaptable allowance: wider on closeâ€‘ups, narrower on wide shots
+      // adaptable allowance: wider on close‑ups, narrower on wide shots
       const allow = Math.max(36, Math.min(160, p.w * OWN_ALLOW));
       const d = _ptRectDist(bc.x, bc.y, zone);
       if (d <= allow && d < bestD) { owner = p; bestD = d; }
@@ -5361,7 +5262,7 @@ export function updateActivePlayer(objects, frameIdx) {
     return;
   }
 
-  // 4) Ambiguous â†’ pick using motionâ€‘biased nearest, else geometric nearest
+  // 4) Ambiguous → pick using motion‑biased nearest, else geometric nearest
   let target = null;
   if (bc) {
     // base: nearest by Euclidean
@@ -5370,7 +5271,7 @@ export function updateActivePlayer(objects, frameIdx) {
     );
     target = players[0];
 
-    // motion bias: small nudge toward being â€œaheadâ€ in the ball direction
+    // motion bias: small nudge toward being “ahead” in the ball direction
     if (motion) {
       let bestScore = -Infinity, bestP = target;
       for (const p of players.slice(0, Math.min(3, players.length))) {
@@ -5402,7 +5303,7 @@ export function updateActivePlayer(objects, frameIdx) {
 }
 
 /**
- * Oneâ€‘click manual shooter pick (arm once â†’ click a player box).
+ * One‑click manual shooter pick (arm once → click a player box).
  * Auto-disarms after 6s as a backstop.
  */
 export function enablePlayerPickOnce(objects) {
@@ -5420,7 +5321,7 @@ export function enablePlayerPickOnce(objects) {
     if (hit) {
       window.activePlayerBox = hit;
       _activeLastSeenFrame = Number.isFinite(window.__frameIdx) ? window.__frameIdx : 0;
-      console.log('ðŸ–±ï¸ Active player set by click:', {
+      console.log('🖱️ Active player set by click:', {
         x: Math.round(hit.x), y: Math.round(hit.y), w: Math.round(hit.w), h: Math.round(hit.h)
       });
     }
@@ -5517,13 +5418,13 @@ export function pickPoseForActive(poses, canvasEl, hoopBox) {
     if (best) return best.it;
   }
 
-  // 3) Last resort: largest box (most pixels) with visibility tieâ€‘break
+  // 3) Last resort: largest box (most pixels) with visibility tie‑break
   return viewItems
     .map(it => ({ it, area: it.box.w * it.box.h, v: it.vscore }))
     .sort((a,b) => (b.area - a.area) || (b.v - a.v))[0].it;
 }
 
-// End Active Player â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// End Active Player ────────────────────────────────────────────────────
 
 // Tiny memory for prediction between YOLO hits
 const __ballMem = { x:null, y:null, vx:0, vy:0, area:null, has:false };
@@ -5613,7 +5514,7 @@ function pickBallCandidate(objects, hoopBox) {
     const inProx = (typeof isBallInProximityZone === 'function') && isBallInProximityZone(c);
     const proxBonus = inProx ? 1 : 0;
 
-    // Hoop distance heuristic (helps before weâ€™re tracking)
+    // Hoop distance heuristic (helps before we’re tracking)
     let hoopScore = 0;
     if (hx != null && hy != null) {
       const dh = Math.hypot(c.x - hx, c.y - hy);
@@ -5624,8 +5525,8 @@ function pickBallCandidate(objects, hoopBox) {
     let sizeScore = 0;
     if (__ballMem.area && c.area) {
       const ratio = c.area / __ballMem.area;
-      const dev = Math.abs(Math.log2(Math.max(1e-3, ratio)));  // 0 â†’ same; 1 â†’ 2x area change
-      sizeScore = Math.max(-1, 0.5 - dev); // sameâ‰ˆ0.5, big mismatch negative
+      const dev = Math.abs(Math.log2(Math.max(1e-3, ratio)));  // 0 → same; 1 → 2x area change
+      sizeScore = Math.max(-1, 0.5 - dev); // same≈0.5, big mismatch negative
     }
 
     // Velocity alignment: prefer motion consistent with last direction
@@ -5656,7 +5557,7 @@ function pickBallCandidate(objects, hoopBox) {
     if (score > bestScore) { bestScore = score; best = c; }
   }
 
-  // 6) Fallbacks if tied/weak: proximity â†’ hoop closeness â†’ confidence
+  // 6) Fallbacks if tied/weak: proximity → hoop closeness → confidence
   if (!best) {
     const inProx = withCenters.filter(p => isBallInProximityZone?.(p));
     if (inProx.length) {
@@ -5688,9 +5589,9 @@ function pickBallCandidate(objects, hoopBox) {
   return best || null;
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 // Pose init on data-ready (safe element lookup)
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ───────────────────────────────────────────────────────────────
 (function poseInitOnce(){
   function armOnce() {
     const v = document.getElementById('videoPlayer');
@@ -5701,12 +5602,12 @@ function pickBallCandidate(objects, hoopBox) {
           await initPoseDetector(); // loads MediaPipe + model once
         }
         if (typeof window.safeDetectForVideo === 'function') {
-          console.log('âœ… Pose detector ready â€” awaiting hoop selectionâ€¦');
+          console.log('✅ Pose detector ready — awaiting hoop selection…');
         } else {
-          console.warn('âš ï¸ Pose detector wrapper (safeDetectForVideo) not found.');
+          console.warn('⚠️ Pose detector wrapper (safeDetectForVideo) not found.');
         }
       } catch (err) {
-        console.error('âŒ Failed to initialize PoseLandmarker:', err);
+        console.error('❌ Failed to initialize PoseLandmarker:', err);
       }
     }, { once: true });
   }
@@ -5729,7 +5630,7 @@ function pickBallCandidate(objects, hoopBox) {
   const v = document.getElementById('videoPlayer');
   if (!v?.srcObject || !v.videoWidth) { console.warn('[analyze] camera not ready'); return; }
 
-  // Arm picker nowâ€”the overlay is already clickable because startCamera set __pickingHoop=true
+  // Arm picker now—the overlay is already clickable because startCamera set __pickingHoop=true
   try { enableHoopPickOnce(); } catch {}
   // Foreground coach plane (live): force 1x and mount HUD/status
   try {
@@ -5855,7 +5756,7 @@ window.resetShots = window.resetShots || function () {
         } catch {}
 
         // Keep playerState fresh so the pose skeleton updates even when the main
-        // analyzer hasnâ€™t started yet or RVFC stalls on some devices.
+        // analyzer hasn’t started yet or RVFC stalls on some devices.
         try {
           if (Array.isArray(poses) && poses.length >= 33) {
           // choose a target pose + gate for believability before writing
@@ -5928,7 +5829,7 @@ window.resetShots = window.resetShots || function () {
           window.lastDetectedFrame = { __frameIdx: fidx, objects, poses };
         } catch {}
 
-        // Draw overlay in live sessions when the main analyzer isnâ€™t active yet
+        // Draw overlay in live sessions when the main analyzer isn’t active yet
         try {
           if (!window.__analyzerActive) drawLiveOverlay?.(objects, window.playerState);
         } catch {}
@@ -5959,7 +5860,7 @@ window.resetShots = window.resetShots || function () {
     }
   } catch {}
 })();
-// --- Rock-solid slow-mo controller (release â†’ slow, summary â†’ 1x) ---
+// --- Rock-solid slow-mo controller (release → slow, summary → 1x) ---
 // Slow-mo shim removed for live coach plane; playback remains 1x.
 
 // ---------- Live analyzer keepalive + overlay safety ----------
