@@ -29,6 +29,83 @@ function isBallLabelLocal(label) {
   return String(label).toLowerCase() === 'basketball';
 }
 
+
+// ---- Pose metrics (minimal, robust) ----------------------------------------
+(function installPoseMetrics(){
+  if (window.__poseMetricsInstalled) return;
+  window.__poseMetricsInstalled = true;
+
+  window.__prevWrY = null;
+
+  function deg(a, b, c) {
+    if (!a || !b || !c) return 0;
+    const ux = a.x - b.x;
+    const uy = a.y - b.y;
+    const vx = c.x - b.x;
+    const vy = c.y - b.y;
+    const denom = Math.hypot(ux, uy) * Math.hypot(vx, vy) + 1e-9;
+    const d = (ux * vx + uy * vy) / denom;
+    const clamped = Math.max(-1, Math.min(1, d));
+    return Math.max(0, Math.min(180, Math.acos(clamped) * 57.2958));
+  }
+
+  function normalize(point) {
+    if (!point) return null;
+    const x = Number(point.x);
+    const y = Number(point.y);
+    const visibility = Number(point.visibility ?? 0);
+    return (Number.isFinite(x) && Number.isFinite(y)) ? { x, y, visibility } : null;
+  }
+
+  function side(landmarks, shoulderIdx, elbowIdx, wristIdx) {
+    const shoulder = normalize(landmarks?.[shoulderIdx]);
+    const elbow = normalize(landmarks?.[elbowIdx]);
+    const wrist = normalize(landmarks?.[wristIdx]);
+    if (!shoulder || !elbow || !wrist) return null;
+    const elbowAngleDeg = deg(shoulder, elbow, wrist);
+    const wristAboveShoulder = wrist.y < shoulder.y;
+    const conf = (shoulder.visibility ?? 0) + (elbow.visibility ?? 0) + (wrist.visibility ?? 0);
+    return { elbowAngleDeg, wristAboveShoulder, wristY: wrist.y, conf };
+  }
+
+  function pickSide(left, right) {
+    if (left && right) {
+      if (left.conf === right.conf) return left.elbowAngleDeg <= right.elbowAngleDeg ? left : right;
+      return left.conf > right.conf ? left : right;
+    }
+    return left || right || null;
+  }
+
+  window.buildPoseMetrics = function buildPoseMetrics(landmarks) {
+    if (!Array.isArray(landmarks) || landmarks.length < 17) {
+      window.__prevWrY = null;
+      return { ok: false };
+    }
+    const left = side(landmarks, 11, 13, 15);
+    const right = side(landmarks, 12, 14, 16);
+    const chosen = pickSide(left, right);
+    if (!chosen) {
+      window.__prevWrY = null;
+      return { ok: false };
+    }
+    const prevY = window.__prevWrY;
+    window.__prevWrY = chosen.wristY;
+    let wristUpTrend = false;
+    let wristVy = 0;
+    if (Number.isFinite(prevY)) {
+      wristVy = prevY - chosen.wristY;
+      wristUpTrend = wristVy > 0.8;
+    }
+    return {
+      ok: true,
+      elbowAngleDeg: chosen.elbowAngleDeg,
+      wristAboveShoulder: chosen.wristAboveShoulder,
+      wristUpTrend,
+      wristVy
+    };
+  };
+})();
+
 // Detect with optional ROI crop around hoop proximity (backend slow-play near hoop)
 async function detectWithROI(buf, frameIdx, hoopLockedGuess = null) {
   try {
@@ -244,12 +321,19 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
 
   // Pose
   try {
+    let metrics = { ok: false };
     if (poses?.length) {
       const keypoints = poses[0];
       updatePlayerTracker?.(keypoints, frameIdx);
       playerState.keypoints = keypoints;
+      metrics = window.buildPoseMetrics?.(keypoints) || { ok: false };
     }
-  } catch {}
+    window.__releaseArbiterTick?.(metrics);
+    window.dispatchEvent(new CustomEvent('pose:metrics', { detail: { f: frameIdx, m: metrics } }));
+  } catch {
+    window.__releaseArbiterTick?.({ ok: false });
+    window.dispatchEvent(new CustomEvent('pose:metrics', { detail: { f: frameIdx, m: { ok: false } } }));
+  }
 
   // Release/Proximity FSM (use filtered raw detection if updateBall rejected a jump)
   try {
@@ -724,9 +808,18 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
         updatePlayerTracker?.(chosen.scaled, frameIdx);
         playerState.keypoints = chosen.scaled;
         playerState.box = [ chosen.box.x, chosen.box.y, chosen.box.x + chosen.box.w, chosen.box.y + chosen.box.h ];
+        const metrics = window.buildPoseMetrics?.(chosen.scaled) || { ok: false };
+        window.__releaseArbiterTick?.(metrics);
+        window.dispatchEvent(new CustomEvent('pose:metrics', { detail: { f: frameIdx, m: metrics } }));
       } else if (Array.isArray(poses) && Array.isArray(poses[0]) && poses[0].length >= 33) {
-        // Fallback: use the first detected pose (normalized 0..1 â†’ scaled in updatePlayerTracker)
-        updatePlayerTracker?.(poses[0], frameIdx);
+        // Fallback: use the first detected pose (normalized 0..1 scaled in updatePlayerTracker)
+        const keypoints = poses[0];
+        updatePlayerTracker?.(keypoints, frameIdx);
+        const metrics = window.buildPoseMetrics?.(keypoints) || { ok: false };
+        window.__releaseArbiterTick?.(metrics);
+        window.dispatchEvent(new CustomEvent('pose:metrics', { detail: { f: frameIdx, m: metrics } }));
+      } else {
+        window.__releaseArbiterTick?.({ ok: false });
       }
       // Ball update first
       let ballCanvas = null; const pick = (objects || []).filter(o => isBallLabelLocal(o.label) && Array.isArray(o.box)).map(o => ({ o, area: Math.max(1, (o.box[2]-o.box[0])*(o.box[3]-o.box[1])) })).sort((a,b)=> b.area - a.area)[0];

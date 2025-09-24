@@ -74,84 +74,248 @@ window.__REQUIRE_TRAIL_FOR_CLIP ??= false;
 window.__clipBusy ??= false;
 window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window.__shotCount) : 0;
 
-// ===== ShotStore (pose-only MVP) ============================================
-window.__SHOT_ID = 0;
-window.__shots = new Map();
-window.__shotsStore = window.__shots;
+// ===== Pose-only Release Arbiter ============================================
+(function installPoseReleaseArbiter(){
+  if (window.__arbInstalled) return;
+  window.__arbInstalled = true;
 
+  const NEED_WARM_STREAK = 18;
+  const COOLDOWN_MS = 1200;
+  const DEDUPE_WIN = 220;
 
-function getSortedShots() {
-  return [...window.__shots.values()].sort((a, b) => a.idx - b.idx);
-}
+  window.POSE_WARMUP_FRAMES = NEED_WARM_STREAK;
+  window.__POSE_WARMUP_OK = false;
 
-function summarizeSession() {
-  const shots = getSortedShots();
-  const cues = shots.map((s) => s.coach).filter(Boolean);
-  const highReleaseRe = /high(er)? release|above.*shoulder/i;
-  const elbowUnderRe = /elbow.*under (the )?ball/i;
-  const arcMoreRe = /add(ing)? more arc|taller finish/i;
-  const themes = {
-    highRelease: cues.filter((t) => highReleaseRe.test(t)).length,
-    elbowUnder: cues.filter((t) => elbowUnderRe.test(t)).length,
-    arcMore: cues.filter((t) => arcMoreRe.test(t)).length
-  };
-  return { shots: shots.length, cues: cues.length, themes, notes: cues };
-}
+  let lastReleaseMs = 0;
+  let lastReleaseFrame = -1;
+  let armed = false;
+  let preArmAt = 0;
 
-function syncShotBridge() {
-  try {
-    const records = getSortedShots();
-    window.__shotList = records.map((rec) => ({
-      idx: rec.idx,
-      id: rec.id,
-      coach: rec.coach ?? null,
-      created_at: rec.created_at,
-      pending: false,
-      ...rec
+  window.__releaseArbiterTick = function releaseArbiterTick(m = {}) {
+    const ok = !!m.ok;
+    if (!ok) {
+      window.__POSE_STREAK__ = 0;
+      window.__POSE_WARMUP_OK = false;
+      armed = false;
+      return;
+    }
+
+    window.__POSE_STREAK__ = (window.__POSE_STREAK__ || 0) + 1;
+    const warm = (window.__POSE_STREAK__ || 0) >= NEED_WARM_STREAK;
+    window.__POSE_WARMUP_OK = warm;
+
+    const now = performance.now();
+    const cooled = (now - lastReleaseMs) >= COOLDOWN_MS;
+
+    const pre = warm && (m.elbowAngleDeg ?? 999) <= 140 && m.wristAboveShoulder === false;
+    if (!armed && pre && cooled) {
+      armed = true;
+      preArmAt = now;
+    }
+    if (armed && !pre && (now - preArmAt) > 900) {
+      armed = false;
+    }
+
+    const trig = armed && warm && cooled && m.wristUpTrend === true && m.wristAboveShoulder === true && (m.elbowAngleDeg ?? 0) >= 155;
+    if (!trig) return;
+
+    const frame = Number(window.__AN_IDX) || 0;
+    if (frame === lastReleaseFrame && (now - lastReleaseMs) < DEDUPE_WIN) {
+      armed = false;
+      return;
+    }
+
+    lastReleaseFrame = frame;
+    lastReleaseMs = now;
+    armed = false;
+
+    window.dispatchEvent(new CustomEvent('shot:release', {
+      detail: {
+        frame,
+        via: 'pose-arb',
+        pose: {
+          elbowAngleDeg: m.elbowAngleDeg ?? null,
+          wristUpTrend: m.wristUpTrend ?? null,
+          wristAboveShoulder: m.wristAboveShoulder ?? null
+        }
+      }
     }));
-    window.dispatchEvent(new CustomEvent('session:summary', { detail: summarizeSession() }));
-  } catch {}
-}
-
-function createShot() {
-  const id = ++window.__SHOT_ID; // 1-based
-  const rec = { id, idx: id, created_at: Date.now(), coach: null, pending: true };
-  window.__shots.set(id, rec);
-  window.__SHOT_IDX = id;
-  window.__shotCount = id;
-  syncShotBridge();
-  window.dispatchEvent(new CustomEvent('shots:update', { detail: { id, rec } }));
-  return rec;
-}
-function updateShot(id, patch) {
-  const rec = window.__shots.get(id);
-  if (!rec) return;
-  Object.assign(rec, patch);
-  window.__shots.set(id, rec);
-  syncShotBridge();
-  window.dispatchEvent(new CustomEvent('shots:update', { detail: { id, rec } }));
-}
-
-window.summarizeSession = summarizeSession;
-window.getShotRecords = getSortedShots;
-
-window.__CLIPS_AVAILABLE = (() => {
-  try {
-    if (typeof MediaRecorder !== 'function') return false;
-    return ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-      .some((mime) => { try { return MediaRecorder.isTypeSupported(mime); } catch { return false; } });
-  } catch {
-    return false;
-  }
+    window.__dbgLine?.(`[pose-arb] release frame=${frame} elbow=${Math.round(m.elbowAngleDeg ?? 0)}`);
+  };
 })();
-window.__ENABLE_CLIPS__ = window.__ENABLE_CLIPS__ === true;
-window.USE_MICROCLIP = window.__ENABLE_CLIPS__;
-if (!Array.isArray(window.__shotList)) window.__shotList = [];
-syncShotBridge();
+
+// ===== ShotStore (pose-only MVP) ============================================
+(function installShotStore(){
+  if (window.__shotStoreInstalled) return;
+  window.__shotStoreInstalled = true;
+
+  window.__POSE_ONLY_MODE = true;
+
+  const DEDUPE_MS = 220;
+  const COOLDOWN_MS = 1200;
+  let lastFrame = -1;
+  let lastMs = 0;
+
+  window.__shots = new Map();
+  window.__SHOT_ID = 0;
+  window.__shotList = Array.isArray(window.__shotList) ? window.__shotList : [];
+  window.__sessionTotals = window.__sessionTotals || { attempts: 0, made: 0 };
+
+  function getSortedShots() {
+    return [...window.__shots.values()].sort((a, b) => a.idx - b.idx);
+  }
+
+  function summarizeSession() {
+    const shots = getSortedShots();
+    const cues = shots.map((s) => s.coach).filter(Boolean);
+    const highReleaseRe = /high(er)? release|above.*shoulder/i;
+    const elbowUnderRe = /elbow.*under (the )?ball/i;
+    const arcMoreRe = /add(ing)? more arc|taller finish/i;
+    const themes = {
+      highRelease: cues.filter((t) => highReleaseRe.test(t)).length,
+      elbowUnder: cues.filter((t) => elbowUnderRe.test(t)).length,
+      arcMore: cues.filter((t) => arcMoreRe.test(t)).length
+    };
+    return { shots: shots.length, cues: cues.length, themes, notes: cues };
+  }
+
+  function syncShotBridge() {
+    const records = getSortedShots();
+    const store = Object.create(null);
+    records.forEach((rec) => { store[String(rec.id)] = rec; });
+    window.__shotsStore = store;
+    window.__shotList = records.map((rec) => ({ ...rec }));
+    window.__shotCount = records.length;
+    window.__SHOT_IDX = window.__SHOT_ID;
+    window.__SESSION_SHOT_COUNT = records.length;
+    const summary = summarizeSession();
+    window.__sessionSummary = summary;
+    window.dispatchEvent(new CustomEvent('session:summary', { detail: summary }));
+  }
+
+  function createShot() {
+    const id = ++window.__SHOT_ID;
+    const rec = { id, idx: id, created_at: Date.now(), coach: null, pending: true };
+    window.__shots.set(id, rec);
+    syncShotBridge();
+    window.dispatchEvent(new CustomEvent('shots:update', { detail: { id, rec } }));
+    return rec;
+  }
+
+  function updateShot(id, patch) {
+    const rec = window.__shots.get(id);
+    if (!rec) return;
+    Object.assign(rec, patch);
+    window.__shots.set(id, rec);
+    syncShotBridge();
+    window.dispatchEvent(new CustomEvent('shots:update', { detail: { id, rec } }));
+  }
+
+  window.getShotRecords = getSortedShots;
+  window.updateShotRecord = updateShot;
+  window.summarizeSession = summarizeSession;
+
+  window.addEventListener('shot:release', (event) => {
+    const detail = (event?.detail && typeof event.detail === 'object') ? event.detail : {};
+    const frame = Number(detail.frame);
+    const now = performance.now();
+    if (Number.isFinite(frame) && frame === lastFrame && (now - lastMs) < DEDUPE_MS) return;
+    if ((now - lastMs) < COOLDOWN_MS) return;
+    lastMs = now;
+    if (Number.isFinite(frame)) lastFrame = frame;
+
+    const shot = createShot();
+    detail.shotId = shot.id;
+    detail.idx = shot.id;
+    updateShot(shot.id, { release: detail });
+
+    const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
+    totals.attempts = Number(totals.attempts || 0) + 1;
+
+    window.dispatchEvent(new CustomEvent('shot:feedback:request', {
+      detail: { shotId: shot.id, via: detail.via || 'pose' }
+    }));
+  }, { passive: true });
+
+  window.addEventListener('shot:feedback:result', (event) => {
+    const { shotId, text } = event?.detail || {};
+    if (!shotId) return;
+    updateShot(shotId, { coach: text || '', pending: false });
+  }, { passive: true });
+
+  window.addEventListener('shot:feedback', (event) => {
+    const detail = event?.detail;
+    const shotId = detail?.shotId ?? window.__SHOT_ID;
+    if (!shotId) return;
+    const text = typeof detail === 'string' ? detail : (detail?.text ?? detail?.message ?? detail?.feedback ?? null);
+    if (text == null) return;
+    updateShot(shotId, { coach: text, pending: false });
+  }, { passive: true });
+
+  window.addEventListener('shot:summary', (event) => {
+    const detail = event?.detail || {};
+    const shotId = detail.shotId ?? detail.idx ?? window.__SHOT_ID;
+    if (!shotId) return;
+    const summary = {
+      made: detail.made ?? null,
+      arcHeight: detail.arcHeight ?? detail.arc ?? null,
+      entryAngle: detail.entryAngle ?? null,
+      releaseAngle: detail.releaseAngle ?? null,
+      status: detail.status || 'summary'
+    };
+    const rec = window.__shots.get(shotId);
+    const alreadyMade = rec?.summary?.made === true || rec?.fbf?.made === true;
+    updateShot(shotId, { summary, pending: false });
+    if (summary.made === true && !alreadyMade) {
+      const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
+      totals.made = Number(totals.made || 0) + 1;
+    }
+  }, { passive: true });
+
+  window.addEventListener('fbf:result', (event) => {
+    const detail = event?.detail || {};
+    const shotId = detail.shotId ?? detail.idx;
+    if (!shotId) return;
+    const payload = {
+      made: detail.made ?? null,
+      arcHeight: detail.arcHeight ?? null,
+      entryAngle: detail.entryAngle ?? null,
+      releaseAngle: detail.releaseAngle ?? null
+    };
+    const rec = window.__shots.get(shotId);
+    const alreadyMade = rec?.summary?.made === true || rec?.fbf?.made === true;
+    updateShot(shotId, { fbf: payload, summary: { ...payload, status: 'fbf' }, pending: false });
+    if (payload.made === true && !alreadyMade) {
+      const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
+      totals.made = Number(totals.made || 0) + 1;
+    }
+  }, { passive: true });
+
+  window.addEventListener('hud:start-session', () => {
+    window.__shots = new Map();
+    window.__SHOT_ID = 0;
+    window.__SHOT_IDX = 0;
+    window.__shotCount = 0;
+    window.__sessionTotals = { attempts: 0, made: 0 };
+    window.__SESSION_SHOT_COUNT = 0;
+    lastFrame = -1;
+    lastMs = 0;
+    syncShotBridge();
+    window.dispatchEvent(new CustomEvent('shots:update', { detail: { id: null, rec: null } }));
+    window.__releaseArbiterTick?.({ ok: false });
+  }, { passive: true });
+
+  window.addEventListener('hud:end-session', () => {
+    syncShotBridge();
+  }, { passive: true });
+
+  syncShotBridge();
+})();
 
 (function installMicroClip()
 {
   if (window.__microClipInstalled) return;
+  if (window.__ENABLE_CLIPS__ !== true) { window.__microClipInstalled = true; return; }
   window.__microClipInstalled = true;
 
   window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 3000;
@@ -604,6 +768,9 @@ function isBallLabel(label) {
 window.isBallLabel = isBallLabel;
 
 function updatePoseWarmup(resultOrBool) {
+  if (window.__POSE_ONLY_MODE === true) {
+    return window.__POSE_WARMUP_OK === true;
+  }
   let ok;
   if (typeof resultOrBool === 'object') {
     const marks = resultOrBool?.landmarks;
@@ -644,116 +811,6 @@ function updatePoseWarmup(resultOrBool) {
 }
 window.updatePoseWarmup = updatePoseWarmup;
 
-
-const POSE_NEED_WARM_STREAK = 18;
-const POSE_COOLDOWN_MS = 1600;
-const POSE_UPTREND_DELTA = 4;
-let __poseArmed = false;
-let __poseLastReleaseMs = 0;
-const __poseWristHistory = [];
-window.__POSE_ONLY_MODE = true;
-window.POSE_WARMUP_FRAMES = POSE_NEED_WARM_STREAK;
-
-function computeElbowAngleDeg(shoulder, elbow, wrist) {
-  try {
-    const v1x = shoulder.x - elbow.x;
-    const v1y = shoulder.y - elbow.y;
-    const v2x = wrist.x - elbow.x;
-    const v2y = wrist.y - elbow.y;
-    const dot = v1x * v2x + v1y * v2y;
-    const len = (Math.hypot(v1x, v1y) * Math.hypot(v2x, v2y)) || 1;
-    const angle = Math.acos(Math.max(-1, Math.min(1, dot / len)));
-    return angle * 180 / Math.PI;
-  } catch {
-    return 0;
-  }
-}
-
-function normalizePoint(p) {
-  if (!p) return null;
-  const x = Number(p.x);
-  const y = Number(p.y);
-  return (Number.isFinite(x) && Number.isFinite(y)) ? { x, y } : null;
-}
-
-function pickPoseSide(keypoints) {
-  const right = {
-    shoulder: normalizePoint(keypoints[12]),
-    elbow: normalizePoint(keypoints[14]),
-    wrist: normalizePoint(keypoints[16])
-  };
-  if (right.shoulder && right.elbow && right.wrist) return right;
-  const left = {
-    shoulder: normalizePoint(keypoints[11]),
-    elbow: normalizePoint(keypoints[13]),
-    wrist: normalizePoint(keypoints[15])
-  };
-  if (left.shoulder && left.elbow && left.wrist) return left;
-  return null;
-}
-
-function poseReleaseTick(frameIdx) {
-  const keypoints = window.playerState?.keypoints;
-  const ok = Array.isArray(keypoints) && keypoints.length >= 17;
-  updatePoseWarmup(ok);
-  if (!ok) {
-    __poseArmed = false;
-    __poseWristHistory.length = 0;
-    return;
-  }
-  const poseSide = pickPoseSide(keypoints);
-  if (!poseSide) {
-    __poseArmed = false;
-    __poseWristHistory.length = 0;
-    return;
-  }
-  const { shoulder, elbow, wrist } = poseSide;
-  const elbowAngleDeg = computeElbowAngleDeg(shoulder, elbow, wrist);
-  const wristAboveShoulder = wrist.y < shoulder.y;
-  const now = performance.now();
-  __poseWristHistory.push({ y: wrist.y, t: now });
-  if (__poseWristHistory.length > 4) __poseWristHistory.shift();
-  let wristUpTrend = false;
-  if (__poseWristHistory.length >= 2) {
-    const curr = __poseWristHistory[__poseWristHistory.length - 1];
-    const prev = __poseWristHistory[__poseWristHistory.length - 2];
-    if (Number.isFinite(prev.y) && Number.isFinite(curr.y)) {
-      wristUpTrend = (prev.y - curr.y) >= POSE_UPTREND_DELTA;
-    }
-    if (!wristUpTrend && __poseWristHistory.length >= 3) {
-      const prev2 = __poseWristHistory[__poseWristHistory.length - 3];
-      if (Number.isFinite(prev2.y) && Number.isFinite(prev.y)) {
-        wristUpTrend = ((prev2.y - prev.y) >= (POSE_UPTREND_DELTA / 2)) && ((prev.y - curr.y) >= (POSE_UPTREND_DELTA / 2));
-      }
-    }
-  }
-  const warmed = window.__POSE_WARMUP_OK === true && (window.__POSE_STREAK__ || 0) >= POSE_NEED_WARM_STREAK;
-  const cooled = (now - __poseLastReleaseMs) >= POSE_COOLDOWN_MS;
-  if (!warmed) {
-    __poseArmed = false;
-  } else if (!__poseArmed && cooled) {
-    __poseArmed = true;
-  }
-  const trig = wristUpTrend && (elbowAngleDeg >= 150) && wristAboveShoulder;
-  if (__poseArmed && trig && cooled) {
-    const frameForEmit = Number.isFinite(frameIdx) ? frameIdx : null;
-    const emitted = window.safeEmitRelease?.(frameForEmit, 'pose', {
-      bypassGate: true,
-      pose: { elbowAngleDeg, wristAboveShoulder, wristUpTrend }
-    }) === true;
-    if (emitted) {
-      __poseArmed = false;
-      __poseLastReleaseMs = now;
-      __poseWristHistory.length = 0;
-    }
-  }
-}
-window.poseReleaseTick = poseReleaseTick;
-
-window.addEventListener('analyzer:frame-done', (event) => {
-  const idx = Number(event?.detail?.__frameIdx);
-  poseReleaseTick(Number.isFinite(idx) ? idx : null);
-}, { passive: true });
 
 function ingestServerDetections(dets, tMs = performance.now(), frame) {
   const frameIdx = Number.isFinite(frame) ? Number(frame) : (Number(window.__AN_IDX) || 0);
@@ -2049,6 +2106,9 @@ if (!window.__hardCapListener) {
               e.stopImmediatePropagation();
               return;
             }
+            else {
+              window.__releaseArbiterTick?.({ ok: false });
+            }
           } catch {}
         }
 
@@ -2785,6 +2845,18 @@ export function enableHoopPickOnce() {
                 let elbowAngleDeg=0, elbowExtended=false; try { const v1x=sh.x-el.x,v1y=sh.y-el.y,v2x=wr.x-el.x,v2y=wr.y-el.y; const dot=(v1x*v2x+v1y*v2y); const den=(Math.hypot(v1x,v1y)*Math.hypot(v2x,v2y)+1e-6); const a=Math.acos(Math.max(-1,Math.min(1,dot/den)))*180/Math.PI; elbowAngleDeg=a; const th=Number(c.elbowExtMin ?? window.REL_ELBOW_EXT_MIN ?? 155); elbowExtended=(a>=th);} catch {}
                 const dx=Math.abs((wr?.x??0)-(sh?.x??0)); const dy=Math.abs((sh?.y??0)-(wr?.y??0)); const nearlyVertical=(dx<Number(c.dxMax ?? window.REL_DX_MAX ?? 90))&&(dy>Number(c.dyMin ?? window.REL_DY_MIN ?? 18)); const dSE=Math.hypot((el?.x??0)-(sh?.x??0),(el?.y??0)-(sh?.y??0)); const dSW=Math.hypot((wr?.x??0)-(sh?.x??0),(wr?.y??0)-(sh?.y??0)); const armExtended=dSW>(dSE+Number(c.extMargin ?? window.REL_EXT_MARGIN ?? 10)); const alignOK=nearlyVertical||armExtended;
                 let wristUpTrend=false; try { const h=(window.playerState.frameHistory||[]).slice(-3); if(h.length>=2){const wy1=h[h.length-2]?.keypoints?.[W]?.y; const wy2=h[h.length-1]?.keypoints?.[W]?.y; if(Number.isFinite(wy1)&&Number.isFinite(wy2)) wristUpTrend=(wy2<(wy1-Number(c.upDy ?? window.REL_UP_DY ?? 6))); if(!wristUpTrend && h.length>=3){ const wy0=h[h.length-3]?.keypoints?.[W]?.y; if(Number.isFinite(wy0)&&Number.isFinite(wy1)){ const d=Number(c.upDy ?? window.REL_UP_DY ?? 6); wristUpTrend=(wy2<(wy1-d))&&(wy1<(wy0-d)); } } } } catch {}
+                if (window.__releaseArbiterTick) {
+                  if (sh && el && wr) {
+                    window.__releaseArbiterTick({
+                      ok: true,
+                      elbowAngleDeg,
+                      wristAboveShoulder,
+                      wristUpTrend
+                    });
+                  } else {
+                    window.__releaseArbiterTick({ ok: false });
+                  }
+                }
                 const norm=(x,d)=>{ const n=Number(x); return (Number.isFinite(n)&&n>=0)?n:d; }; const cfgW=(window.REL_CFG&&window.REL_CFG.weights)||{}; const wA=norm((cfgW.wrist ?? window.REL_W_WRIST ?? window.REL_W_A),0.26); const wB=norm((cfgW.elbow ?? window.REL_W_ELBOW ?? window.REL_W_B),0.26); const wC=norm((cfgW.align ?? window.REL_W_ALIGN ?? window.REL_W_C),0.26); const wDsrc=useUp?(cfgW.uptrend ?? window.REL_W_UPTREND ?? window.REL_W_D):(cfgW.shoulder ?? window.REL_W_SHOULDER ?? window.REL_W_D); const wD=norm(wDsrc,0.26);
                 const score=(wristAboveElbow?wA:0)+(elbowExtended?wB:0)+(alignOK?wC:0)+((useUp?wristUpTrend:wristAboveShoulder)?wD:0); const tot=wA+wB+wC+wD; const allFour=(Number.isFinite(score)&&score>=(tot-1e-6));
                 const rec = { t: Date.now(), type:'gate', detail: { frame: fidx, tests: { side, wristAboveElbow, wristAboveShoulder, elbowExtended, alignOK, wristUpTrend, elbowAngleDeg:Math.round(elbowAngleDeg), dx:Math.round(dx), dy:Math.round(dy), dSW:Math.round(dSW), dSE:Math.round(dSE), score:Number(score.toFixed?.(3)||score), tot:Number(tot.toFixed?.(3)||tot) }, passed: ['wristAboveShoulder','elbowExtended','alignOK'].map(k=>({wristAboveShoulder,elbowExtended,alignOK}[k])).filter(Boolean).length, reason: allFour ? 'all-four' : 'not-enough' }, latched: allFour };
@@ -2795,11 +2867,14 @@ export function enableHoopPickOnce() {
               try {
                 const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
                               ? window.proxFromHoop(window.canonHoop(H)) : null;
-                window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox });
+                if (window.__POSE_ONLY_MODE !== true) {
+                  window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox });
+                }
               } catch {}
             }
           } catch {}
         } catch {
+          window.__releaseArbiterTick?.({ ok: false });
           if (!window.playerState) window.playerState = { keypoints: [] };
           window.playerState.keypoints = scaled;
           window.__lastPoseKP = scaled; window.__lastPoseTS = performance.now();
@@ -3348,7 +3423,9 @@ document.addEventListener('DOMContentLoaded', () => {
           const g = window.releaseGate(hist);
           if (g?.released) {
             const f = window.playerState?.lastFrame ?? (hist.at ? hist.at(-1)?.frame : (hist[hist.length-1]?.frame)) ?? 0;
-            window.safeEmitRelease?.(f, 'pose-sampler', { gate: g });
+            if (window.__POSE_ONLY_MODE !== true) {
+              window.safeEmitRelease?.(f, 'pose-sampler', { gate: g });
+            }
           }
         }
       } catch {}
@@ -4523,7 +4600,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                 const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
                 const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
                 if (since >= cd && !window.__releaseEventSent) {
-                  const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-backstop') === true;
+                  const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'rvfc-backstop') === true;
                   if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                 } else {
                   if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-backstop:suppress]', { frame: frameIdx });
@@ -4548,7 +4625,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                   const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
                   const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
                   if (since >= cd && !window.__releaseEventSent) {
-                    const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only') === true;
+                    const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only') === true;
                     if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                   } else {
                     if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-pose-only:suppress]', { frame: frameIdx });
@@ -4578,7 +4655,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                     const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
                     const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
                     if (since >= cd && !window.__releaseEventSent) {
-                      const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-near-hand') === true;
+                      const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'rvfc-near-hand') === true;
                       if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                     } else {
                       if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-near-hand:suppress]', { frame: frameIdx });
@@ -4604,7 +4681,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                 const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
                 const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
                 if (since >= cd && !window.__releaseEventSent) {
-                  const ok = window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only-noball') === true;
+                  const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only-noball') === true;
                   if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                 } else {
                   if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-pose-only-noball:suppress]', { frame: frameIdx });
@@ -5048,14 +5125,14 @@ if (typeof window.clientToVideoXY !== 'function') {
               const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
                             ? window.proxFromHoop(window.canonHoop(H)) : null;
               if (shouldFire && (!window.__releaseEventSent)) {
-                const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
+                const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
                 if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
               } else {
                 // Optional: allow a one-time cooldown override when lastVia wasn't pose/hud and we are fully all-green
                 if (window.ALLOW_COOLDOWN_OVERRIDE === true) {
                   const lastVia = String(window.__REL_LAST_VIA || '');
                   if ((!shouldFire || window.__releaseEventSent) && allGreen && !/(pose|hud)/i.test(lastVia) && !window.__releaseEventSent) {
-                    const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
+                    const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(fidx, 'pose-heuristic', { prox }) === true;
                     if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                   } else {
                     try { if (window.DOACH_RELEASE_TRACE) console.log('[gate:suppress]', { frame: fidx, reason:'cooldown', remaining: Math.ceil(cd - since) }); } catch {}
@@ -5787,7 +5864,7 @@ window.resetShots = window.resetShots || function () {
               try {
                 const s = (window.ballState ||= {});
                 if (!Number.isFinite(s.releaseFrame)) {
-                  window.safeEmitRelease?.(fidx, 'bg-fsm');
+                  if (window.__POSE_ONLY_MODE !== true) { window.safeEmitRelease?.(fidx, 'bg-fsm'); }
                 }
               } catch {}
               window.dispatchEvent(new CustomEvent('bg:shot:release', { detail: { frame: fidx, tMs: performance.now() } }));
