@@ -74,6 +74,10 @@ window.__REQUIRE_TRAIL_FOR_CLIP ??= false;
 window.__clipBusy ??= false;
 window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window.__shotCount) : 0;
 
+window.__CLIPS_AVAILABLE = typeof MediaRecorder === 'function' && typeof MediaRecorder.isTypeSupported === 'function';
+if (typeof window.ENABLE_CLIPS === 'undefined') window.ENABLE_CLIPS = window.__ENABLE_CLIPS__ === true;
+if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = window.ENABLE_CLIPS === true;
+
 // ===== Pose-only Release Arbiter ============================================
 (function installPoseReleaseArbiter(){
   if (window.__arbInstalled) return;
@@ -149,16 +153,10 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
   if (window.__shotStoreInstalled) return;
   window.__shotStoreInstalled = true;
 
-  window.__POSE_ONLY_MODE = true;
-
-  const DEDUPE_MS = 220;
-  const COOLDOWN_MS = 1200;
-  let lastFrame = -1;
-  let lastMs = 0;
-
-  window.__shots = new Map();
-  window.__SHOT_ID = 0;
+  window.__shots = (window.__shots instanceof Map) ? window.__shots : new Map();
+  window.__SHOT_ID = Number(window.__SHOT_ID) || 0;
   window.__shotList = Array.isArray(window.__shotList) ? window.__shotList : [];
+  window.__shotsStore = window.__shotsStore || Object.create(null);
   window.__sessionTotals = window.__sessionTotals || { attempts: 0, made: 0 };
 
   function getSortedShots() {
@@ -216,25 +214,47 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
   window.summarizeSession = summarizeSession;
 
   window.addEventListener('shot:release', (event) => {
-    const detail = (event?.detail && typeof event.detail === 'object') ? event.detail : {};
-    const frame = Number(detail.frame);
-    const now = performance.now();
-    if (Number.isFinite(frame) && frame === lastFrame && (now - lastMs) < DEDUPE_MS) return;
-    if ((now - lastMs) < COOLDOWN_MS) return;
-    lastMs = now;
-    if (Number.isFinite(frame)) lastFrame = frame;
+    const d = (event?.detail && typeof event.detail === 'object') ? event.detail : {};
 
-    const shot = createShot();
-    detail.shotId = shot.id;
-    detail.idx = shot.id;
-    updateShot(shot.id, { release: detail });
+    const approved =
+      d.poseApproved === true ||
+      (d.gate && d.gate.released === true) ||
+      String(d.via || '').startsWith('pose-');
+
+    if (!approved) return;
+
+    let shotId = Number(d.shotId) || 0;
+    if (!shotId) {
+      if (typeof createShot === 'function') {
+        const shot = createShot();
+        shotId = shot.id;
+      } else {
+        window.__SHOT_ID = (window.__SHOT_ID | 0) + 1;
+        shotId = window.__SHOT_ID;
+        if (!(window.__shots instanceof Map)) window.__shots = new Map();
+        window.__shots.set(shotId, { id: shotId, idx: shotId, created_at: Date.now(), pending: true });
+      }
+    }
+
+    const frame = Number(d.frame);
+    const poseSnapshot =
+      (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
+        ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
+        : null;
+
+    if (typeof updateShot === 'function') {
+      updateShot(shotId, { release: { ...d, shotId, idx: shotId }, poseSnapshot, pending: true });
+    }
 
     const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
-    totals.attempts = Number(totals.attempts || 0) + 1;
+    totals.attempts = (Number(totals.attempts) || 0) + 1;
 
-    window.dispatchEvent(new CustomEvent('shot:feedback:request', {
-      detail: { shotId: shot.id, via: detail.via || 'pose' }
-    }));
+    const clipsEnabled = (window.ENABLE_CLIPS === true || window.__ENABLE_CLIPS__ === true);
+    if (clipsEnabled && window.__CLIPS_AVAILABLE && !window.__clipBusy) {
+      window.__clipBusy = true;
+      const releaseFrame = Number.isFinite(frame) ? frame : null;
+      window.startMicroClip?.({ shotId, releaseFrame });
+    }
   }, { passive: true });
 
   window.addEventListener('shot:feedback:result', (event) => {
@@ -296,13 +316,12 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     window.__SHOT_ID = 0;
     window.__SHOT_IDX = 0;
     window.__shotCount = 0;
-    window.__sessionTotals = { attempts: 0, made: 0 };
     window.__SESSION_SHOT_COUNT = 0;
-    lastFrame = -1;
-    lastMs = 0;
+    window.__sessionTotals = { attempts: 0, made: 0 };
+    window.__shotList = [];
     syncShotBridge();
-    window.dispatchEvent(new CustomEvent('shots:update', { detail: { id: null, rec: null } }));
     window.__releaseArbiterTick?.({ ok: false });
+    window.dispatchEvent(new CustomEvent('shots:update', { detail: { id: null, rec: null } }));
   }, { passive: true });
 
   window.addEventListener('hud:end-session', () => {
@@ -315,7 +334,8 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
 (function installMicroClip()
 {
   if (window.__microClipInstalled) return;
-  if (window.__ENABLE_CLIPS__ !== true) { window.__microClipInstalled = true; return; }
+  const clipsEnabled = window.ENABLE_CLIPS === true || window.__ENABLE_CLIPS__ === true;
+  if (!clipsEnabled) { window.__microClipInstalled = true; return; }
   window.__microClipInstalled = true;
 
   window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 3000;
@@ -326,7 +346,7 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
   }
 
   async function startMicroClip({ shotId, releaseFrame = null }) {
-    if (typeof MediaRecorder !== 'function') {
+    if (!window.__CLIPS_AVAILABLE) {
       updateShot(shotId, { clip: { status: 'error', reason: 'unsupported', frame: releaseFrame } });
       window.__clipBusy = false;
       return;
@@ -451,24 +471,6 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
   window.startMicroClip = startMicroClip;
   window.__startMicroClip = startMicroClip;
 
-  window.addEventListener('shot:release', (event) => {
-    const incoming = (event?.detail && typeof event.detail === 'object') ? event.detail : {};
-    const shot = createShot();
-    incoming.idx = incoming.idx ?? shot.id;
-    incoming.shotId = incoming.shotId ?? shot.id;
-const detail = { ...incoming };
-const poseSnapshot = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-  ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-  : null;
-updateShot(shot.id, { release: detail, poseSnapshot, pending: true });
-    const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
-    totals.attempts = Number(totals.attempts || 0) + 1;
-    if (window.__ENABLE_CLIPS__ !== true || window.__CLIPS_AVAILABLE !== true) return;
-    if (window.__clipBusy) return;
-    window.__clipBusy = true;
-    const releaseFrame = Number.isFinite(Number(detail.frame)) ? Number(detail.frame) : null;
-    startMicroClip({ shotId: shot.id, releaseFrame });
-  }, { passive: true });
   window.__sessionTotals = window.__sessionTotals || { attempts: 0, made: 0 };
 
   function __shotsGetId(detail) {
@@ -548,6 +550,7 @@ updateShot(shot.id, { release: detail, poseSnapshot, pending: true });
   });
 
 })();
+// ===== end MicroClip =================================================
 
 
 function __cloneForLog(obj) {
@@ -3424,7 +3427,7 @@ document.addEventListener('DOMContentLoaded', () => {
           if (g?.released) {
             const f = window.playerState?.lastFrame ?? (hist.at ? hist.at(-1)?.frame : (hist[hist.length-1]?.frame)) ?? 0;
             if (window.__POSE_ONLY_MODE !== true) {
-              window.safeEmitRelease?.(f, 'pose-sampler', { gate: g });
+              window.safeEmitRelease?.(f, 'pose-sampler', { gate: g, poseApproved: true, bypassGate: true });
             }
           }
         }
@@ -4625,7 +4628,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                   const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
                   const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
                   if (since >= cd && !window.__releaseEventSent) {
-                    const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only') === true;
+                    const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'pose-sampler', { gate, poseApproved: true, bypassGate: true, source: 'rvfc-pose-only' }) === true;
                     if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                   } else {
                     if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-pose-only:suppress]', { frame: frameIdx });
@@ -4681,7 +4684,7 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
                 const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
                 const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
                 if (since >= cd && !window.__releaseEventSent) {
-                  const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'rvfc-pose-only-noball') === true;
+                  const ok = window.__POSE_ONLY_MODE !== true && window.safeEmitRelease?.(frameIdx, 'pose-sampler', { gate, poseApproved: true, bypassGate: true, source: 'rvfc-pose-only-noball' }) === true;
                   if (ok) { try { window.__REL_LAST_FIRE_MS = now; } catch {} }
                 } else {
                   if (window.DOACH_RELEASE_TRACE) console.log('[rvfc-pose-only-noball:suppress]', { frame: frameIdx });
