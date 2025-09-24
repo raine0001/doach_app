@@ -52,7 +52,7 @@ window.POSE_STREAK_NEED        ??= 2;      // require 2 consecutive frames to ac
 window.REL_MIN_BALL_POINTS ??= 3;      // minimum ball samples before release
 window.REL_MAX_BALL_MS     ??= 260;    // max ms since last ball point
 window.PROX_IN_CONSEC_MIN  ??= 2;      // inside-prox streak requirement
-window.REL_MIN_SEP_MS      ??= 500;    // min ms between releases
+window.REL_MIN_SEP_MS      ??= 1200;    // min ms between releases
 window.REL_MIN_TRAIL_BEFORE_RELEASE ??= 4;
 
 window.__armWhenReadyTimer ??= null;
@@ -133,18 +133,11 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
     lastReleaseMs = now;
     armed = false;
 
-    window.dispatchEvent(new CustomEvent('shot:release', {
-      detail: {
-        frame,
-        via: 'pose-arb',
-        pose: {
-          elbowAngleDeg: m.elbowAngleDeg ?? null,
-          wristUpTrend: m.wristUpTrend ?? null,
-          wristAboveShoulder: m.wristAboveShoulder ?? null
-        }
-      }
-    }));
-    window.__dbgLine?.(`[pose-arb] release frame=${frame} elbow=${Math.round(m.elbowAngleDeg ?? 0)}`);
+    window.safeEmitRelease?.(frame, 'pose-arb', {
+      poseApproved: true,
+      bypassGate: true
+    });
+    window.__dbgLine?.(`[pose-arb] release frame=${frame} (poseApproved bypass)`);
   };
 })();
 
@@ -299,18 +292,19 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
   window.__MICROCLIP_MS = Number(window.__MICROCLIP_MS) || 3000;
   window.__clipBusy = !!window.__clipBusy;
 
-  const ACCEPT_FRAME_WIN_MS = 400;
-  const ACCEPT_COOLDOWN_MS = 900;
-  const RELEASE_LOCK_MS = 1500;
+  const ACCEPT_FRAME_WIN_MS = 500;
+  const ACCEPT_COOLDOWN_MS = 1400;
+  const RELEASE_LOCK_MS = 1600;
   let __lastAccept = { t: 0, f: -1 };
   let __releaseLockedUntil = 0;
+  let __attemptLock = false;
 
   function lockReleases(ms) {
     __releaseLockedUntil = performance.now() + Math.max(0, Number(ms) || 0);
   }
 
   function canAcceptNow() {
-    return performance.now() >= __releaseLockedUntil;
+    return performance.now() >= __releaseLockedUntil && __attemptLock === false;
   }
 
   function fromReleaseGate(detail){
@@ -330,10 +324,11 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
 
     __lastAccept = { t: now, f };
     lockReleases(RELEASE_LOCK_MS);
+    __attemptLock = true;
     return true;
   }
 
-  window.addEventListener('hud:start-session', () => { __lastAccept = { t: 0, f: -1 }; lockReleases(0); });
+  window.addEventListener('hud:start-session', () => { __lastAccept = { t: 0, f: -1 }; lockReleases(0); __attemptLock = false; });
 
   function stopTracks(tracks) {
     tracks.forEach((track) => { try { track.stop(); } catch {} });
@@ -383,6 +378,8 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       updateShot(shotId, { clip: { status: 'error', reason: String(err), frame: releaseFrame } });
       if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
+      __attemptLock = false;
+      lockReleases(0);
       return;
     }
 
@@ -401,6 +398,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
       if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
+      __attemptLock = false;
       lockReleases(0);
     };
     recorder.onstop = async () => {
@@ -426,7 +424,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
 
         try {
           const fd = new FormData();
-          fd.append('sessionId', window.__SESSION_ID || `sess_${Date.now()}`);
+          fd.append('sessionId', window.__SESSION_ID || (`sess_${Date.now()}`));
           fd.append('shotId', String(shotId));
           const file = (typeof File === 'function') ? new File([blob], fileName, { type: blob.type }) : blob;
           fd.append('clip', file, fileName);
@@ -446,6 +444,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       } finally {
         if (shouldStopTracks) stopTracks(tracks);
         window.__clipBusy = false;
+        __attemptLock = false;
         lockReleases(0);
       }
     };
@@ -464,6 +463,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       window.dispatchEvent(new CustomEvent('microclip:error', { detail: { shotId, shotIdx: shotId, error: reason } }));
       if (shouldStopTracks) stopTracks(tracks);
       window.__clipBusy = false;
+      __attemptLock = false;
       lockReleases(0);
     }
   }
@@ -477,12 +477,14 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
     const d = (event?.detail && typeof event.detail === 'object') ? event.detail : {};
     if (!acceptRelease(d)) return;
 
+    __attemptLock = true;
+
     const makeShot = typeof window.createShot === 'function' ? window.createShot
       : (typeof createShot === 'function' ? createShot : null);
-    if (typeof makeShot !== 'function') return;
+    if (typeof makeShot !== 'function') { __attemptLock = false; return; }
 
     const shot = makeShot();
-    if (!shot || !shot.id) return;
+    if (!shot || !shot.id) { __attemptLock = false; return; }
 
     const shotId = shot.id;
     const frame = Number(d.frame);
@@ -499,6 +501,9 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
     if (window.__ENABLE_CLIPS__ === true && window.__CLIPS_AVAILABLE && !window.__clipBusy) {
       window.__clipBusy = true;
       startMicroClip({ shotId, releaseFrame: Number.isFinite(frame) ? frame : null });
+    } else {
+      __attemptLock = false;
+      lockReleases(0);
     }
 
     window.dispatchEvent(new CustomEvent('shot:feedback:request', { detail: { shotId, via: d.via || 'pose' } }));
