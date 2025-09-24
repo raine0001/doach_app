@@ -43,7 +43,6 @@ window.__DEV_ALLOW_STALE_TRAIL__ = false; // set true via console only when debu
 window.__pipelineStats = window.__pipelineStats || { detectorBall: 0, motionBall: 0, missingBall: 0, detectorFrames: 0 };
 window.__configSnapshot = window.__configSnapshot || {};
 
-
 // pose detection global settings
 window.POSE_REQUIRE_PLAYER_BOX ??= true;   // must see a 'player'/'person' box
 window.POSE_MIN_IOU_PLAYER     ??= 0.18;   // overlap with player box
@@ -72,6 +71,8 @@ window.__lastReleaseTs ??= 0;
 window.__gateDedupeCount ??= 0;
 window.__sessionConfigEmitted ??= false;
 window.__MICROCLIP_MS ??= 3000;
+window.__REQUIRE_TRAIL_FOR_CLIP ??= false;
+window.__clipBusy ??= false;
 window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window.__shotCount) : 0;
 
 (function installMicroClip(){
@@ -242,15 +243,18 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
   function startClip(meta = {}) {
     if (typeof window.MediaRecorder !== 'function') {
       log('MediaRecorder unsupported');
+      window.__clipBusy = false;
       return;
     }
     const source = ensureSource();
     if (!source.stream) {
       log('no capture stream');
+      window.__clipBusy = false;
       return;
     }
     if (rec && rec.state === 'recording') {
       log('already recording');
+      window.__clipBusy = false;
       return;
     }
 
@@ -277,6 +281,7 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
         SRC.kind = 'none';
         SRC.stopOnReset = false;
       }
+      window.__clipBusy = false;
       return;
     }
 
@@ -284,11 +289,20 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     const frame = Number.isFinite(rawFrame) ? rawFrame : (Number.isFinite(Number(window.__REL_LAST_FRAME)) ? Number(window.__REL_LAST_FRAME) : null);
     activeFrame = frame;
 
-    const baseIdx = Number.isFinite(Number(window.__SHOT_IDX)) ? Number(window.__SHOT_IDX) + 1 : (Number(window.__shotCount) || 0) + 1;
+    const providedIdx = Number.isFinite(Number(meta.shotIdx)) ? Number(meta.shotIdx) : null;
+
+    const baseIdx = (providedIdx !== null)
+
+      ? providedIdx
+
+      : (Number.isFinite(Number(window.__SHOT_IDX)) ? Number(window.__SHOT_IDX) + 1 : (Number(window.__shotCount) || 0) + 1);
 
     const shotIdx = baseIdx;
 
+    try { window.__SHOT_IDX = shotIdx; } catch {}
+
     window.__shotCount = shotIdx;
+
     chunks = [];
 
     rec.onstart = () => {
@@ -304,6 +318,7 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
       try {
         if (!chunks.length) {
           log('no data captured');
+          window.__clipBusy = false;
           return;
         }
         const blob = new Blob(chunks, { type: opts.mimeType || 'video/webm' });
@@ -328,24 +343,128 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     } catch (err) {
       log(`start failed: ${err}`);
       resetRecorder();
+      window.__clipBusy = false;
     }
   }
 
-  window.addEventListener('shot:release', (event) => {
-    const detail = event?.detail || {};
-    const trailLen = Array.isArray(window.ballState?.trail) ? window.ballState.trail.length : 0;
-    const minTrail = Number(window.MICROCLIP_MIN_TRAIL || 4);
-    if (trailLen < minTrail) {
-      log(`skip trail too short (${trailLen} < ${minTrail})`);
-      return;
+  function __microclipShouldRecord() {
+
+    if (window.__REQUIRE_TRAIL_FOR_CLIP !== true) return true;
+
+    const have = Array.isArray(window.ballState?.trail) ? window.ballState.trail.length : 0;
+
+    const need = Number(window.MICROCLIP_MIN_TRAIL || 4);
+
+    if (have < need) {
+
+      try { window.__dbgLine?.(`[microclip:skip] min-trail have=${have} need=${need}`); } catch {}
+
+      return false;
+
     }
-    startClip({ frame: detail.frame });
+
+    return true;
+
+  }
+
+  window.addEventListener('shot:release', (event) => {
+
+    if (window.__clipBusy) return;
+
+    if (!__microclipShouldRecord()) return;
+
+    const detail = event?.detail || {};
+
+    const nextIdx = Number.isFinite(Number(window.__SHOT_IDX)) ? Number(window.__SHOT_IDX) + 1 : 1;
+
+    try { window.__SHOT_IDX = nextIdx; } catch {}
+
+    window.__clipBusy = true;
+
+    startClip({ frame: detail.frame, shotIdx: nextIdx });
+
   }, { passive: true });
 
-  window.addEventListener('hud:start-session', () => { try { window.__shotCount = 0; } catch {} });
+  const __resetClipBusy = () => { window.__clipBusy = false; };
+
+  window.addEventListener('microclip:done', __resetClipBusy);
+
+  window.addEventListener('microclip:error', __resetClipBusy);
+
+  window.addEventListener('microclip:cancelled', __resetClipBusy);
+
+  window.addEventListener('microclip:started', () => {
+    const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
+    totals.attempts = Number(totals.attempts || 0) + 1;
+  });
+  window.addEventListener('shot:summary', (event) => {
+    const detail = event?.detail || {};
+    if (detail && detail.made === true) {
+      const idx = Number.isFinite(Number(detail.idx)) ? Number(detail.idx) : Number(window.__SHOT_IDX);
+      const store = window.__shotsStore;
+      if (Number.isFinite(idx) && store) {
+        const existing = store[String(idx)];
+        if (existing && existing.made === true) return;
+      }
+      const totals = (window.__sessionTotals ||= { attempts: 0, made: 0 });
+      totals.made = Number(totals.made || 0) + 1;
+    }
+  });
+
+  window.addEventListener('hud:start-session', () => {
+    try { window.__shotCount = 0; window.__sessionTotals = { attempts: 0, made: 0 }; } catch {}
+  });
   window.addEventListener('hud:end-session', () => { try { window.__shotCount = 0; } catch {} });
   window.__startMicroClip = startClip;
 })();
+
+if (!window.__shotsStore) {
+  window.__shotsStore = Object.create(null);
+  window.__shots = window.__shotsStore;
+}
+
+function __upsertShotRecord(idx, patch) {
+  if (!Number.isFinite(idx)) return;
+  const key = String(idx);
+  const store = window.__shotsStore;
+  const base = store[key] || { idx };
+  store[key] = { ...base, ...patch, idx };
+  try { window.dispatchEvent(new CustomEvent('shots:update', { detail: { idx, shot: store[key] } })); } catch {}
+}
+
+window.getShotRecords = function getShotRecords() {
+  try { return Object.values(window.__shotsStore).sort((a, b) => (a.idx || 0) - (b.idx || 0)); } catch { return []; }
+};
+
+window.addEventListener('shot:summary', (event) => {
+  const detail = event?.detail || {};
+  const idx = Number.isFinite(Number(detail.idx)) ? Number(detail.idx) : Number(window.__SHOT_IDX);
+  if (!Number.isFinite(idx)) return;
+  __upsertShotRecord(idx, {
+    made: detail.made,
+    arcHeight: detail.arcHeight ?? detail.arc,
+    entryAngle: detail.entryAngle,
+    releaseAngle: detail.releaseAngle,
+    status: detail.status || 'summary',
+    frameRelease: detail.frame ?? detail.frameRelease
+  });
+});
+
+window.addEventListener('microclip:saved', (event) => {
+  const detail = event?.detail || {};
+  const idx = Number(detail.shotIdx);
+  if (!Number.isFinite(idx)) return;
+  __upsertShotRecord(idx, { clipPath: detail.path || null, clipOk: detail.ok !== false, clipFrame: detail.frame });
+});
+
+window.addEventListener('shot:feedback', (event) => {
+  const detail = event?.detail || {};
+  const idx = Number.isFinite(Number(detail.idx)) ? Number(detail.idx) : Number(window.__SHOT_IDX);
+  if (!Number.isFinite(idx)) return;
+  const coachText = (typeof detail === 'string') ? detail : (detail.text ?? detail.message ?? detail.feedback ?? null);
+  if (coachText == null) return;
+  __upsertShotRecord(idx, { coach: coachText });
+});
 
 (function installMicroClipFBF(){
   if (window.__fbfInstalled) return;
@@ -465,7 +584,6 @@ window.__shotCount = Number.isFinite(Number(window.__shotCount)) ? Number(window
     return nearHoop && travel > 40;
   }
 })();
-
 
 function __cloneForLog(obj) {
   try { return JSON.parse(JSON.stringify(obj)); } catch { return null; }
@@ -1125,9 +1243,6 @@ if (typeof window.getMicroClipRingBuffer !== 'function') {
   };
 }
 
-
-
-
 const MICROCLIP_PRE_MS_DEFAULT = 700;
 const MICROCLIP_POST_MS_DEFAULT = 2200;
 const MICROCLIP_DETECT_STRIDE_DEFAULT = 6;
@@ -1608,7 +1723,6 @@ window.addEventListener('microclip:done', (event) => {
   window.__dbgMicroclip?.('summary', summaryDetail);
 });
 
-
 // =========================== Pose Release Pipeline ===========================
 // One function to install all release-related wiring exactly once.
 // It keeps release authority in release_gate.js, makes HUD purely visual,
@@ -2051,7 +2165,6 @@ window.addEventListener('microclip:done', (event) => {
           }
         } catch {}
 
-
         // Cooldown suppression
         const now = performance.now();
         const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 1800);
@@ -2282,11 +2395,9 @@ async function waitForPDWarm(minLead = 4, timeoutMs = 500) {
   return false;
 }
 
-
 // --- scorer tuning knobs (optional) ---
 window.PROX_OUT_CONSEC_MIN = 2;    // frames outside required before EXIT latch
 window.PROX_EXIT_PAD        = 4;   // extra px below bottom to confirm EXIT
-
 
 // ---- Pure pose-gate helper for release latch (pose-only) ----
 // Accepts the last N frames of keypoints (3â€“5), returns tests and immediate decision.
@@ -2294,7 +2405,6 @@ window.PROX_EXIT_PAD        = 4;   // extra px below bottom to confirm EXIT
 function release_gate(lastFrames) {
   try { return releaseGate(lastFrames); } catch (e) { return { released:false, passed:0, tests:{}, reason:'error' }; }
 }
-
 
 // Attach the hoop to the ball state for tracking zone
 export function attachHoop(hoopLocked) {
@@ -2986,11 +3096,6 @@ function poseBeliefLatched(isOK) {
   return window.__poseBeliefStreak >= need;
 }
 
-
-
-
-
-
 // --- Overlay CSS + pixel buffer lock ---
 // make the overlay sit over the video, scale with it via CSS,
 // but keep the canvas drawing buffer equal to the video *intrinsic* size
@@ -3068,7 +3173,6 @@ export function tickReadiness(objects, poses) {
 window.onNewVideoLoaded   = () => resetReadiness('new video');
 window.onHoopRelocked     = () => resetReadiness('hoop changed');
 window.onSeekOrPause      = () => resetReadiness('seek/pause');
-
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Lightweight warmâ€‘up for detector + pose (no overlay pollution)
@@ -3264,7 +3368,6 @@ export function stopPreDetection() {
 }
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€  end pre detection logic
-
 
 // ---- Boot & event wires ----
 document.addEventListener('DOMContentLoaded', () => {
@@ -3639,8 +3742,6 @@ try {
   document.head.appendChild(s);
 })();
 
-
-
 //--------------------------------------------------------------//
 //     ----- Initialize the video player and overlay -----      //
 //--------------------------------------------------------------//
@@ -3754,7 +3855,6 @@ window.handleVideoUpload = async function (event) {
   try { createPlaybackControls?.(video); } catch {}
 };
 
-
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Analyzer (event-driven, no time-warping of the video element)
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -3835,7 +3935,6 @@ window.useRealTimeTracking = false;
 // Default: uploads use FBF during the shot window; live sessions disable it.
 window.USE_FBF_DURING_SHOT = true;
 window.FBF_VISUAL_FPS      = 10;          // visual pacing target for FBF
-
 
 //---------------------------------------------------------------------------------//
 //                     ----------  FBF  ----------                                 // 
@@ -4225,7 +4324,6 @@ async function runShotFBF() {
   window.removeEventListener('shot:summary', stopNow);
 }
 
-
   // Start/stop hooks
   window.addEventListener('shot:release', () => {
     // Start FBF for uploads; keep live camera real-time.
@@ -4377,7 +4475,6 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
     window.stopFrameAnalysis();
   };
   try { videoEl.addEventListener('ended', onEnded, { once: true }); } catch {}
-
 
   // ---- helpers ----
 
@@ -4617,7 +4714,6 @@ window.legacyAnalyzeVideoFrameByFrame = async function analyzeVideoFrameByFrame(
         }
       } catch {}
 
-
       // ---- Arc stepping centralized ----
       try {
         const lastPt = window.ballState?.trail?.at?.(-1) || null;
@@ -4778,9 +4874,6 @@ try {
   }
 } catch {}
 
-
-
-
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
 //              ------------ helpers ----------------              //
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€ //
@@ -4854,8 +4947,6 @@ function fillRecentGapInPlace(state) {
   // splice in just before 'b'
   tr.splice(tr.length - 1, 0, ...inserts);
 }
-
-
 
 // 1) only allow play/analyze when the hoop is locked.
 //    If not, show the prompt once and refuse.
@@ -5124,8 +5215,6 @@ window.useRealTimeTracking = false;
     }
   });
 })();
-
-
 
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Active player selection: instant lock by ball proximity,
@@ -5434,9 +5523,7 @@ export function pickPoseForActive(poses, canvasEl, hoopBox) {
     .sort((a,b) => (b.area - a.area) || (b.v - a.v))[0].it;
 }
 
-
 // End Active Player â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-
 
 // Tiny memory for prediction between YOLO hits
 const __ballMem = { x:null, y:null, vx:0, vy:0, area:null, has:false };
@@ -5601,7 +5688,6 @@ function pickBallCandidate(objects, hoopBox) {
   return best || null;
 }
 
-
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Pose init on data-ready (safe element lookup)
 // â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
@@ -5630,8 +5716,6 @@ function pickBallCandidate(objects, hoopBox) {
     armOnce();
   }
 })();
-
-
 
 // Switch to live camera.
 // - stops any previous MediaStream tracks
@@ -5686,7 +5770,6 @@ window.resetShots = window.resetShots || function () {
   const details = document.getElementById('shotDetails');
   if (details) details.textContent = 'No shot data loaded.';
 };
-
 
 // -------------------------- Background Sampler (~10 fps, ROI) --------------------------- //
 (function installBgSampler(){
