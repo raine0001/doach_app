@@ -19,6 +19,7 @@ import { asTopLeft, canonHoop, detectNetMotionFromCanvas } from './hoop_tracker.
 import { mountPrefs } from './ui_prefs.js';
 import { initReleaseConfig, releaseGate } from './release_gate.js';
 
+window.DEMO_SHOTSTORE_OWNS_ROWS = true;
 function __shotArcModule() {
   const api = window.shotArcModule || window.shotArc;
   return (api && typeof api === 'object') ? api : null;

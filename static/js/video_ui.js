@@ -190,6 +190,7 @@ window.mountConnectionBanner = mountConnectionBanner;
   }
 
   window.addEventListener('shot:release', (e) => {
+    if (window.DEMO_SHOTSTORE_OWNS_ROWS === true) return;
     // In live sessions or when FBF disabled, never alter playback rate
     if (window.__SESSION_ACTIVE || window.USE_FBF_DURING_SHOT === false) return;
     if (window.__fbfActive) return;
@@ -2005,7 +2006,7 @@ export function initHUDForVideo(videoEl) {
       try { window.__summaryShown = true; } catch {}
     } catch {}
     // Announce + trigger coach session summary
-    try { window.coachSpeak?.("That's your tenth shot â€” let's review the session."); } catch {}
+    try { window.coachSpeak?.("That's your tenth shot, let's review the session."); } catch {}
     try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
     try { window.__summaryShown = true; } catch {}
   }
@@ -2295,7 +2296,7 @@ function ensureShotTableStyles(){
         btn.id = 'replayBest';
         btn.className = 'vc-btn';
         btn.title = 'Replay Best Shot';
-        btn.textContent = 'Best â–¶';
+        btn.textContent = 'Best ?';
         btn.addEventListener('click', () => { try { window.playShotReplay?.({ id: (__bestIdx + 1) }); } catch {} });
         actions.insertBefore(btn, actions.querySelector('#exportCSV'));
       }
@@ -2605,6 +2606,7 @@ window.addEventListener('shot:summary', () => {
   if (window.__HudShotCountersWired) return; window.__HudShotCountersWired = true;
 
   const onRelease = (e) => {
+    if (window.DEMO_SHOTSTORE_OWNS_ROWS === true) return;
     try {
       // Require hoop locked/confirmed and armed (post-countdown)
       if (window.__hoopConfirmed !== true) return;
@@ -2659,6 +2661,7 @@ window.addEventListener('shot:summary', () => {
   // so Shots Taken reflects pose releases even if a release event was swallowed.
   // This is visual/log-only; summaries still come from the scorer.
   window.addEventListener('hud:score-trip', (e) => {
+    if (window.DEMO_SHOTSTORE_OWNS_ROWS === true) return;
     try {
       // Cap session at cap_DEFAULT
       try { const cap = getSessionCap(); const cur = (window.__shotList||[]).length; if (shouldEnforceSessionCap() && cur >= cap) return; } catch {}
@@ -2917,4 +2920,7 @@ window.addEventListener('shot:summary', () => {
     }
   } catch {}
 });
+
+
+
 

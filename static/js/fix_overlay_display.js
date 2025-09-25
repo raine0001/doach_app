@@ -407,7 +407,7 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
       const extMin = Number.isFinite(window.REL_ELBOW_EXT_MIN)
         ? window.REL_ELBOW_EXT_MIN
         : (Number(window.REL_CFG?.elbowExtMin) || 145);
-      const elbowExtended = Number.isFinite(elbowAngleDeg) && (elbowAngleDeg >= extMin);
+      elbowExtended = Number.isFinite(elbowAngleDeg) && (elbowAngleDeg >= extMin);
     }
     const dx = Math.abs((wr?.x ?? 0) - (sh?.x ?? 0));
     const dy = Math.abs((sh?.y ?? 0) - (wr?.y ?? 0));
@@ -1880,3 +1880,4 @@ try {
     } catch {}
   });
 } catch {}
+
