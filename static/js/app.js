@@ -507,7 +507,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       lockReleases(0);
     }
 
-    window.dispatchEvent(new CustomEvent('shot:feedback:request', { detail: { shotId, via: d.via || 'pose' } }));
+      window.dispatchEvent(new CustomEvent('shot:feedback:request', { detail: { shotId, via: d.via || 'pose' } }));
   }, { passive: true });
 
   function __shotsGetId(detail) {
@@ -540,6 +540,10 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       releaseAngle: detail.releaseAngle ?? null,
       status: detail.status || 'summary'
     };
+    if (window.DEMO_SCORER_OFF === true) {
+      summary.made = null;
+      summary.status = summary.status || 'pose-only';
+    }
     updateShot(shotId, { summary, pending: false });
     __maybeBumpMade(shotId, summary.made);
   });
@@ -554,6 +558,7 @@ if (typeof window.__ENABLE_CLIPS__ === 'undefined') window.__ENABLE_CLIPS__ = wi
       entryAngle: detail.entryAngle ?? null,
       releaseAngle: detail.releaseAngle ?? null
     };
+    if (window.DEMO_SCORER_OFF === true) payload.made = null;
     updateShot(shotId, { fbf: payload, summary: { ...payload, status: 'fbf' }, pending: false });
     __maybeBumpMade(shotId, payload.made);
   });

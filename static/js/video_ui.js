@@ -407,7 +407,7 @@ window.setFBFRate = (fps) => {
   console.log('[video_ui] slow-mo fps =', window.FRAMEbyFRAME_RATE);
 };
 
-const SESSION_SIZE_DEFAULT = 10;  // default cap if nothing else provided
+const SESSION_SIZE_DEFAULT = 3;  // default cap if nothing else provided
 function getSessionCap() {
   if (window.__sessionContinue === true) return Infinity;
   // Query-string override (?cap=3)
@@ -1430,6 +1430,7 @@ function buildSummaryActionBar(idx) {
 }
 
 function buildSummaryRow(idx, shot, isBest) {
+  const allowCorrections = window.DEMO_SCORER_OFF !== true;
   const tr = document.createElement('tr');
   tr.setAttribute('data-shot-idx', idx + 1);
   if (isBest) tr.setAttribute('data-best', '1');
@@ -1460,7 +1461,7 @@ function buildSummaryRow(idx, shot, isBest) {
 
   const fixCell = tr.querySelector('.fix');
   if (fixCell) {
-    fixCell.appendChild(buildSummaryActionBar(idx));
+      fixCell.appendChild(buildSummaryActionBar(idx));
   }
 
   if (shot && shot.pending) {
@@ -2661,7 +2662,7 @@ window.addEventListener('shot:summary', () => {
   // so Shots Taken reflects pose releases even if a release event was swallowed.
   // This is visual/log-only; summaries still come from the scorer.
   window.addEventListener('hud:score-trip', (e) => {
-    if (window.DEMO_SHOTSTORE_OWNS_ROWS === true) return;
+    if (window.DEMO_SHOTSTORE_OWNS_ROWS) return;  // demo: HUD is visual-only
     try {
       // Cap session at cap_DEFAULT
       try { const cap = getSessionCap(); const cur = (window.__shotList||[]).length; if (shouldEnforceSessionCap() && cur >= cap) return; } catch {}
@@ -2738,6 +2739,7 @@ window.addEventListener('shot:summary', () => {
 
   // Live update the bottom HUD when HUD shot counter changes
   window.addEventListener('hud:shot-taken', (e) => {
+    if (window.DEMO_SHOTSTORE_OWNS_ROWS) return;  // demo: HUD is visual-only
     try {
       const cnt = Number(e?.detail?.count || window.shotTaken || window.__HUD_SHOT_COUNT || 0);
       const start = (window.__sessionStart ||= Date.now());
