@@ -573,32 +573,7 @@ async function openContentPanel(){
     };
     updateButtons();
 
-    if (camBtn) camBtn.addEventListener('click', async () => {
-      // If a welcome was deferred until the feed starts, greet now using preferred voice
-      try {
-      if (!canCamera || !httpsOk || !allowPref()) { updateButtons(); return; }
-      if (hintEl) hintEl.textContent = 'Requesting camera…';
-      try {
-        await window.useCamera?.();
-        if (hintEl) hintEl.textContent = 'Camera active.';
-        try {
-          if (window.__welcomePending) {
-            const fn = (localStorage.getItem('firstname') || 'player');
-            window.showPrompt?.(`Hi ${fn}, let's get started!`);
-            if (typeof window.doachSpeak === 'function') window.doachSpeak(`Hi ${fn}, tap the hoop to begin the session.`);
-            else window.coachSpeak?.(`Hi ${fn}, tap the hoop to begin the session.`);
-            window.__welcomePending = false;
-          }
-        } catch {}
-        __panels?.forEach?.(p => p.openClose?.()); // close the side panel
-      } catch (e) {
-        if (hintEl) hintEl.textContent = 'Camera failed: ' + (e?.message || e);
-      }
-    } catch (e) { if (hintEl) hintEl.textContent = 'Camera error: ' + (e?.message || e); }
-      updateButtons();
-    });
-
-
+    
     if (stopBtn) stopBtn.addEventListener('click', () => {
       try { window.stopCamera?.(); if (hintEl) hintEl.textContent = 'Camera stopped.'; }
       catch (e) { if (hintEl) hintEl.textContent = 'Stop failed: ' + (e?.message || e); }

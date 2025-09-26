@@ -695,6 +695,42 @@ export function drawLiveOverlay(objects = [], playerState) {
     ctx.clearRect(0, 0, overlay.width, overlay.height);
     window.__APPLY_OVERLAY_XFORM?.(ctx);
     try { drawHoopMarker?.(ctx, { always: true }); } catch {}
+    if (window.SHOW_OBJECT_BOXES === true) {
+      try {
+        const items = Array.isArray(objects) ? objects : [];
+        const want = /^(ball|basketball|hoop|rim|basket|backboard|net)$/i;
+        const dash = 6 * hair;
+        const gap = 4 * hair;
+
+        ctx.save();
+        ctx.setLineDash([dash, gap]);
+        ctx.lineWidth = 2 * hair;
+
+        for (const d of items) {
+          const lab = String(d?.label ?? d?.class ?? d?.type ?? '').trim();
+          if (!want.test(lab)) continue;
+
+          const box = d?.bbox ?? d?.box ?? d?.rect;
+          let x, y, w, h;
+          if (Array.isArray(box) && box.length === 4) {
+            const [x1, y1, x2, y2] = box.map(Number);
+            if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+            x = x1; y = y1; w = x2 - x1; h = y2 - y1;
+          } else if (box && (Number.isFinite(box.x ?? box.left)) && (Number.isFinite(box.y ?? box.top))) {
+            x = Number(box.x ?? box.left);
+            y = Number(box.y ?? box.top);
+            w = Number(box.w ?? box.width ?? 0);
+            h = Number(box.h ?? box.height ?? 0);
+          } else {
+            continue;
+          }
+
+          ctx.strokeStyle = /ball/i.test(lab) ? 'rgba(0,200,255,0.95)' : 'rgba(255,120,0,0.95)';
+          ctx.strokeRect(x, y, w, h);
+        }
+        ctx.restore();
+      } catch {}
+    }
     try {
       let kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length) ? playerState.keypoints : null;
       if (!kps) {
@@ -1880,4 +1916,3 @@ try {
     } catch {}
   });
 } catch {}
-

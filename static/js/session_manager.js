@@ -73,7 +73,7 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
         const name = (localStorage.getItem('firstname') || 'player');
         speak(`Hi ${name}, select the hoop, then shoot when ready.`);
       } catch {}
-      try { window.enableHoopPickOnce?.(); window.showPrompt?.('Tap the hoop to lock it'); } catch {}
+      
       const demoCap = Number(window.DEMO_SESSION_CAP ?? window.__SESSION_CAP ?? window.SESSION_CAP ?? 3);
       try {
         window.__SESSION_CAP = demoCap;

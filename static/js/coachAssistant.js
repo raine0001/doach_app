@@ -76,6 +76,21 @@ window.addEventListener('shot:summary', (e) => {
 // (release tips listener is now wired globally during init)
 });
 
+// Use ShotStore id for banner numbering
+window.addEventListener('shot:feedback:request', (e) => {
+  const lastFromStore =
+    (typeof getShotRecords === 'function' && getShotRecords().length)
+      ? getShotRecords().slice(-1)[0]?.idx
+      : null;
+
+  window.__CURRENT_SHOT_ID =
+    Number(e?.detail?.shotId) ||
+    Number(lastFromStore) ||
+    Number(window.__SHOT_ID) ||
+    1;
+});
+
+
 
 (function(){
   // ---------- Config ----------
@@ -585,25 +600,29 @@ window.addEventListener('shot:summary', (e) => {
 
   async function speakWithAIOrRules(snap, via){
     function getShotNumber(){
-      try {
-        const vals = [];
-        // UI-maintained index is 0-based; convert to 1-based when present
-        if (Number.isFinite(window.__SHOT_IDX)) vals.push(Number(window.__SHOT_IDX) + 1);
-        // Pending list length (attempts started)
-        if (Array.isArray(window.__shotList)) vals.push(window.__shotList.length);
-        // Canonical event-driven counter (shot:release)
-        if (Number.isFinite(Number(window.__SCORE_SHOT_COUNT))) vals.push(Number(window.__SCORE_SHOT_COUNT));        
-        if (Number.isFinite(Number(window.__SESSION_SHOT_COUNT))) vals.push(Number(window.__SESSION_SHOT_COUNT));
-        // Finalized shots in logger (may lag a bit)
-        if (Array.isArray(window.shotLog)) vals.push(window.shotLog.length);
-        // Legacy HUD/local
-        if (Number.isFinite(Number(window.__HUD_SHOT_COUNT))) vals.push(Number(window.__HUD_SHOT_COUNT));
-        if (Number.isFinite(Number(window.shotTaken))) vals.push(Number(window.shotTaken));
-        const n = vals.filter(v => Number.isFinite(v) && v > 0).reduce((m,v)=> Math.max(m,v), 0);
-        return n > 0 ? n : null;
-      } catch {}
-      return null;
-    }
+    // Prefer the canonical id captured from ShotStore
+    const id = Number(window.__CURRENT_SHOT_ID);
+    if (Number.isFinite(id) && id > 0) return id;
+
+    // Fallback: last row from ShotStore, if available
+    try {
+      if (typeof getShotRecords === 'function') {
+        const last = getShotRecords().slice(-1)[0];
+        if (last && Number.isFinite(last.idx)) return last.idx;
+      }
+    } catch {}
+
+    // Legacy fallbacks (kept for safety)
+    const vals = [];
+    if (Number.isFinite(window.__SHOT_ID))          vals.push(Number(window.__SHOT_ID));
+    if (Number.isFinite(window.__SCORE_SHOT_COUNT)) vals.push(Number(window.__SCORE_SHOT_COUNT));
+    if (Array.isArray(window.shotLog))              vals.push(window.shotLog.length);
+    if (Number.isFinite(window.__HUD_SHOT_COUNT))   vals.push(Number(window.__HUD_SHOT_COUNT));
+    if (Number.isFinite(window.shotTaken))          vals.push(Number(window.shotTaken));
+    const n = vals.filter(v => v > 0).reduce((m,v)=>Math.max(m,v), 0);
+    return n > 0 ? n : 1;
+  }
+
     function withShotPrefix(text){
       const n = getShotNumber();
       return (Number.isFinite(n) && n > 0) ? `Shot ${n}, ${text}` : String(text||'');
@@ -620,9 +639,11 @@ window.addEventListener('shot:summary', (e) => {
     const llmMode = (window.DOACH && window.DOACH.llmMode) || 'off';
 
     const inferShotIdx0 = () => {
+      const cur = Number(window.__CURRENT_SHOT_ID);
+      if (Number.isFinite(cur) && cur > 0) return cur - 1;
       try { if (Number.isFinite(Number(shot?.coachIdx))) return Number(shot.coachIdx); } catch {}
-      try { if (Number.isFinite(Number(shot?.idx))) return Number(shot.idx); } catch {}
-      try { if (Number.isFinite(Number(shot?.__idx))) return Number(shot.__idx) - 1; } catch {}
+      try { if (Number.isFinite(Number(shot?.idx)))      return Number(shot.idx); } catch {}
+      try { if (Number.isFinite(Number(shot?.__idx)))    return Number(shot.__idx) - 1; } catch {}
       try { if (Number.isFinite(Number(window.__SHOT_IDX))) return Number(window.__SHOT_IDX); } catch {}
       try {
         const n = getShotNumber?.(); // 1-based if available

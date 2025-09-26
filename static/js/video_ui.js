@@ -105,6 +105,57 @@ const formatCameraFacing = (label) => ((label === 'Back') ? ICON_CAMERA_BACK : I
 const formatHudCameraLabel = (label) => formatCameraFacing(label) + ' Camera';
 const formatCapDisplay = (cap) => (Number.isFinite(cap) && cap > 0) ? String(cap) : SYMBOL_INFINITY;
 
+// --- Minimal demo helpers ---
+function getClipHrefForShot(idx1Based, shot) {
+  if (shot?.clip?.path) return shot.clip.path;
+
+  try {
+    const recs = (typeof window.getShotRecords === 'function') ? (window.getShotRecords() || []) : [];
+    const rec  = recs.find(r => r.idx === idx1Based || r.id === idx1Based);
+    if (rec?.clip?.path) return rec.clip.path;
+  } catch {}
+
+  try {
+    const sid = window.__SESSION_ID;
+    if (sid != null) return `/api/sessions/${sid}/shot_video?index=${idx1Based - 1}`;
+  } catch {}
+
+  return null;
+}
+
+async function requestCoachSessionSummary() {
+  const line = document.getElementById('sessReviewLine');
+  if (line) {
+    line.style.display = 'block';
+    line.textContent = 'Preparing session summary…';
+  }
+
+  let sid = window.__SESSION_ID || null;
+  try { if (!sid) sid = await ensureSessionId(); } catch {}
+
+  try {
+    if (sid) {
+      const r = await fetch(`/api/sessions/${sid}/coach_summary`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ compare: true }),
+        credentials: 'include'
+      });
+      if (r.ok) {
+        const j = await r.json().catch(()=>null);
+        const txt = (j?.text || j?.summary || 'Summary prepared.');
+        if (line) line.textContent = txt;
+        return;
+      }
+    }
+  } catch {}
+
+  try {
+    window.dispatchEvent(new CustomEvent('doach:session-summary-request', { detail: { sid, compare: true } }));
+    if (line) line.textContent = 'Working on your session summary…';
+  } catch {}
+}
+
 // Connection banner: show backend origin and active session id
 // ---------------------------------------------------------------
 function mountConnectionBanner() {
@@ -449,7 +500,7 @@ export function moveUploadToSidebar() {
   }
 }
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€ Single-frame step (RVFC/arbiter-safe) â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”--------€ Single-frame step (RVFC/arbiter-safe) â”--------€
 
 // Keep a tiny state so any old callers don't crash
 let __framePlay = { on:false, timer:null, cleanup:null, fps:12, video:null };
@@ -573,7 +624,7 @@ export function setSessionStatus(text = '') {
 }
 
 // -----------------------------------------------------------------//
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€ Playback controls UI (mounted inside hudRoot) â”€â”€â”€â”€â”€â”€â”€â”€â”€//
+// â”--------€ Playback controls UI (mounted inside hudRoot) â”--------€//
 // -----------------------------------------------------------------//
 export function createPlaybackControls(video) {
   window.__videoEl = video;
@@ -662,37 +713,38 @@ export function createPlaybackControls(video) {
 }
 
 // Show shot summary overlay
-export function showShotSummaryOverlay(summary) {
-  const div = document.createElement('div');
-  div.className = 'shot-overlay-summary';
-  div.style.position = 'absolute';
-  div.style.bottom = '20px';
-  div.style.right = '20px';
-  div.style.background = 'rgba(0,0,0,0.7)';
-  div.style.color = 'white';
-  div.style.padding = '10px';
-  div.style.borderRadius = '8px';
-  div.style.zIndex = '99';
+// export function showShotSummaryOverlay(summary) {
+//   const div = document.createElement('div');
+//   div.className = 'shot-overlay-summary';
+//   div.style.position = 'absolute';
+//   div.style.bottom = '20px';
+//   div.style.right = '20px';
+//   div.style.background = 'rgba(0,0,0,0.7)';
+//   div.style.color = 'white';
+//   div.style.padding = '10px';
+//   div.style.borderRadius = '8px';
+//   div.style.zIndex = '99';
 
-  const arcLabel = (() => { try { return arcHeightLabel(summary); } catch { return 'good'; } })();
-  div.innerHTML = `
-    <strong>${summary.made ? 'âœ… Made' : 'âŒ Missed'} Shot</strong><br>
-    Arc: ${arcLabel}<br>
-    Entry Angle: ${summary.entryAngle}&#176;<br>
-    Release Angle: ${summary.releaseAngle}&#176;<br>
-    Accuracy: ${summary.accuracy}% (${summary.madeShots}/${summary.totalShots})<br>
-  `;
+//   const arcLabel = (() => { try { return arcHeightLabel(summary); } catch { return 'good'; } })();
+//   div.innerHTML = `
+//     <strong>${summary.made ? 'Made' : 'Missed'} Shot</strong><br>
+//     Arc: ${arcLabel}<br>
+//     Entry Angle: ${summary.entryAngle}&#176;<br>
+//     Release Angle: ${summary.releaseAngle}&#176;<br>
+//     Accuracy: ${summary.accuracy}% (${summary.madeShots}/${summary.totalShots})<br>
+//   `;
 
-  document.querySelector('.video-box').appendChild(div);
-  setTimeout(() => div.remove(), 2500);
-}
+//   document.querySelector('.video-box').appendChild(div);
+//   setTimeout(() => div.remove(), 2500);
+// }
 
 // Helper - hoop selection, user must confirm hoop on startup
 window.__hoopConfirmed = false;
 
-function requireHoopOrPrompt() {
+export function requireHoopOrPrompt() {
   if (isHoopReady()) return true;
-  showPromptMessage('Tap the hoop to begin setup', 3000);
+  const name = window.__USER_NAME || 'Player';
+  showPromptMessage(`Hi ${name}, tap the hoop to begin session`, 3000);
   if (!window.__hoopPickArmed) {
     window.__hoopPickArmed = true;
     window.enableHoopPickOnce?.();   // arm picker again if needed
@@ -703,7 +755,7 @@ function requireHoopOrPrompt() {
 window.isHoopReady = isHoopReady;
 window.requireHoopOrPrompt = requireHoopOrPrompt;
 
-// â”€â”€ Unified prompt system (uses #overlayPrompt if present, else #promptBar) â”€â”€
+// â”-€ Unified prompt system (uses #overlayPrompt if present, else #promptBar) â”-€
 
 function hasCenter(h) {
   return Number.isFinite(h?.cx ?? h?.x) && Number.isFinite(h?.cy ?? h?.y);
@@ -747,10 +799,12 @@ function getPromptEl() {
     root.appendChild(el);
   }
   Object.assign(el.style, {
-    position: 'absolute', top: '8px', left: '50%', transform: 'translateX(-50%)',
-    background: 'rgba(0,0,0,0.7)', color: '#fff', padding: '8px 12px',
-    borderRadius: '8px', font: '600 14px system-ui, sans-serif',
-    display: 'none', pointerEvents: 'none', zIndex: '10001'
+    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)',
+    background: 'rgba(0,0,0,0.75)', color: '#fff', padding: '18px 28px',
+    borderRadius: '18px', font: '700 20px/1.4 system-ui, sans-serif',
+    textAlign: 'center', minWidth: '320px',
+    display: 'none', pointerEvents: 'none', zIndex: '10001',
+    boxShadow: '0 12px 30px rgba(0,0,0,0.35)'
   });
   return el;
 }
@@ -774,6 +828,69 @@ function hidePromptMessage() {
   el.style.display = 'none';
 }
 
+let __hoopCountdownTimer = null;
+function startHoopCountdown(sec = 5) {
+  clearTimeout(__hoopCountdownTimer);
+  const name = window.__USER_NAME || localStorage.getItem('firstname') || 'Player';
+  const total = Math.max(1, Number(sec) || 5);
+
+  if (window.__armCountdownActive) return;
+  window.__armCountdownActive = true;
+  try { window.__shotTrackingArmed = false; } catch {}
+  try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec: total } })); } catch {}
+
+  const root = ensureHudRoot();
+  let box = document.getElementById('countdownOverlay');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'countdownOverlay';
+    Object.assign(box.style, {
+      position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
+      background:'rgba(0,0,0,0.45)', color:'#fff', padding:'24px 32px', borderRadius:'16px',
+      font:'900 120px/1 system-ui, -apple-system, Segoe UI, Arial',
+      textShadow: '0 6px 18px rgba(0,0,0,.55)', zIndex:10040,
+      pointerEvents:'none', display:'none'
+    });
+    root.appendChild(box);
+  }
+
+  try { speak(`Locked, ${name}. Starting in ${total} seconds.`); } catch {}
+
+  let remaining = total;
+  const showValue = (value, size = '120px') => {
+    box.style.display = 'block';
+    box.style.fontSize = size;
+    box.textContent = value;
+  };
+  const finish = () => {
+    box.style.display = 'none';
+    window.__armCountdownActive = false;
+    try { window.__shotTrackingArmed = true; } catch {}
+    try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
+    try { speak('Shoot when ready.'); } catch {}
+    try { window.__releaseEventSent = false; } catch {}
+    window.scheduleArmWhenReady?.(0);
+  };
+
+  showValue(remaining);
+  remaining -= 1;
+
+  const tick = () => {
+    if (remaining > 0) {
+      showValue(remaining);
+      remaining -= 1;
+      __hoopCountdownTimer = setTimeout(tick, 1000);
+      return;
+    }
+    showValue('GO', '120px');
+    __hoopCountdownTimer = setTimeout(finish, 700);
+  };
+
+  __hoopCountdownTimer = setTimeout(tick, 1000);
+}
+
+window.startHoopCountdown = startHoopCountdown;
+
 // Poll until hoop is *stably* locked (2 consecutive checks)
 function startHoopPromptLoop() {
   clearInterval(window.__hoopPromptTimer);
@@ -789,15 +906,15 @@ function startHoopPromptLoop() {
   };
 
   tick();
-  window.__hoopPromptTimer = setInterval(tick, 1500); // keep â€œpulsingâ€ until confirmed
+  window.__hoopPromptTimer = setInterval(tick, 1500); // keep "pulsing" until confirmed
 }
 
 window.enableHoopPickOnce = enableHoopPickOnce;
 
 
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --------------------------------------------------------------
 // Video UI / HUD utilities
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --------------------------------------------------------------
 
 /** Ensure an absolute overlay root that sits on top of the video */
 export function ensureHudRoot() {
@@ -1444,12 +1561,19 @@ function buildSummaryRow(idx, shot, isBest) {
     : '';
   const coachText = coachSource ? coachSource : SHOT_SUMMARY_TEXT.pending;
 
+  // tr.innerHTML = `
+  //   <td class="num">${idx + 1}</td>
+  //   <td class="result" title="${isBest ? 'Best shot' : ''}">${resultCell}</td>
+  //   <td class="arc">${arcCell}</td>
+  //   <td class="entry">${entryCell}</td>
+  //   <td class="release">${releaseCell}</td>
+  //   <td class="coach"></td>
+  //   <td class="fix"></td>`;
+
+
   tr.innerHTML = `
     <td class="num">${idx + 1}</td>
     <td class="result" title="${isBest ? 'Best shot' : ''}">${resultCell}</td>
-    <td class="arc">${arcCell}</td>
-    <td class="entry">${entryCell}</td>
-    <td class="release">${releaseCell}</td>
     <td class="coach"></td>
     <td class="fix"></td>`;
 
@@ -1465,7 +1589,8 @@ function buildSummaryRow(idx, shot, isBest) {
   }
 
   if (shot && shot.pending) {
-    tr.querySelectorAll('.result, .arc, .entry, .release, .coach').forEach((cell) => {
+    //tr.querySelectorAll('.result, .arc, .entry, .release, .coach').forEach((cell) => {
+    tr.querySelectorAll('.coach').forEach((cell) => {
       cell.textContent = SHOT_SUMMARY_TEXT.pending;
     });
   }
@@ -1474,23 +1599,28 @@ function buildSummaryRow(idx, shot, isBest) {
 }
 
 function renderFullShotTable() {
-  ensureShotTableStyles();
   const list = getShotList();
   const root = ensureHudRoot();
+  const minimal = window.DEMO_MINIMAL_TABLE === true;
 
   let bestIdx = -1;
   let bestScore = -1;
-  try {
-    const golden = window.DOACH_MEM?.get?.()?.golden || null;
-    for (let i = 0; i < list.length; i++) {
-      const shot = list[i];
-      if (!shot || !shot.made) continue;
-      const rating = (typeof window.computeShotRating === 'function')
-        ? Number(window.computeShotRating(shot.poseSnapshot || null, golden))
-        : -1;
-      if (Number.isFinite(rating) && rating > bestScore) { bestScore = rating; bestIdx = i; }
-    }
-  } catch {}
+  if (!minimal) {
+    try {
+      const golden = window.DOACH_MEM?.get?.()?.golden || null;
+      for (let i = 0; i < list.length; i++) {
+        const shot = list[i];
+        if (!shot || !shot.made) continue;
+        const rating = (typeof window.computeShotRating === 'function')
+          ? Number(window.computeShotRating(shot.poseSnapshot || null, golden))
+          : -1;
+        if (Number.isFinite(rating) && rating > bestScore) { bestScore = rating; bestIdx = i; }
+      }
+    } catch {}
+  }
+
+  try { window.__bestIdx = minimal ? -1 : bestIdx; } catch {}
+  ensureShotTableStyles();
 
   let modal = document.getElementById('fullShotModal');
   if (!modal) {
@@ -1511,6 +1641,80 @@ function renderFullShotTable() {
       WebkitOverflowScrolling: 'touch'
     });
     root.appendChild(modal);
+  }
+
+  if (minimal) {
+    modal.innerHTML = `
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+        <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
+          <span>Shot Summary (${list.length}/${formatCapDisplay(getSessionCap())})</span>
+          <span id="sessFinalBadge" style="display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;">Finalizing…</span>
+        </div>
+        <div>
+          <button id="coachSummaryBtn" class="vc-btn" title="Coach Session Summary">Coach Session Summary</button>
+          <button id="closeFull" class="vc-btn">Close</button>
+        </div>
+      </div>
+      <div id="sessReviewLine" style="display:none;opacity:.95;margin:4px 0 10px;line-height:1.35"></div>
+      <table class="hud-table">
+        <colgroup><col id="cNum"><col id="cCoach"><col id="cClip"></colgroup>
+        <thead>
+          <tr><th>#</th><th>Coach Pose Assessment</th><th>Clip</th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    `;
+
+    const tbody = modal.querySelector('tbody');
+    if (tbody) {
+      tbody.textContent = '';
+      list.forEach((shot, idx) => {
+        const coachSource = shot && !shot.pending
+          ? (shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || '')
+          : '';
+        const coachText = coachSource ? coachSource : SHOT_SUMMARY_TEXT.pending;
+
+        const tr = document.createElement('tr');
+        tr.setAttribute('data-shot-idx', idx + 1);
+        tr.innerHTML = `
+          <td class="num">${idx + 1}</td>
+          <td class="coach"></td>
+          <td class="clip"></td>`;
+        const coachCell = tr.querySelector('.coach');
+        if (coachCell) {
+          coachCell.textContent = coachText;
+          coachCell.title = coachSource || '';
+        }
+
+        const tdClip = tr.querySelector('.clip');
+        const href = getClipHrefForShot(idx + 1, shot);
+        if (tdClip) {
+          if (href) {
+            const a = document.createElement('a');
+            a.href = href; a.target = '_blank'; a.rel = 'noopener';
+            a.textContent = 'clip';
+            tdClip.appendChild(a);
+          } else {
+            const status = shot?.clip?.status;
+            tdClip.textContent = status === 'recording' ? 'recording…' : 'processing…';
+          }
+        }
+        tbody.appendChild(tr);
+      });
+    }
+
+    const closeBtn = modal.querySelector('#closeFull');
+    if (closeBtn) closeBtn.onclick = () => { modal.style.display = 'none'; };
+
+    const coachBtn = modal.querySelector('#coachSummaryBtn');
+    if (coachBtn && !coachBtn.__wired) {
+      coachBtn.addEventListener('click', (e) => { e.stopPropagation(); requestCoachSessionSummary(); });
+      coachBtn.__wired = true;
+    }
+
+    modal.style.display = 'block';
+    try { modal.style.zIndex = '10060'; } catch {}
+    return modal;
   }
 
   modal.innerHTML = `
@@ -1693,12 +1897,17 @@ function wireFullShotModalActions() {
     };
 
     if (shot.pending) {
-      ['.result', '.arc', '.entry', '.release', '.coach'].forEach((selector) => setCell(selector, SHOT_SUMMARY_TEXT.pending));
+      [
+        // '.result', 
+        // '.arc', 
+        // '.entry', 
+        // '.release', 
+        '.coach'].forEach((selector) => setCell(selector, SHOT_SUMMARY_TEXT.pending));
     } else {
-      setCell('.result', formatShotResult(shot, isBest));
-      setCell('.arc', formatArcValue(shot.arcHeight));
-      setCell('.entry', formatAngleValue(shot.entryAngle));
-      setCell('.release', formatAngleValue(shot.releaseAngle));
+      // setCell('.result', formatShotResult(shot, isBest));
+      // setCell('.arc', formatArcValue(shot.arcHeight));
+      // setCell('.entry', formatAngleValue(shot.entryAngle));
+      // setCell('.release', formatAngleValue(shot.releaseAngle));
       const coachCell = tr.querySelector('.coach');
       if (coachCell) {
         const coachCopy = shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || SHOT_SUMMARY_TEXT.pending;
@@ -1748,9 +1957,6 @@ function wireFullShotModalActions() {
     modal.__wiredCorrections = false;
   }, { once: true });
 }
-
-
-
 
 
 // display the shot status banner for the session
@@ -1907,6 +2113,11 @@ export function initHUDForVideo(videoEl) {
 
   // Auto end helper: stop camera, black out, force post pending shots, show summary
   async function autoEndSessionAndSummarize(){
+    if (window.__sessionContinue === true) {
+      try { window.__sessionCapped = false; } catch {}
+      try { window.__sessionEnded = false; } catch {}
+      return;
+    }
     try { if (window.__summaryShown === true) return; } catch {}
     try { window.__sessionCapped = true; } catch {}
     try { window.__sessionEnded = true; } catch {}
@@ -2276,6 +2487,8 @@ function ensureShotTableStyles(){
     #fullShotModal .hud-table col#cArc   { width:64px; }
     #fullShotModal .hud-table col#cEntry { width:72px; }
     #fullShotModal .hud-table col#cRel   { width:72px; }
+    #fullShotModal .hud-table col#cCoach { width:auto; }
+    #fullShotModal .hud-table col#cClip  { width:90px; text-align:center; }
     #fullShotModal .hud-table thead th{ position: sticky; top: 0; background: rgba(0,0,0,0.85); z-index: 2; backdrop-filter: blur(2px); }
     #fullShotModal .hud-table th,
     #fullShotModal .hud-table td{ padding:8px 10px; vertical-align:top; text-align:left;
@@ -2283,6 +2496,7 @@ function ensureShotTableStyles(){
     #fullShotModal .hud-table tbody tr:nth-child(even) td{ background:rgba(255,255,255,.03); }
     #fullShotModal td.num, #fullShotModal td.arc, #fullShotModal td.entry, #fullShotModal td.release { text-align:center; }
     #fullShotModal td.result{ text-align:center; }
+    #fullShotModal td.clip { text-align:center; }
     #fullShotModal td.coach{ white-space:normal; word-break:break-word; line-height:1.25; }
     #fullShotModal tbody tr[data-best="1"] td { background: rgba(255,215,0,0.10) !important; }
     #fullShotModal tbody tr[data-best="1"] td.result { font-weight: 800; }
@@ -2922,7 +3136,6 @@ window.addEventListener('shot:summary', () => {
     }
   } catch {}
 });
-
 
 
 
