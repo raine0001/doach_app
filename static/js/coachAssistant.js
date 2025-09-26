@@ -101,9 +101,12 @@ window.addEventListener('shot:feedback:request', (e) => {
     tts:          'openai',      // 'openai' or 'web'
     voice:        'alloy',
     personality:  'positive, concise, basketball fundamentals-first',
-    llmMode:      'primary',   // 'primary' | 'polish' | 'off'
+    llmMode:      'off',        // 'primary' | 'polish' | 'off'
+    poseOnly:     true,
   };
   window.DOACH = DOACH;
+  if (typeof DOACH.poseOnly === 'undefined') DOACH.poseOnly = true;
+  if (DOACH.poseOnly) DOACH.llmMode = 'off';
   try { if (typeof window.DOACH_ONLY_REALTIME === 'undefined') window.DOACH_ONLY_REALTIME = true; } catch {}
   console.log('[Doach] coachAssistant loaded');
 
@@ -662,12 +665,13 @@ window.addEventListener('shot:feedback:request', (e) => {
         if (!sid || !finalLine) return;
         const idxFinal = Number(inferShotIdx0());
         if (!Number.isFinite(idxFinal)) return;
+        const poseOnly = DOACH?.poseOnly === true;
         const payload = {
           sid,
           shot_idx: idxFinal,
           text: finalLine,
-          model: window.DOACH?.model || 'coach-final',
-          provider: window.DOACH?.llmMode || 'final'
+          model: poseOnly ? 'pose-summary' : (window.DOACH?.model || 'coach-final'),
+          provider: poseOnly ? 'pose' : (window.DOACH?.llmMode || 'final')
         };
         queueMicrotask(() => {
           try {
@@ -1589,9 +1593,7 @@ window.addEventListener('shot:feedback:request', (e) => {
 
   //LLM helper
   function composeLLMPrompt(shot, golden, draftLine, made, personality) {
-    // Tight JSON context = less waffle, more specific coaching
     const ctx = {
-      made,
       metrics: {
         arcHeight: Math.round(shot.arcHeight || 0),
         entryAngle: shot.entryAngle ?? null,
@@ -1602,22 +1604,21 @@ window.addEventListener('shot:feedback:request', (e) => {
       lastCategories: (window.__coachCueHistory || []).slice(-3)
     };
 
-    // Hard constraints make responses consistent + short
     return `
   You are Doach, a ${personality} shooting coach.
 
-  Write a single coaching line (1–2 short sentences) for this shot.
-  - If "made" is true: start with quick positive reinforcement, then one specific cue.
-  - If "made" is false: empathetic opener, then one specific fix.
-  - Use the numeric metrics when helpful (round to whole numbers).
-  - Prefer the HIGHEST-SEVERITY issue (feet width/angle/stagger, power/knees, torso lean, release height/arm vertical, wrist finish, entry angle/arc).
-  - Avoid repeating the same category as any of: ${JSON.stringify(ctx.lastCategories)} if a similarly severe alternative exists.
-  - Keep it concrete: e.g., "add ~2–3 inches", "taller arm line", "release above shoulder", "add arc", etc.
+  Write a single pose-focused coaching cue (one short sentence).
+  - Base the cue entirely on pose metrics; ignore shot outcome or make/miss info.
+  - Highlight the most important mechanical adjustment.
+  - Use whole-number metrics when helpful.
+  - Avoid repeating any of: ${JSON.stringify(ctx.lastCategories)} if another issue is equally important.
+  - Keep it concrete and actionable.
   - No emojis. No bullet points.
 
   Context (JSON):
   ${JSON.stringify(ctx)}
-  ${draftLine ? `\nDraft to improve (optional): "${draftLine}"` : ''}
+  ${draftLine ? `
+Draft to refine (optional): '${draftLine}'` : ''}
 
   Return only the final coaching line.
   `.trim();
@@ -1635,10 +1636,19 @@ window.addEventListener('shot:feedback:request', (e) => {
     const mem    = window.DOACH_MEM.get();
     const golden = mem.golden;
     const made   = !!shot.made;
+    const poseOnly = DOACH.poseOnly === true;
 
-    // Local draft (always compute; used for polish or fallback)
-    let localText = made ? craftCoachingLine(shot, golden) : craftMissLine(shot, golden);
-    localText = avoidRepeat(localText, shot, golden, made);
+    // Local draft (pose-only taps pose heuristics; otherwise keep legacy flow)
+    let localText;
+    if (poseOnly) {
+      const snap = shot.poseSnapshot || null;
+      const poseLine = snap && typeof composePoseFeedback === 'function' ? composePoseFeedback(snap) : null;
+      const issues = window.summarizePoseIssues?.(shot, golden) || [];
+      const fallbackPose = issues.filter(Boolean).slice(0, 3).join(' ');
+      localText = poseLine || fallbackPose || 'Pose metrics captured.';
+    } else {
+      localText = made ? craftCoachingLine(shot, golden) : craftMissLine(shot, golden);
+      localText = avoidRepeat(localText, shot, golden, made);
     }
 
     // Choose how to use the LLM
@@ -1665,12 +1675,13 @@ window.addEventListener('shot:feedback:request', (e) => {
         if (!sid || !finalLine) return;
         const idxFinal = Number(inferShotIdx0());
         if (!Number.isFinite(idxFinal)) return;
+        const poseOnly = DOACH?.poseOnly === true;
         const payload = {
           sid,
           shot_idx: idxFinal,
           text: finalLine,
-          model: window.DOACH?.model || 'coach-final',
-          provider: window.DOACH?.llmMode || 'final'
+          model: poseOnly ? 'pose-summary' : (window.DOACH?.model || 'coach-final'),
+          provider: poseOnly ? 'pose' : (window.DOACH?.llmMode || 'final')
         };
         queueMicrotask(() => {
           try {
@@ -1685,7 +1696,7 @@ window.addEventListener('shot:feedback:request', (e) => {
       } catch {}
     };
 
-    if (mode !== 'off' && window.DOACH?.chatEndpoint) {
+    if (!poseOnly && mode !== 'off' && window.DOACH?.chatEndpoint) {
       try {
         const prompt = composeLLMPrompt(
           shot, golden,
@@ -1759,7 +1770,7 @@ window.addEventListener('shot:feedback:request', (e) => {
       <strong>🤖 Coach Feedback</strong><br>
       <div style="font-size: 18px; margin-bottom: 6px;">
         🏅 Shot Rating: <strong style="color:${rating >= 80 ? 'lightgreen' : rating >= 50 ? 'orange' : 'red'}">${rating}/100</strong>
-        ${golden ? `<span style="opacity:.7;">(vs ${golden.count} made)</span>` : ``}
+        ${golden ? `<span style="opacity:.7;">(vs ${golden.count} reference shots)</span>` : ``}
       </div>
       ${tips.length ? `<ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`
                     : `<span style="color:lightgreen;">✅ No major pose issues detected.</span>`}
@@ -1913,15 +1924,10 @@ window.addEventListener('shot:feedback:request', (e) => {
       const ga = g.entryAngle ? Math.round(g.entryAngle) : 50;
       return say(`Entry angle ${ea}°. ${Math.abs(ea-ga)<=5?'On target.': ea<ga?'A bit flat — add arc.':'A tad steep — soften the arc.'}`);
     }
-    if (/accur|make|made/.test(q)) {
-      const mem = window.DOACH_MEM?.get?.() || {};
-      const made = (mem.made||[]).length;
-      const miss = (mem.miss||[]).length;
-      const total = made + miss;
-      const acc = total ? Math.round(100*made/total) : 0;
-      return say(`Session accuracy ${acc}% (${made}/${total}).`);
+    if (/(accur|make|made)/.test(q)) {
+      return say('Pose-only mode: accuracy tracking is disabled. Focus on repeating the pose cues.');
     }
-    return "Ask about feet, release, power, arc, or accuracy.";
+    return "Ask about feet, release, power, arc, or pose adjustments.";
   }
 
   // --- private state for this module (distinct names)
@@ -1983,7 +1989,7 @@ window.addEventListener('shot:feedback:request', (e) => {
     try { hfRec.start(); }
     catch { hfStarting = false; setTimeout(() => { try { hfRec.start(); hfStarting = true; } catch {} }, 400); }
 
-    doachSpeak?.("Listening. Ask about feet, release, power, arc, or accuracy.");
+    doachSpeak?.("Listening. Ask about feet, release, power, arc, or pose adjustments.");
   }
 
   function stop() {
@@ -2132,16 +2138,14 @@ window.addEventListener('shot:summary', (e) => {
       const entry = L.entryAngle ?? '–';
       parts.push(`Arc ~${arc}px, entry ${entry}°. Target mid-40s to low-50s.`);
     }
-    // Makes / accuracy
+    // Accuracy (pose-only mode disabled tracking)
     if (/(make|accuracy|percent|score)/.test(n)) {
-      const recent = window.DOACH_MEM?.recent?.(10) || [];
-      const made = recent.filter(s => s.made).length;
-      parts.push(`Last ${recent.length} shots: ${made} made (${recent.length ? Math.round(made / recent.length * 100) : 0}%).`);
+      parts.push('Pose-only mode: accuracy tracking is disabled. Focus on repeating the pose cues.');
     }
 
     if (!parts.length) {
       const issues = window.summarizePoseIssues?.(L) || [];
-      parts.push(`Last shot was ${L.made ? 'made' : 'missed'} — arc ${Math.round(L.arcHeight || 0)}px, entry ${L.entryAngle ?? '–'}°, release ${L.releaseAngle ?? '–'}°.`);
+      parts.push(`Pose snapshot: arc ${Math.round(L.arcHeight || 0)}px, entry ${L.entryAngle ?? '–'}°, release ${L.releaseAngle ?? '–'}°. Focus on smooth, tall mechanics.`);
       if (issues[0]) parts.push(issues[0]);
     }
     return parts.join(' ');

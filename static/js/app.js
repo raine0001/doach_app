@@ -51,6 +51,17 @@ window.REL_COOLDOWN_MS     = 2000;                                // 2s between 
 window.USE_MICROCLIP       = window.USE_MICROCLIP ?? true;        // save clips per shot
 window.__MICROCLIP_MS      = window.__MICROCLIP_MS ?? 3000;       // clip length = 3 seconds
 
+// Make the UI stop trying to “own” ending logic when app.js already does
+window.SESSION_MANAGER_OWNS_ENDING = true;   // prevents several auto-end callers in video_ui
+window.DEMO_MINIMAL_TABLE = true;            // force skinny table version
+
+
+// demo: kill verdict UI/speech paths from shot_logger
+if (window.__POSE_ONLY_MODE === true) {
+  window.showShotBanner = () => {};  // no ✅/❌ banner
+  window.doachOnShot    = () => {};  // no extra coach line from shot_logger
+}
+
 // ---------- Shot store (frontend record for HUD/table) ----------
 (function installShotStore(){
   if (window.__shotStoreInstalled) return; window.__shotStoreInstalled = true;
@@ -257,54 +268,99 @@ async function poseDetectSerial(){
 window.poseDetectSerial = poseDetectSerial;
 
  // ---------- Microclip (3s) ----------
- (function installMicroclip(){
-   if (window.__mcInstalled) return; window.__mcInstalled=true;
-   const supported = (typeof MediaRecorder === 'function') &&
-                     (MediaRecorder.isTypeSupported?.('video/webm;codecs=vp9') ||
-                      MediaRecorder.isTypeSupported?.('video/webm;codecs=vp8') ||
-                      MediaRecorder.isTypeSupported?.('video/webm'));
-   window.__CLIPS_AVAILABLE = !!supported;
+(function installMicroclip(){
+  if (window.__mcInstalled) return; window.__mcInstalled = true;
 
-   async function startMicroClip(shotId, releaseFrame=null){
-     if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) { window.updateShot(shotId,{clip:{status:'disabled'}}); return; }
-     const v=document.getElementById('videoPlayer');
-    // Prefer camera stream when present; fall back to element capture for file playback
+  const supported =
+    typeof MediaRecorder === 'function' &&
+    (MediaRecorder.isTypeSupported?.('video/webm;codecs=vp9') ||
+     MediaRecorder.isTypeSupported?.('video/webm;codecs=vp8') ||
+     MediaRecorder.isTypeSupported?.('video/webm'));
+  window.__CLIPS_AVAILABLE = !!supported;
+
+  // tiny helper: emit a minimal summary for this shot
+  function emitMicroclipSummary(shotId) {
+    try {
+      const sum = { shotId, made: null, arcHeight: null, entryAngle: null, releaseAngle: null };
+      window.recordShotSummary?.(sum);
+      window.dispatchEvent(new CustomEvent('shot:summary', { detail: sum }));
+    } catch {}
+  }
+
+  async function startMicroClip(shotId, releaseFrame = null){
+    if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) {
+      window.updateShot?.(shotId, { clip:{ status:'disabled' } });
+      emitMicroclipSummary(shotId);
+      return;
+    }
+
+    const v = document.getElementById('videoPlayer');
+    // Prefer camera stream; fall back to element capture for file playback
     const stream = v?.srcObject || v?.captureStream?.();
-     if (!stream) { window.updateShot(shotId,{clip:{status:'no-stream'}}); return; }
-    if (!stream.getVideoTracks?.().length) { window.updateShot(shotId,{clip:{status:'no-video-track'}}); return; }
+    if (!stream) {
+      window.updateShot?.(shotId, { clip:{ status:'no-stream' } });
+      emitMicroclipSummary(shotId);
+      return;
+    }
+    if (!stream.getVideoTracks?.().length) {
+      window.updateShot?.(shotId, { clip:{ status:'no-video-track' } });
+      emitMicroclipSummary(shotId);
+      return;
+    }
 
-     const mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(m=>{ try{return MediaRecorder.isTypeSupported(m);}catch{return false;}});
-    const rec = new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
-     const chunks=[];
-     rec.ondataavailable = e => { if (e?.data?.size) chunks.push(e.data); };
-    rec.onerror = e => { try { window.updateShot(shotId,{clip:{status:'error', reason:String(e?.error||'recorder')}}); } catch {} };
+    const mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm']
+      .find(m => { try { return MediaRecorder.isTypeSupported(m); } catch { return false; }});
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
 
-     rec.onstop = async () => {
-      if (!chunks.length) { window.updateShot(shotId,{clip:{status:'error',reason:'empty'}}); return; }
-       const blob = new Blob(chunks, { type: mime || 'video/webm' });
-       const fd = new FormData();
-       fd.append('sessionId', window.__SESSION_ID || (`sess_${Date.now()}`));
-       fd.append('shotId', String(shotId));
-      // Most backends are happiest with (Blob, filename) instead of constructing File()
+    const chunks = [];
+    rec.ondataavailable = e => { if (e?.data?.size) chunks.push(e.data); };
+    rec.onerror = e => {
+      try { window.updateShot?.(shotId, { clip:{ status:'error', reason:String(e?.error || 'recorder') } }); } catch {}
+    };
+
+    rec.onstop = async () => {
+      if (!chunks.length) {
+        window.updateShot?.(shotId, { clip:{ status:'error', reason:'empty' } });
+        emitMicroclipSummary(shotId);
+        return;
+      }
+      const blob = new Blob(chunks, { type: mime || 'video/webm' });
+      const fd = new FormData();
+      fd.append('sessionId', window.__SESSION_ID || (`sess_${Date.now()}`));
+      fd.append('shotId', String(shotId));
+      // Most backends are happier with (Blob, filename) than constructing File()
       fd.append('clip', blob, `shot-${shotId}.webm`);
-       try{
-         const r = await fetch('/api/microclip/upload', { method:'POST', body: fd });
-         const j = await r.json().catch(()=>null);
-         window.updateShot(shotId, { clip:{ status:r.ok?'saved':'error', path:j?.path||null, bytes:blob.size, frame:releaseFrame, ms:window.__MICROCLIP_MS }});
-       }catch(err){ window.updateShot(shotId, { clip:{status:'error', reason:String(err)} }); }
-     };
-    // If element capture is used for file playback, make sure frames are flowing
-    try { if (v.paused) await v.play(); } catch {}
+
+      try {
+        const r  = await fetch('/api/microclip/upload', { method:'POST', body: fd });
+        const j  = await r.json().catch(() => null);
+        window.updateShot?.(shotId, {
+          clip:{ status: r.ok ? 'saved' : 'error', path: j?.path || null, bytes: blob.size, frame: releaseFrame, ms: window.__MICROCLIP_MS }
+        });
+      } catch (err) {
+        window.updateShot?.(shotId, { clip:{ status:'error', reason:String(err) } });
+      } finally {
+        // Always emit a summary so the pipeline can end at cap and show the table
+        emitMicroclipSummary(shotId);
+      }
+    };
+
+    // Ensure frames flow for element capture
+    try { if (v?.paused) await v.play(); } catch {}
+
     rec.start();
-    // Ask for a final chunk right before stopping so we don’t drop the tail
-    const ms = Number(window.__MICROCLIP_MS)||3000;
-    setTimeout(()=>{ try { rec.requestData?.(); } catch {} }, Math.max(0, ms - 50));
-    setTimeout(()=>{ try{rec.state!=='inactive'&&rec.stop();}catch{} }, ms);
-     window.updateShot(shotId, { clip:{status:'recording', ms:Number(window.__MICROCLIP_MS)||3000, frame:releaseFrame } });
-     window.__sessionTotals.attempts++;
-   }
-   window.__startMicroClip = startMicroClip;
- })();
+    const ms = Number(window.__MICROCLIP_MS) || 3000;
+    // Flush last chunk and stop
+    setTimeout(() => { try { rec.requestData?.(); } catch {} }, Math.max(0, ms - 50));
+    setTimeout(() => { try { rec.state !== 'inactive' && rec.stop(); } catch {} }, ms);
+
+    window.updateShot?.(shotId, { clip:{ status:'recording', ms, frame: releaseFrame } });
+    window.__sessionTotals && (window.__sessionTotals.attempts = (window.__sessionTotals.attempts || 0) + 1);
+  }
+
+  window.__startMicroClip = startMicroClip;
+})();
+
 
 
 // ---------- Helper: proxFromHoop via shot_arc.module if present ----------
@@ -394,62 +450,100 @@ function shotArcProx(hoopBox){
     return true;
   };
 
-  // on summary: persist + end-or-rearm (wait for DB save before showing table)
-  window.addEventListener('shot:summary', (e) => {
-    // TS: allow our custom globals without errors
-    const W = /** @type {any} */ (window);
+  // on summary: persist + end-or-rearm (wait for DB save, then dim + show table at cap)
+window.addEventListener('shot:summary', (e) => {
+  const W = /** @type {any} */ (window);
 
-    clearTimeout(W.__releaseFallbackTimer);
-    try { W.__releaseEventSent = false; } catch {}
+  clearTimeout(W.__releaseFallbackTimer);
+  try { W.__releaseEventSent = false; } catch {}
 
-    const d   = e?.detail || {};
-    const sid = W.__SESSION_ID || null;
-    const idx = W.__SHOT_ID || null;
+  const d   = e?.detail || {};
+  const sid = W.__SESSION_ID || null;
+  const idx = W.__SHOT_ID || null;
 
-    // Persist last shot before UI changes
-    let savePromise = Promise.resolve();
-    if (sid && idx != null) {
-      savePromise = (async () => {
-        try {
-          await fetch(`/api/sessions/${sid}/shot`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              idx,
-              t: Date.now(),
-              made: d.made ?? null,
-              arcHeight: d.arcHeight ?? null,
-              entryAngle: d.entryAngle ?? null,
-              releaseAngle: d.releaseAngle ?? null
-            })
-          });
-        } catch {}
-      })();
-    }
+  // 1) Persist the last shot BEFORE any UI change
+  let savePromise = Promise.resolve();
+  if (sid && idx != null) {
+    savePromise = (async () => {
+      try {
+        await fetch(`/api/sessions/${sid}/shot`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            idx,
+            t: Date.now(),
+            made: d.made ?? null,
+            arcHeight: d.arcHeight ?? null,
+            entryAngle: d.entryAngle ?? null,
+            releaseAngle: d.releaseAngle ?? null
+          })
+        });
+      } catch {}
+    })();
+  }
 
-    // Cap check
-    const taken = (W.getShotRecords?.() || []).length;
-    const capFn = (typeof getSessionCap === 'function')
-      ? getSessionCap
-      : (() => Number(W.SESSION_SIZE || 3));
-    const cap = Number(capFn());
+  // 2) Cap check (also honor session manager flag if it set one)
+  const taken  = (W.getShotRecords?.() || []).length;
+  const capFn  = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(W.SESSION_SIZE || 3));
+  const cap    = Number(capFn());
+  const capped = (Number.isFinite(cap) && taken >= cap) || W.__sessionCapped === true;
 
-    if (Number.isFinite(cap) && taken >= cap) {
-      // End + open minimal table AFTER save completes
-      savePromise.finally(() => {
-        try { W.endSessionAtCap?.(); } catch {}
-        try { W.autoEndSessionAndSummarize?.(); } catch {}
-        setTimeout(() => { try { W.renderFullShotTable?.(); } catch {} }, 120);
-      });
-    } else {
-      // Not at cap: disarm and re-arm shortly
-      W.__shotTrackingArmed = false;
-      scheduleArmWhenReady(300);
-    }
-  });
+  if (capped) {
+    // 3) After save: stop, clean HUD status, dim, open table (no long coach wrap)
+    savePromise.finally(() => {
+      try { W.endSessionAtCap?.(); } catch {}
 
+      // kill the "Waiting…" pill if present
+      try { W.setCoachStatus?.('done'); } catch {}
+      try {
+        const badge = document.getElementById('coachStatusBadge') || document.querySelector('.hud-status');
+        if (badge) badge.style.display = 'none';
+      } catch {}
+
+      // dim background a bit
+      try {
+        const vp = document.getElementById('videoPlayer'); if (vp) vp.style.filter = 'brightness(0.25)';
+        const ov = document.getElementById('overlay');     if (ov) ov.style.opacity = '0.85';
+      } catch {}
+
+      // small settle so last clip path/coach text lands, then open minimal table
+      setTimeout(() => { try { showDemoTable(); } catch {} }, 120);
+    });
+  } else {
+    // Not at cap: disarm and re-arm soon
+    W.__shotTrackingArmed = false;
+    scheduleArmWhenReady(300);
+  }
+});
+
+// Optional belt-and-suspenders if your session manager fires an end event
+window.addEventListener('hud:end-session', () => {
+  const W = /** @type {any} */ (window);
+  try { W.setCoachStatus?.('done'); } catch {}
+  setTimeout(() => { try { showDemoTable(); } catch {} }, 80);
+});
 
 })();
+
+
+
+// Helper: show the minimal summary table using whatever name your UI exported
+function showDemoTable() {
+  const W = /** @type {any} */ (window);
+  const fns = [
+    'renderFullShotTable',      // our preferred minimal table
+    'renderShotTable',
+    'openShotSummaryTable',
+    'openSummaryTable'
+  ];
+  for (const fn of fns) {
+    if (typeof W[fn] === 'function') {
+      try { return W[fn](); } catch {}
+    }
+  }
+  // Last-resort event for video_ui to catch
+  try { W.dispatchEvent(new CustomEvent('doach:open-summary-table')); } catch {}
+}
 
 // ---------- Arming ----------
 function scheduleArmWhenReady(delay=200){

@@ -19,6 +19,8 @@ const ICON_CAMERA_SWITCH = '\u{1F503}'; // camera switch arrows
 const SYMBOL_INFINITY = '\u{221E}';     // infinity symbol
 
 const OBSERVER_EVENT_LIMIT = 120;
+
+
 function safeClone(value) {
   try { return JSON.parse(JSON.stringify(value)); } catch { return value == null ? null : { value }; }
 }
@@ -177,8 +179,8 @@ function mountConnectionBanner() {
     }
 
     const origin = (location && location.origin) ? location.origin : (location.protocol + '//' + location.host);
-    const sid = (window.__SESSION_ID || 'â€”');
-    const debugHref = (sid && sid !== 'â€”') ? `/admin/session/${sid}/debug` : null;
+    const sid = (window.__SESSION_ID || '-');
+    const debugHref = (sid && sid !== '-') ? `/admin/session/${sid}/debug` : null;
     const healthHref = '/healthz';
     const html = [
       `<span style="opacity:.9">Connected:</span> <span style="font-weight:700">${origin}</span>`,
@@ -203,7 +205,7 @@ function mountConnectionBanner() {
     box.__lastSid = sid;
     box.__upd = setInterval(() => {
       try {
-        const curSid = (window.__SESSION_ID || 'â€”');
+        const curSid = (window.__SESSION_ID || '-');
         if (curSid !== box.__lastSid) {
           box.__lastSid = curSid;
           const val = box.querySelector('#connSidVal');
@@ -219,7 +221,7 @@ function mountConnectionBanner() {
 }
 window.mountConnectionBanner = mountConnectionBanner;
 
-// Slow_arbiter.js â€” make sure it reads SLOW_RATE
+// Slow_arbiter.js - make sure it reads SLOW_RATE
 (function installSlowArbiter(){  
   // Fully opt-in only. Unless explicitly enabled, do nothing.
   if (window.ENABLE_SLOWMO !== true) { return; }
@@ -360,7 +362,7 @@ window.mountConnectionBanner = mountConnectionBanner;
     requestAnimationFrame(tick);
   })();
 
-  // media hygiene â€” any manual interaction cancels slow-mo
+  // media hygiene - any manual interaction cancels slow-mo
   const v = getV();
   if (v) {
     v.addEventListener('play',    () => setRate(1, 'play'));
@@ -679,20 +681,20 @@ export function createPlaybackControls(video) {
   };
 
   // ---- buttons ----
-  const bHome  = mk('âª','Go to start',    () => { cancelFramePlay(); video.pause(); video.currentTime = 0; });
-  const bPause = mk('â¸','Pause',          () => { cancelFramePlay(); video.pause(); });
-  const bPlay  = mk('â–¶','Play', () => {
+  const bHome  = mk('Go to start',    () => { cancelFramePlay(); video.pause(); video.currentTime = 0; });
+  const bPause = mk('Pause',          () => { cancelFramePlay(); video.pause(); });
+  const bPlay  = mk('Play', () => {
     if (!requireHoopOrPrompt()) return;
     cancelFramePlay(); try { video.playbackRate = 1.0; } catch {}
     video.play();
   });
-  const bAuto  = mk('ðŸŽž','Auto-step', () => {
+  const bAuto  = mk('Auto-step', () => {
     if (!requireHoopOrPrompt()) return;
     if (__framePlay.on) { cancelFramePlay(); bAuto.dataset.active='0'; }
     else { startFramePlay(video, Number(window.FRAMEbyFRAME_RATE) || 1.0); video.pause(); bAuto.dataset.active='1'; }
   });
-  const bNext  = mk('â­','Next',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,+1); });
-  const bPrev  = mk('â®','Prev',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,-1); });
+  const bNext  = mk('Next',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,+1); });
+  const bPrev  = mk('Prev',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,-1); });
 
   [bPrev,bHome,bPlay,bPause,bAuto,bNext].forEach(b => container.appendChild(b));
   root.appendChild(container);
@@ -1761,6 +1763,68 @@ function renderFullShotTable() {
   return modal;
 }
 
+
+// Make renderFullShotTable() globally callable
+try {
+  if (typeof window.renderFullShotTable !== 'function') {
+    window.renderFullShotTable = renderFullShotTable;
+  }
+  // Let app.js (or anyone) ask for the table by event
+  window.addEventListener('doach:open-summary-table', () => {
+    try { renderFullShotTable(); } catch {}
+  });
+} catch {}
+
+
+//  --- Clean up lingering "waiting for coach" status on session end or cap reached ---
+(function installCoachStatusCleaner(){
+  if (window.__CoachStatusCleaner) return; window.__CoachStatusCleaner = true;
+
+  function clearWaiting() {
+    try { window.setCoachStatus?.('done'); } catch {}
+    try {
+      const badge = document.getElementById('coachStatusBadge') || document.querySelector('.hud-status');
+      if (badge) badge.style.display = 'none';
+    } catch {}
+  }
+
+  window.addEventListener('hud:end-session', clearWaiting);
+  window.addEventListener('shots:update', () => {
+    // If cap reached, don’t keep showing “waiting…”
+    try {
+      const taken = (window.getShotRecords?.() || []).length;
+      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 3));
+      const cap   = Number(capFn());
+      if (Number.isFinite(cap) && taken >= cap) clearWaiting();
+    } catch {}
+  });
+})();
+
+// --- Auto-open the full shot table when session cap is reached ---
+(function installCapOpenTable(){
+  if (window.__CapOpenTable) return; window.__CapOpenTable = true;
+
+  function maybeOpenTable() {
+    try {
+      const taken = (window.getShotRecords?.() || []).length;
+      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 3));
+      const cap   = Number(capFn());
+      if (!Number.isFinite(cap) || taken < cap) return;
+
+      // If a table is already present, do nothing
+      if (document.getElementById('fullShotModal')) return;
+
+      // Open the skinny table; small delay so the last row/clip path land
+      setTimeout(() => { try { window.renderFullShotTable?.(); } catch {} }, 120);
+    } catch {}
+  }
+
+  window.addEventListener('hud:end-session', maybeOpenTable);
+  window.addEventListener('shot:summary',   maybeOpenTable);
+})();
+
+
+
 function exportSessionCSV(list){
   const pickCoach = (s) => s.doach || s.coach || s.coachText || s.feedback || s.summary || s.text || '';
   const rows = [['#','result','arc','entry','release','doach_summary']];
@@ -2111,117 +2175,62 @@ export function initHUDForVideo(videoEl) {
     window.addEventListener('shot:summary', () => { stopAndUpload(); });
   })();
 
-  // Auto end helper: stop camera, black out, force post pending shots, show summary
-  async function autoEndSessionAndSummarize(){
+  // Auto end helper (DEMO): dim + open minimal table, nothing extra
+  async function autoEndSessionAndSummarize() {
+    // Respect “continue” sessions
     if (window.__sessionContinue === true) {
-      try { window.__sessionCapped = false; } catch {}
-      try { window.__sessionEnded = false; } catch {}
+      try { window.__sessionCapped = false; window.__sessionEnded = false; } catch {}
       return;
     }
-    try { if (window.__summaryShown === true) return; } catch {}
-    try { window.__sessionCapped = true; } catch {}
-    try { window.__sessionEnded = true; } catch {}
-    try { window.__SESSION_ACTIVE = false; } catch {}
-    try { window.__shotTrackingArmed = false; } catch {}
-    try { window.stopPoseReleaseSampler?.(); } catch {}
-    try { window.stopCamera?.(); } catch {}
+    // One-and-done
+    if (window.__summaryShown === true) return;
+    window.__summaryShown = true;
+
+    // Lock session state
     try {
-      // Black overlay (dim, but keep table readable)
-      const root = ensureHudRoot();
-      let blk = document.getElementById('endBlackout');
-      if (!blk) {
-        blk = document.createElement('div'); blk.id='endBlackout';
-        Object.assign(blk.style,{position:'absolute',inset:'0',background:'#000',opacity:'0.65',zIndex:10040, pointerEvents:'none'});
-        root.appendChild(blk);
-      } else { blk.style.display='block'; blk.style.opacity='0.65'; blk.style.zIndex = '10040'; blk.style.pointerEvents='none'; }
+      window.__sessionCapped = true;
+      window.__sessionEnded = true;
+      window.__SESSION_ACTIVE = false;
+      window.__shotTrackingArmed = false;
+      window.stopPoseReleaseSampler?.();
     } catch {}
 
-    // Ensure the shot list has placeholders so the table reflects session cap
+    // Dim the camera background (keep table readable)
     try {
-      const cap = getSessionCap();
-      console.log('[finalize] ensuring placeholders up to cap', { cap });
-      const curLen = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
-      const scoreCnt = Number(window.__SCORE_SHOT_COUNT || 0);
-      const logCnt = Array.isArray(window.shotLog) ? window.shotLog.length : 0;
-      // If the session was capped, force placeholders up to cap; otherwise use the max observed count
-      const target = (window.__sessionCapped === true) ? cap : Math.max(curLen, scoreCnt, logCnt);
-      const list = (window.__shotList ||= []);
-      for (let i = list.length; i < target; i++) list.push({ pending: true });
-      try { if (window.SESS_FINAL_TRACE === true) console.log('[end:placeholders]', { curLen, scoreCnt, logCnt, target, cap, capped: !!window.__sessionCapped }); } catch {}
-    } catch {}
-    // Force-post any pending summaries as placeholders
-    try {
-      const list = (window.__shotList||[]);
-      for (let i=0;i<list.length;i++) {
-        const s = list[i] || {};
-        await postShotUpsert(i, { made: (s.made ?? null), entryAngle: s.entryAngle ?? null, releaseAngle: s.releaseAngle ?? null, arcHeight: s.arcHeight ?? null });
+      const root = ensureHudRoot?.() || document.body;
+      let blk = document.getElementById('endBlackout');
+      if (!blk) {
+        blk = document.createElement('div'); blk.id = 'endBlackout';
+        Object.assign(blk.style, {
+          position:'absolute', inset:'0', background:'#000', opacity:'0.65',
+          zIndex:10040, pointerEvents:'none'
+        });
+        root.appendChild(blk);
+      } else {
+        blk.style.display='block'; blk.style.opacity='0.65'; blk.style.zIndex='10040'; blk.style.pointerEvents='none';
       }
     } catch {}
-    // End server session to update totals
-    try { const sid = window.__SESSION_ID; if (sid) await fetch(`/api/sessions/${sid}/end`, { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}', credentials:'include' }).catch(()=>{}); } catch {}
-    // Show summary table (ensure above blackout)
+
+    // Kill any “Waiting…” badge
+    try { window.setCoachStatus?.('done'); } catch {}
     try {
-      const modal = renderFullShotTable();
-      try { if (modal && modal.style) modal.style.zIndex = '10060'; } catch {}
-      wireFullShotModalActions();
-      // Populate per-shot Doach Summary lines immediately from pose snapshots
-      try {
-        const list = window.__shotList || [];
-        const golden = window.DOACH_MEM?.get?.()?.golden || null;
-        for (let i = 0; i < list.length; i++) {
-          const s = list[i]; if (!s) continue;
-          if (!s.doach) {
-            const issues = (typeof window.summarizePoseIssues === 'function')
-              ? (window.summarizePoseIssues(s, golden) || [])
-              : [];
-            const line = issues.length ? issues.slice(0,2).join(' ') : 'Solid form. Hold your followâ€‘through.';
-            s.doach = line;
-            try {
-              const cell = modal.querySelector(`tbody tr[data-shot-idx="${i+1}"] td.coach`) || null;
-              if (cell) { cell.textContent = line; cell.title = line; }
-            } catch {}
-          }
-        }
-      } catch {}
-      // Hydrate AI feedback from server and poll briefly for late arrivals
-      try {
-        let status = await hydrateAiFeedbackFromServer();
-        let polls = 0;
-        const iv = setInterval(async () => {
-          try {
-            status = await hydrateAiFeedbackFromServer();
-            if (status && status.done) { clearInterval(iv); }
-          } catch {}
-          if (++polls >= 50 || window.__sessionContinue) { clearInterval(iv); }
-        }, 1200);
-      } catch {}
-      // Background reconcile: if DB is missing rows, force-upsert from local list after a short delay
-      try {
-        setTimeout(async () => {
-          try {
-            const sid = (window.__SESSION_ID || null);
-            if (!sid) return;
-            const list = (window.__shotList || []);
-            const dbg = await fetch(`/admin/session/${sid}/debug`, { credentials:'include' }).then(r=>r.ok?r.json():null).catch(()=>null);
-            const have = new Set(Array.isArray(dbg?.shotsDB) ? dbg.shotsDB.map(r=>Number(r.idx)).filter(Number.isFinite) : []);
-            try { if (window.SESS_FINAL_TRACE === true) console.log('[finalize:reconcile]', { have: Array.from(have).sort((a,b)=>a-b), need: list.length }); } catch {}
-            for (let i = 0; i < list.length; i++) {
-              if (!have.has(i)) {
-                const s = list[i] || {};
-                const patch = { made: (typeof s.made==='boolean'?s.made:null), arcHeight: s.arcHeight ?? null, entryAngle: s.entryAngle ?? null, releaseAngle: s.releaseAngle ?? null };
-                await postShotUpsert(i, patch, { force: true });
-              }
-            }
-          } catch {}
-        }, 1500);
-      } catch {}
-      try { window.__summaryShown = true; } catch {}
+      const badge = document.getElementById('coachStatusBadge') || document.querySelector('.hud-status');
+      if (badge) badge.style.display = 'none';
     } catch {}
-    // Announce + trigger coach session summary
-    try { window.coachSpeak?.("That's your tenth shot, let's review the session."); } catch {}
+
+    // Open the skinny table (Shot # / Coach Pose Assessment / Clip)
+    try {
+      // Ensure the minimal renderer is used
+      window.DEMO_MINIMAL_TABLE = true;
+      const modal = renderFullShotTable?.();
+      if (modal?.style) modal.style.zIndex = '10060';
+      if (typeof wireFullShotModalActions === 'function') wireFullShotModalActions();
+    } catch {}
+
+    // Announce end to HUD listeners but DO NOT trigger long coach summary
     try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
-    try { window.__summaryShown = true; } catch {}
   }
+
 
   // Expose end-session routine globally for guards and other modules
   try { if (typeof window.autoEndSessionAndSummarize !== 'function') window.autoEndSessionAndSummarize = autoEndSessionAndSummarize; } catch {}
@@ -2247,6 +2256,7 @@ window.addEventListener('hoop:locked', () => {
 });
 }
 
+
 // ---- Server AI feedback + metrics hydrator ----
 // Returns status { present, haveMade, need, done }
 async function hydrateAiFeedbackFromServer() {
@@ -2258,7 +2268,7 @@ async function hydrateAiFeedbackFromServer() {
       // Inform the user in the review line
       try {
         const line = modal?.querySelector('#sessReviewLine') || null;
-        if (line) { line.style.display = 'block'; line.textContent = 'Server offline â€” showing local summaries only.'; }
+        if (line) { line.style.display = 'block'; line.textContent = 'Server offline - showing local summaries only.'; }
       } catch {}
       const list = (window.__shotList || window.shotLog || []);
       const need = Math.min(list.length, getSessionCap());
@@ -2580,7 +2590,7 @@ function openShotReplay(shot) {
   box.innerHTML = '';
   const header = document.createElement('div');
   header.style.display = 'flex'; header.style.alignItems = 'center'; header.style.justifyContent='space-between'; header.style.margin='4px 6px 6px';
-  header.innerHTML = `<div style="font-weight:700">Replay â€” Shot ${shot.__idx || '?'} ${shot.made ? 'âœ…' : 'âŒ'}</div>
+  header.innerHTML = `<div style="font-weight:700">Replay - Shot ${shot.__idx || '?'} ${shot.made ? 'âœ…' : 'âŒ'}</div>
     <div>
       <button id="replayToggle" class="vc-btn" style="margin-right:6px">â¯</button>
       <button id="replayClose" class="vc-btn">âœ–</button>
