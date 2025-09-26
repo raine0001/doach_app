@@ -38,16 +38,18 @@ import {
 import { setReleaseKnobs } from './release_gate.js';
 
 // ---------- Minimal knobs ----------
-window.SESSION_SIZE        = window.SESSION_SIZE ?? 3;     // cap shots per session
+window.SESSION_SIZE        = window.SESSION_SIZE ?? 3;            // cap shots per session
 window.REL_COOLDOWN_MS     = window.REL_COOLDOWN_MS ?? 1200;
 window.POSE_STREAK_NEED    = window.POSE_STREAK_NEED ?? 2;
-window.__POSE_ONLY_MODE    = true;                        // allow fallback summaries
+window.__POSE_ONLY_MODE    = true;                                // allow fallback summaries
 window.USE_MICROCLIP       = true;
-window.__RELEASE_ONLY      = true;                        // demo: relaxed pose gate
-  try { setReleaseKnobs({ scoreThresh: 0.7, streakNeed: 1, hudScoreTrip: 0.5 }); } catch {}
-window.REL_COOLDOWN_MS     = 2000;                        // 2s between shots
-window.USE_MICROCLIP       = window.USE_MICROCLIP ?? true; // save 3s clip per shot
-window.__MICROCLIP_MS      = window.__MICROCLIP_MS ?? 3000;
+window.__RELEASE_ONLY      = true;                                // demo: relaxed pose gate
+
+try { setReleaseKnobs({ scoreThresh: 0.7, streakNeed: 1, hudScoreTrip: 0.5 }); } catch {}
+
+window.REL_COOLDOWN_MS     = 2000;                                // 2s between shots
+window.USE_MICROCLIP       = window.USE_MICROCLIP ?? true;        // save clips per shot
+window.__MICROCLIP_MS      = window.__MICROCLIP_MS ?? 3000;       // clip length = 3 seconds
 
 // ---------- Shot store (frontend record for HUD/table) ----------
 (function installShotStore(){
@@ -254,45 +256,56 @@ async function poseDetectSerial(){
 }
 window.poseDetectSerial = poseDetectSerial;
 
-// ---------- Microclip (3s) ----------
-(function installMicroclip(){
-  if (window.__mcInstalled) return; window.__mcInstalled=true;
-  const supported = (typeof MediaRecorder === 'function') &&
-                    (MediaRecorder.isTypeSupported?.('video/webm;codecs=vp9') ||
-                     MediaRecorder.isTypeSupported?.('video/webm;codecs=vp8') ||
-                     MediaRecorder.isTypeSupported?.('video/webm'));
-  window.__CLIPS_AVAILABLE = !!supported;
+ // ---------- Microclip (3s) ----------
+ (function installMicroclip(){
+   if (window.__mcInstalled) return; window.__mcInstalled=true;
+   const supported = (typeof MediaRecorder === 'function') &&
+                     (MediaRecorder.isTypeSupported?.('video/webm;codecs=vp9') ||
+                      MediaRecorder.isTypeSupported?.('video/webm;codecs=vp8') ||
+                      MediaRecorder.isTypeSupported?.('video/webm'));
+   window.__CLIPS_AVAILABLE = !!supported;
 
-  async function startMicroClip(shotId, releaseFrame=null){
-    if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) { window.updateShot(shotId,{clip:{status:'disabled'}}); return; }
-    const v=document.getElementById('videoPlayer');
-    const stream = v?.captureStream?.() || v?.srcObject;
-    if (!stream) { window.updateShot(shotId,{clip:{status:'no-stream'}}); return; }
+   async function startMicroClip(shotId, releaseFrame=null){
+     if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) { window.updateShot(shotId,{clip:{status:'disabled'}}); return; }
+     const v=document.getElementById('videoPlayer');
+    // Prefer camera stream when present; fall back to element capture for file playback
+    const stream = v?.srcObject || v?.captureStream?.();
+     if (!stream) { window.updateShot(shotId,{clip:{status:'no-stream'}}); return; }
+    if (!stream.getVideoTracks?.().length) { window.updateShot(shotId,{clip:{status:'no-video-track'}}); return; }
 
-    const mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(m=>{ try{return MediaRecorder.isTypeSupported(m);}catch{return false;}});
+     const mime = ['video/webm;codecs=vp9','video/webm;codecs=vp8','video/webm'].find(m=>{ try{return MediaRecorder.isTypeSupported(m);}catch{return false;}});
     const rec = new MediaRecorder(stream, mime?{mimeType:mime}:undefined);
-    const chunks=[];
-    rec.ondataavailable = e => { if (e?.data?.size) chunks.push(e.data); };
-    rec.onstop = async () => {
+     const chunks=[];
+     rec.ondataavailable = e => { if (e?.data?.size) chunks.push(e.data); };
+    rec.onerror = e => { try { window.updateShot(shotId,{clip:{status:'error', reason:String(e?.error||'recorder')}}); } catch {} };
+
+     rec.onstop = async () => {
       if (!chunks.length) { window.updateShot(shotId,{clip:{status:'error',reason:'empty'}}); return; }
-      const blob = new Blob(chunks, { type: mime || 'video/webm' });
-      const fd = new FormData();
-      fd.append('sessionId', window.__SESSION_ID || (`sess_${Date.now()}`));
-      fd.append('shotId', String(shotId));
-      fd.append('clip', new File([blob], `shot-${shotId}.webm`, { type: blob.type }));
-      try{
-        const r = await fetch('/api/microclip/upload', { method:'POST', body: fd });
-        const j = await r.json().catch(()=>null);
-        window.updateShot(shotId, { clip:{ status:r.ok?'saved':'error', path:j?.path||null, bytes:blob.size, frame:releaseFrame, ms:window.__MICROCLIP_MS }});
-      }catch(err){ window.updateShot(shotId, { clip:{status:'error', reason:String(err)} }); }
-    };
+       const blob = new Blob(chunks, { type: mime || 'video/webm' });
+       const fd = new FormData();
+       fd.append('sessionId', window.__SESSION_ID || (`sess_${Date.now()}`));
+       fd.append('shotId', String(shotId));
+      // Most backends are happiest with (Blob, filename) instead of constructing File()
+      fd.append('clip', blob, `shot-${shotId}.webm`);
+       try{
+         const r = await fetch('/api/microclip/upload', { method:'POST', body: fd });
+         const j = await r.json().catch(()=>null);
+         window.updateShot(shotId, { clip:{ status:r.ok?'saved':'error', path:j?.path||null, bytes:blob.size, frame:releaseFrame, ms:window.__MICROCLIP_MS }});
+       }catch(err){ window.updateShot(shotId, { clip:{status:'error', reason:String(err)} }); }
+     };
+    // If element capture is used for file playback, make sure frames are flowing
+    try { if (v.paused) await v.play(); } catch {}
     rec.start();
-    setTimeout(()=>{ try{rec.state!=='inactive'&&rec.stop();}catch{} }, Number(window.__MICROCLIP_MS)||3000);
-    window.updateShot(shotId, { clip:{status:'recording', ms:Number(window.__MICROCLIP_MS)||3000, frame:releaseFrame } });
-    window.__sessionTotals.attempts++;
-  }
-  window.__startMicroClip = startMicroClip;
-})();
+    // Ask for a final chunk right before stopping so we don’t drop the tail
+    const ms = Number(window.__MICROCLIP_MS)||3000;
+    setTimeout(()=>{ try { rec.requestData?.(); } catch {} }, Math.max(0, ms - 50));
+    setTimeout(()=>{ try{rec.state!=='inactive'&&rec.stop();}catch{} }, ms);
+     window.updateShot(shotId, { clip:{status:'recording', ms:Number(window.__MICROCLIP_MS)||3000, frame:releaseFrame } });
+     window.__sessionTotals.attempts++;
+   }
+   window.__startMicroClip = startMicroClip;
+ })();
+
 
 // ---------- Helper: proxFromHoop via shot_arc.module if present ----------
 function shotArcProx(hoopBox){
@@ -381,40 +394,61 @@ function shotArcProx(hoopBox){
     return true;
   };
 
-  // on summary: persist + re-arm
-  window.addEventListener('shot:summary', e => {
-    clearTimeout(window.__releaseFallbackTimer);
-    try { window.__releaseEventSent = false; } catch {}
-    const d=e?.detail||{};
-    const sid=window.__SESSION_ID||null;
-    const idx=window.__SHOT_ID||null;
-    if (sid && idx!=null) {
-      (async ()=>{
-        try{
-          await fetch(`/api/sessions/${sid}/shot`,{
-            method:'POST', headers:{'Content-Type':'application/json'},
+  // on summary: persist + end-or-rearm (wait for DB save before showing table)
+  window.addEventListener('shot:summary', (e) => {
+    // TS: allow our custom globals without errors
+    const W = /** @type {any} */ (window);
+
+    clearTimeout(W.__releaseFallbackTimer);
+    try { W.__releaseEventSent = false; } catch {}
+
+    const d   = e?.detail || {};
+    const sid = W.__SESSION_ID || null;
+    const idx = W.__SHOT_ID || null;
+
+    // Persist last shot before UI changes
+    let savePromise = Promise.resolve();
+    if (sid && idx != null) {
+      savePromise = (async () => {
+        try {
+          await fetch(`/api/sessions/${sid}/shot`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              idx, t: Date.now(),
-              made:d.made??null, arcHeight:d.arcHeight??null, entryAngle:d.entryAngle??null, releaseAngle:d.releaseAngle??null
+              idx,
+              t: Date.now(),
+              made: d.made ?? null,
+              arcHeight: d.arcHeight ?? null,
+              entryAngle: d.entryAngle ?? null,
+              releaseAngle: d.releaseAngle ?? null
             })
           });
-        }catch{}
+        } catch {}
       })();
     }
-    window.__shotTrackingArmed = false;
-    scheduleArmWhenReady(300);
 
-    // Cap check: end and show table at 3
-    const taken = (window.getShotRecords?.() || []).length;
-    const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 3));
-    const cap   = Number(capFn());
+    // Cap check
+    const taken = (W.getShotRecords?.() || []).length;
+    const capFn = (typeof getSessionCap === 'function')
+      ? getSessionCap
+      : (() => Number(W.SESSION_SIZE || 3));
+    const cap = Number(capFn());
+
     if (Number.isFinite(cap) && taken >= cap) {
-      try { window.endSessionAtCap?.(); } catch {}
-      try { window.autoEndSessionAndSummarize?.(); } catch {}
-      try { window.renderFullShotTable?.(); } catch {}
+      // End + open minimal table AFTER save completes
+      savePromise.finally(() => {
+        try { W.endSessionAtCap?.(); } catch {}
+        try { W.autoEndSessionAndSummarize?.(); } catch {}
+        setTimeout(() => { try { W.renderFullShotTable?.(); } catch {} }, 120);
+      });
+    } else {
+      // Not at cap: disarm and re-arm shortly
+      W.__shotTrackingArmed = false;
+      scheduleArmWhenReady(300);
     }
-
   });
+
+
 })();
 
 // ---------- Arming ----------
