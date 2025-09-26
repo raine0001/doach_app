@@ -905,6 +905,11 @@ export async function startCamera(){
 
   if (v.srcObject) { try{ v.srcObject.getTracks().forEach(t=>t.stop()); }catch{} }
 
+  v.muted = true;                      // autoplay policy
+  v.setAttribute('muted','');
+  v.setAttribute('playsinline','');    // iOS/WebKit won't go fullscreen
+  v.autoplay = true;                   // hint
+
   let stream;
   try{
     stream = await navigator.mediaDevices.getUserMedia({ video:{ width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30}}, audio:false });

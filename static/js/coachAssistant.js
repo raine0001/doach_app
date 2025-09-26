@@ -1,15 +1,15 @@
-// /static/coachAssistant.js
+﻿// /static/coachAssistant.js
 
 // --- Coach voice state (persisted) ---
 window.__coachMuted = JSON.parse(localStorage.getItem('doach_muted') || 'false');
 
-// HUD mute button → toggle voice
+// HUD mute button -> toggle voice
 window.addEventListener('hud:mute-toggle', (e) => {
   const muted = !!(e?.detail?.muted);
   window.__coachMuted = muted;
   try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
 
-  // 🔁 Keep doachPrefs in sync so window.coachSpeak() won't skip
+  // ðŸ” Keep doachPrefs in sync so window.coachSpeak() won't skip
   try {
     const get = window.doachGetPrefs?.() || {};
     const next = { ...get, audioOn: !muted };
@@ -45,14 +45,29 @@ try {
 let __lastSpokenKey = null;
 
 function formatCoachLine(s) {
-  // keep it short & actionable
-  const verdict = s.made ? 'Make.' : 'Miss.';
-  const arc  = Number.isFinite(s.arcHeight) ? ` Arc ${Math.round(s.arcHeight)}.` : '';
-  const entry= Number.isFinite(s.entryAngle) ? ` Entry ${s.entryAngle}°.` : '';
-  const why  = (!s.made && s.missReason) ? ` ${s.missReason}.` : '';
-  return s.made
-    ? `Nice shot! ${verdict}${entry}${arc}`
-    : `Shot missed.${why}${entry}${arc}`;
+  try {
+    const golden = window.DOACH_MEM?.get?.()?.golden || null;
+    const issues = (typeof window.summarizePoseIssues === 'function')
+      ? (window.summarizePoseIssues(s, golden) || [])
+      : [];
+    const cues = [];
+    const poseLine = (s?.poseSnapshot && typeof composePoseFeedback === 'function')
+      ? composePoseFeedback(s.poseSnapshot)
+      : '';
+    if (poseLine && typeof poseLine === 'string') cues.push(poseLine.trim());
+    for (const note of issues) {
+      const txt = typeof note === 'string' ? note.trim() : '';
+      if (txt && !cues.includes(txt)) cues.push(txt);
+    }
+    const body = cues.slice(0, 2).join(' ') || 'Pose metrics captured. Focus on repeatable release mechanics.';
+    const shotNumber = Number.isFinite(s?.idx) ? Number(s.idx)
+      : Number.isFinite(s?.__idx) ? Number(s.__idx)
+      : (Array.isArray(window.shotLog) ? window.shotLog.length : null);
+    return (Number.isFinite(shotNumber) && shotNumber > 0) ? `Shot ${shotNumber}, ${body}` : body;
+  } catch (err) {
+    console.warn('[coachAssistant:formatPoseLine]', err);
+    return 'Pose metrics captured.';
+  }
 }
 
 // --- Speak once per shot summary ---
@@ -166,7 +181,7 @@ window.addEventListener('shot:feedback:request', (e) => {
         const hipW = dist(pts.hpL, pts.hpR) || 1;
         const stanceW = dist(pts.anL, pts.anR);
         const stanceRatio = (stanceW && hipW) ? (stanceW/hipW) : null;
-        const torsoLean = (shC&&hipC)? (angDeg(v(hipC, shC)) - 90) : null; // 0=upright; +/− tilt
+        const torsoLean = (shC&&hipC)? (angDeg(v(hipC, shC)) - 90) : null; // 0=upright; +/âˆ’ tilt
         const elbowAngleR = angleAt(pts.shr||pts.shR, pts.elR, pts.wrR);
         const elbowAngleL = angleAt(pts.shL, pts.elL, pts.wrL);
         const elbowExt = Math.max(elbowAngleR||0, elbowAngleL||0);
@@ -305,13 +320,13 @@ window.addEventListener('shot:feedback:request', (e) => {
     };
   }
 
-  // Wire quick pose tips on release — gated off by default. Enable with window.PREF_LIVE_TIPS=true
+  // Wire quick pose tips on release - gated off by default. Enable with window.PREF_LIVE_TIPS=true
   function __getPoseSnapshot(){
     try { defineExtractPoseSnapshotOnce(); } catch {}
     try {
       // Prefer extractPoseSnapshot(keypoints, hoopBox)
       if (typeof window.extractPoseSnapshot === 'function') {
-        // Choose best-available keypoints: current → last good → last in history
+        // Choose best-available keypoints: current -> last good -> last in history
         let kps = null;
         try {
           if (Array.isArray(window.playerState?.keypoints) && window.playerState.keypoints.length >= 33) kps = window.playerState.keypoints;
@@ -395,7 +410,7 @@ window.addEventListener('shot:feedback:request', (e) => {
   function __ensureSummarizer(){
     try {
       if (typeof window.summarizePoseIssues === 'function') return;
-      // Rich, rule-based summarizer. Returns top 2–3 concise notes.
+      // Rich, rule-based summarizer. Returns top 2-3 concise notes.
       window.summarizePoseIssues = ({ poseSnapshot, golden }) => {
         const S = poseSnapshot || {};
         const out = [];
@@ -410,7 +425,7 @@ window.addEventListener('shot:feedback:request', (e) => {
         };
         // Targets (golden) with sensible defaults
         const G = Object.assign({
-          stanceRatio: 1.2,           // feet ~hip to 1.4× hip
+          stanceRatio: 1.2,           // feet ~hip to 1.4Ã— hip
           elbowExtDeg: 150,           // near straight
           armVerticalityDeg: 10,      // near vertical
           torsoLeanAbsMax: 12,
@@ -418,9 +433,9 @@ window.addEventListener('shot:feedback:request', (e) => {
         }, golden||{});
         // Stance width
         if (Number.isFinite(S.stanceRatio)) {
-          if (S.stanceRatio < 0.9) out.push('Wider base; feet shoulder‑width apart.');
+          if (S.stanceRatio < 0.9) out.push('Wider base; feet shoulderâ€‘width apart.');
           else if (S.stanceRatio > 1.6) out.push('Narrow your stance slightly.');
-          else if (prevAvg.stanceRatio && S.stanceRatio > prevAvg.stanceRatio + 0.25) out.push('Good base — more stable than last shots.');
+          else if (prevAvg.stanceRatio && S.stanceRatio > prevAvg.stanceRatio + 0.25) out.push('Good base - more stable than last shots.');
         }
         // Feet to hoop alignment
         if (Number.isFinite(S.feetToHoopDeg) && S.feetToHoopDeg > G.feetToHoopDegMax)
@@ -435,16 +450,16 @@ window.addEventListener('shot:feedback:request', (e) => {
           out.push('Release above your shoulder line.');
         // Torso lean
         if (Number.isFinite(S.torsoLeanAngle) && Math.abs(S.torsoLeanAngle) > G.torsoLeanAbsMax)
-          out.push('Stay taller — limit torso lean.');
+          out.push('Stay taller - limit torso lean.');
         // Foot lift
         if (Number.isFinite(S.footLiftPx)) {
-          if (S.footLiftPx > 8) out.push('Nice pop — light foot lift on release.');
+          if (S.footLiftPx > 8) out.push('Nice pop - light foot lift on release.');
           else out.push('Add a little upward pop as you snap.');
         }
         // Frame offset (contextual guidance only when large)
         if (Number.isFinite(S.frameOffsetX) && Math.abs(S.frameOffsetX) > 80)
           out.push('Center your body line with the rim before you shoot.');
-        // Only keep top 2–3 to stay concise
+        // Only keep top 2-3 to stay concise
         return out.slice(0, 3);
       };
     } catch {}
@@ -479,8 +494,8 @@ window.addEventListener('shot:feedback:request', (e) => {
       // Frequency gating: speak on some shots, not all
       try {
         const cnt = Number(window.__HUD_SHOT_COUNT || window.shotTaken || 0);
-        const everyN = Number(window.COACH_TIP_EVERY_N || 0);  // e.g., 2 → every other shot
-        const prob   = Number(window.COACH_TIP_PROB || 0);     // e.g., 0.4 → 40% chance
+        const everyN = Number(window.COACH_TIP_EVERY_N || 0);  // e.g., 2 -> every other shot
+        const prob   = Number(window.COACH_TIP_PROB || 0);     // e.g., 0.4 -> 40% chance
         let allow = true;
         if (!(everyN > 1)) { try { allow = Math.random() < (Number(window.COACH_TIP_PROB || 0.5)); } catch {} }
         if (everyN > 1) allow = (cnt % everyN) === 1;          // speak on 1, 1+N, ...
@@ -548,8 +563,8 @@ window.addEventListener('shot:feedback:request', (e) => {
                         if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:tip:minimal]', { via, snap: mSnap, gate: t });
                         speakWithAIOrRules(mSnap, via);
                       } else {
-                        // No measurable cues at all — log + prompt only (no static speech)
-                        const msg = 'Release pose not detected clearly — keep your upper body and shooting arm fully in frame, and check lighting.';
+                        // No measurable cues at all - log + prompt only (no static speech)
+                        const msg = 'Release pose not detected clearly - keep your upper body and shooting arm fully in frame, and check lighting.';
                         window.showPromptMessage?.(msg, 3000);
                         try { if (window.DOACH_RELEASE_TRACE === true) console.warn('[coach:tip:no-snapshot]'); } catch {}
                       }
@@ -630,7 +645,7 @@ window.addEventListener('shot:feedback:request', (e) => {
       const n = getShotNumber();
       return (Number.isFinite(n) && n > 0) ? `Shot ${n}, ${text}` : String(text||'');
     }
-    // Always use AI for pose assessment. If unavailable, show connection error — no rule fallback.
+    // Always use AI for pose assessment. If unavailable, show connection error - no rule fallback.
     function postDisconnected(){
       try {
         const msg = 'Doach is not connected. Please restart the session and check your internet connection.';
@@ -731,7 +746,7 @@ window.addEventListener('shot:feedback:request', (e) => {
         } catch {}
         return;
       }
-      // No text returned → treat as unavailable; fall back to local
+      // No text returned -> treat as unavailable; fall back to local
       try {
         const local = composePoseFeedback(snap);
         if (local) {
@@ -764,7 +779,7 @@ window.addEventListener('shot:feedback:request', (e) => {
     }
   }
 
-  // ---- Fine-grained feedback composer (snapshot → specific line) ----
+  // ---- Fine-grained feedback composer (snapshot -> specific line) ----
   function composePoseFeedback(snap){
     try {
       const prev = Array.isArray(window.__poseHistory) && window.__poseHistory.length
@@ -802,7 +817,7 @@ window.addEventListener('shot:feedback:request', (e) => {
       // Dy upward drive (target >= REL_DY_MIN)
       if (Number.isFinite(t.dy)) push(Math.max(0, (Number(window.REL_DY_MIN||18) - t.dy)), ['Drive up more through the release.']);
       if (t.wristUpTrend === false) push(6, ['Snap up through the ball, not forward.']);
-      // Stance width (target ~1.0–1.5)
+      // Stance width (target ~1.0-1.5)
       if (Number.isFinite(snap.stanceRatio)) {
         const dist = (snap.stanceRatio < 1.0) ? (1.0 - snap.stanceRatio) : (snap.stanceRatio - 1.5);
         if (dist > 0) {
@@ -811,7 +826,7 @@ window.addEventListener('shot:feedback:request', (e) => {
       }
       // Feet to rim (target <=22 deg)
       if (Number.isFinite(snap.feetToHoopDeg)) push(Math.max(0, snap.feetToHoopDeg - 22), ['Square your feet a bit more to the rim.']);
-      // Feet angle diff (target small, <=8–10 deg)
+      // Feet angle diff (target small, <=8-10 deg)
       if (Number.isFinite(snap.feetAngleDiff)) push(Math.max(0, snap.feetAngleDiff - 10), ['Make your toes more parallel.']);
       // Foot stagger (target small)
       if (Number.isFinite(snap.footStagger)) push(Math.max(0, snap.footStagger - 6), ['Even out your stance front-to-back.']);
@@ -820,9 +835,9 @@ window.addEventListener('shot:feedback:request', (e) => {
       // Knee flex (target around 28+ deg flex for power)
       if (Number.isFinite(snap.kneeFlex)) push(Math.max(0, 28 - snap.kneeFlex), ['Add a bit more knee bend on your lift.']);
       // Fingers down (index below wrist)
-      if (snap.fingersDown === false) push(8, ['Snap the wrist — fingers down on the finish.']);
-      // Follow-through hold (target >= 2–3 frames)
-      if (Number.isFinite(snap.followThroughHoldFrames) && snap.followThroughHoldFrames < 2) push(6, ['Hold the follow‑through for a brief pause.']);
+      if (snap.fingersDown === false) push(8, ['Snap the wrist - fingers down on the finish.']);
+      // Follow-through hold (target >= 2-3 frames)
+      if (Number.isFinite(snap.followThroughHoldFrames) && snap.followThroughHoldFrames < 2) push(6, ['Hold the followâ€‘through for a brief pause.']);
       // Head direction (target <= 25 deg off hoop)
       if (Number.isFinite(snap.headToHoopDeg) && snap.headToHoopDeg > 25) push(5, ['Eyes on the rim through the release.']);
       // Torso lean (target <=12 abs)
@@ -842,7 +857,7 @@ window.addEventListener('shot:feedback:request', (e) => {
         return choose([
           'Raise the release above your shoulder line.',
           'Get the wrist above the shoulder at release.',
-          'Finish higher — above the shoulder line.'
+          'Finish higher - above the shoulder line.'
         ]);
 
       if (Number.isFinite(snap.elbowExtDeg) && snap.elbowExtDeg < 145)
@@ -855,14 +870,14 @@ window.addEventListener('shot:feedback:request', (e) => {
       if (Number.isFinite(snap.armVerticalityDeg) && snap.armVerticalityDeg > 14)
         return choose([
           'Get the forearm more vertical at release.',
-          'Reach up — taller arm on the finish.',
+          'Reach up - taller arm on the finish.',
           'Lift the forearm closer to vertical.'
         ]);
 
       if (Number.isFinite(snap.stanceRatio) && (snap.stanceRatio < 0.95 || snap.stanceRatio > 1.55))
         return snap.stanceRatio < 1 ?
-          choose(['Wider base; feet shoulder‑width apart.','Open your stance to shoulder‑width.']) :
-          choose(['Narrow your stance slightly for balance.','Bring feet in a touch toward shoulder‑width.']);
+          choose(['Wider base; feet shoulderâ€‘width apart.','Open your stance to shoulderâ€‘width.']) :
+          choose(['Narrow your stance slightly for balance.','Bring feet in a touch toward shoulderâ€‘width.']);
 
       if (Number.isFinite(snap.feetToHoopDeg) && snap.feetToHoopDeg > 24)
         return choose(['Square your feet a bit more to the rim.','Point your toes a touch more toward the basket.']);
@@ -879,15 +894,15 @@ window.addEventListener('shot:feedback:request', (e) => {
       // Positive reinforcement when improvements vs average are detected
       try {
         if (Number.isFinite(pAvg.armVertDeg) && Number.isFinite(snap.armVerticalityDeg) && snap.armVerticalityDeg < pAvg.armVertDeg - 4)
-          return choose(['Better arm verticality — keep that feel.','Nice tall finish — keep reaching up.']);
+          return choose(['Better arm verticality - keep that feel.','Nice tall finish - keep reaching up.']);
         if (Number.isFinite(pAvg.elbowExtDeg) && Number.isFinite(snap.elbowExtDeg) && snap.elbowExtDeg > pAvg.elbowExtDeg + 4)
-          return choose(['Stronger extension — good snap.','Great elbow finish — keep extending.']);
+          return choose(['Stronger extension - good snap.','Great elbow finish - keep extending.']);
         if (Number.isFinite(pAvg.stanceRatio) && Number.isFinite(snap.stanceRatio) && Math.abs(snap.stanceRatio-1.2) < Math.abs(pAvg.stanceRatio-1.2) - 0.1)
-          return choose(['More stable base — nice adjustment.','Better stance width — keep that.']);
+          return choose(['More stable base - nice adjustment.','Better stance width - keep that.']);
       } catch {}
 
-      return choose(['Good release — hold your follow‑through.','Solid form — keep that finish high.']);
-    } catch { return 'Good release — hold your follow‑through.'; }
+      return choose(['Good release - hold your followâ€‘through.','Solid form - keep that finish high.']);
+    } catch { return 'Good release - hold your followâ€‘through.'; }
   }
 
   // ---- Developer helper: inspect live pose + last snapshot/gate ----
@@ -939,17 +954,17 @@ window.addEventListener('shot:feedback:request', (e) => {
         });
         root.appendChild(box);
       }
-      const f = (n, d=1)=> (Number.isFinite(n)? n.toFixed(d): '—');
-      const yesNo = (v)=> (v===true?'Yes':(v===false?'No':'—'));
+      const f = (n, d=1)=> (Number.isFinite(n)? n.toFixed(d): '-');
+      const yesNo = (v)=> (v===true?'Yes':(v===false?'No':'-'));
       const html = `
         <div style="font-weight:700; margin-bottom:6px;">Release Pose</div>
         <div style="display:grid; grid-template-columns:auto auto; gap:4px 10px; text-align:left;">
-          <div>Arm verticality</div><div>${f(snap.armVerticalityDeg,0)}°</div>
-          <div>Elbow extension</div><div>${f(snap.elbowExtDeg,0)}°</div>
+          <div>Arm verticality</div><div>${f(snap.armVerticalityDeg,0)}Â°</div>
+          <div>Elbow extension</div><div>${f(snap.elbowExtDeg,0)}Â°</div>
           <div>Release > shoulder</div><div>${yesNo(snap.releaseAboveShoulder)}</div>
-          <div>Stance ratio</div><div>${f(snap.stanceRatio,2)}×</div>
-          <div>Feet → rim</div><div>${f(snap.feetToHoopDeg,0)}°</div>
-          <div>Torso lean</div><div>${f(snap.torsoLeanAngle,0)}°</div>
+          <div>Stance ratio</div><div>${f(snap.stanceRatio,2)}Ã—</div>
+          <div>Feet -> rim</div><div>${f(snap.feetToHoopDeg,0)}Â°</div>
+          <div>Torso lean</div><div>${f(snap.torsoLeanAngle,0)}Â°</div>
           <div>Foot pop</div><div>${f(snap.footLiftPx,0)} px</div>
           <div>Center offset X</div><div>${f(snap.frameOffsetX,0)} px</div>
         </div>`;
@@ -1005,7 +1020,7 @@ window.addEventListener('shot:feedback:request', (e) => {
     }
   } catch {}
 
-  // ---- Session end summary (aggregate pose notes + per‑metric trends) ----
+  // ---- Session end summary (aggregate pose notes + perâ€‘metric trends) ----
   function summarizeSessionPose() {
     try {
       const list = Array.isArray(window.__shotList) ? window.__shotList : [];
@@ -1047,31 +1062,31 @@ window.addEventListener('shot:feedback:request', (e) => {
       const trends = [];
       // Improvements: knee flex (higher better)
       if (Number.isFinite(E.kneeFlex) && Number.isFinite(L.kneeFlex) && (L.kneeFlex - E.kneeFlex) >= 6)
-        trends.push(`Knee flex improved late (${round(L.kneeFlex)}° vs ${round(E.kneeFlex)}°).`);
+        trends.push(`Knee flex improved late (${round(L.kneeFlex)}Â° vs ${round(E.kneeFlex)}Â°).`);
       // Arm verticality (lower is better)
       if (Number.isFinite(E.armVert) && Number.isFinite(L.armVert) && (E.armVert - L.armVert) >= 4)
-        trends.push(`Arm finished taller (vertical) late (${round(L.armVert)}° vs ${round(E.armVert)}°).`);
+        trends.push(`Arm finished taller (vertical) late (${round(L.armVert)}Â° vs ${round(E.armVert)}Â°).`);
       // Elbow extension (higher better)
       if (Number.isFinite(E.elbow) && Number.isFinite(L.elbow) && (L.elbow - E.elbow) >= 5)
-        trends.push(`Elbow extension strengthened (${round(L.elbow)}° vs ${round(E.elbow)}°).`);
-      // Toes → hoop (lower better)
+        trends.push(`Elbow extension strengthened (${round(L.elbow)}Â° vs ${round(E.elbow)}Â°).`);
+      // Toes -> hoop (lower better)
       if (Number.isFinite(E.toes) && Number.isFinite(L.toes) && (E.toes - L.toes) >= 5)
-        trends.push(`Feet more square to rim (${round(L.toes)}° vs ${round(E.toes)}°).`);
+        trends.push(`Feet more square to rim (${round(L.toes)}Â° vs ${round(E.toes)}Â°).`);
       // Feet angle diff (lower better)
       if (Number.isFinite(E.feetDiff) && Number.isFinite(L.feetDiff) && (E.feetDiff - L.feetDiff) >= 5)
-        trends.push(`Toe angles more parallel (${round(L.feetDiff)}° vs ${round(E.feetDiff)}°).`);
+        trends.push(`Toe angles more parallel (${round(L.feetDiff)}Â° vs ${round(E.feetDiff)}Â°).`);
       // Foot stagger (lower better)
       if (Number.isFinite(E.stagger) && Number.isFinite(L.stagger) && (E.stagger - L.stagger) >= 6)
         trends.push(`Stance stagger reduced (${round(L.stagger)}px vs ${round(E.stagger)}px).`);
       // Follow-through hold (higher better)
       if (Number.isFinite(E.hold) && Number.isFinite(L.hold) && (L.hold - E.hold) >= 1)
-        trends.push(`Better follow‑through hold late (${round(L.hold)} vs ${round(E.hold)} frames).`);
+        trends.push(`Better followâ€‘through hold late (${round(L.hold)} vs ${round(E.hold)} frames).`);
       // Head on rim (lower better)
       if (Number.isFinite(E.head) && Number.isFinite(L.head) && (E.head - L.head) >= 6)
-        trends.push(`Gaze held on rim more consistently (${round(L.head)}° vs ${round(E.head)}°).`);
+        trends.push(`Gaze held on rim more consistently (${round(L.head)}Â° vs ${round(E.head)}Â°).`);
       // Fingers down (higher % better)
       if (Number.isFinite(E.fingers) && Number.isFinite(L.fingers) && (L.fingers - E.fingers) >= 20)
-        trends.push(`Wrist snap improved — fingers down more often (${round(L.fingers)}% vs ${round(E.fingers)}%).`);
+        trends.push(`Wrist snap improved - fingers down more often (${round(L.fingers)}% vs ${round(E.fingers)}%).`);
 
       // Most limiting metrics vs simple targets across whole session
       const all = snaps.map(x=>x.snap);
@@ -1083,14 +1098,14 @@ window.addEventListener('shot:feedback:request', (e) => {
       const knee    = A('kneeFlex');               if (Number.isFinite(knee)    && knee  < 28)  lim.push('Add a bit more knee bend for power.');
       const toes    = A('toeToHoopDeg');           if (Number.isFinite(toes)    && toes  > 22)  lim.push('Square toes a touch more to the rim.');
       const fDiff   = A('feetAngleDiff');          if (Number.isFinite(fDiff)   && fDiff > 12)  lim.push('Make your toes more parallel.');
-      const holdF   = A('followThroughHoldFrames');if (Number.isFinite(holdF)   && holdF < 2)   lim.push('Hold the follow‑through briefly.');
+      const holdF   = A('followThroughHoldFrames');if (Number.isFinite(holdF)   && holdF < 2)   lim.push('Hold the followâ€‘through briefly.');
       const gaze    = A('headToHoopDeg');          if (Number.isFinite(gaze)    && gaze  > 25)  lim.push('Keep eyes on the rim through release.');
       const above   = P('releaseAboveShoulder');   if (Number.isFinite(above)   && above < 70)  lim.push('Release above the shoulder line.');
 
       const lines = [];
       if (trends.length) lines.push('Improvements: ' + trends.slice(0,3).join(' '));
       if (lim.length)    lines.push('Focus next: ' + lim.slice(0,3).join(' '));
-      if (!lines.length) lines.push('Form was consistent — keep the rhythm and balance.');
+      if (!lines.length) lines.push('Form was consistent - keep the rhythm and balance.');
 
       // Shot-specific groups (enumerate where key cues were off)
       try {
@@ -1112,16 +1127,16 @@ window.addEventListener('shot:feedback:request', (e) => {
           const gazeOff     = pickIdx(p => Number.isFinite(p.headToHoopDeg) && p.headToHoopDeg > 25);
 
           const bullets = [];
-          if (followShort.length) bullets.push(`Follow‑through short on shots ${fmt(followShort)} — hold 1–2 beats longer.`);
-          if (feetNarrow.length)  bullets.push(`Base narrow on shots ${fmt(feetNarrow)} — widen a touch.`);
-          if (feetWide.length)    bullets.push(`Base wide on shots ${fmt(feetWide)} — narrow slightly.`);
-          if (toesOff.length)     bullets.push(`Toes off-square on shots ${fmt(toesOff)} — align feet to rim.`);
-          if (staggerHi.length)   bullets.push(`Feet staggered on shots ${fmt(staggerHi)} — level your base.`);
-          if (armLow.length)      bullets.push(`Arm line low on shots ${fmt(armLow)} — finish taller.`);
-          if (elbowLow.length)    bullets.push(`Elbow not fully extended on shots ${fmt(elbowLow)} — lock out at finish.`);
-          if (belowSh.length)     bullets.push(`Release below shoulder on shots ${fmt(belowSh)} — finish above shoulder.`);
-          if (kneeLow.length)     bullets.push(`Limited knee bend on shots ${fmt(kneeLow)} — add a bit more power.`);
-          if (gazeOff.length)     bullets.push(`Gaze off rim on shots ${fmt(gazeOff)} — keep eyes on rim through release.`);
+          if (followShort.length) bullets.push(`Followâ€‘through short on shots ${fmt(followShort)} - hold 1-2 beats longer.`);
+          if (feetNarrow.length)  bullets.push(`Base narrow on shots ${fmt(feetNarrow)} - widen a touch.`);
+          if (feetWide.length)    bullets.push(`Base wide on shots ${fmt(feetWide)} - narrow slightly.`);
+          if (toesOff.length)     bullets.push(`Toes off-square on shots ${fmt(toesOff)} - align feet to rim.`);
+          if (staggerHi.length)   bullets.push(`Feet staggered on shots ${fmt(staggerHi)} - level your base.`);
+          if (armLow.length)      bullets.push(`Arm line low on shots ${fmt(armLow)} - finish taller.`);
+          if (elbowLow.length)    bullets.push(`Elbow not fully extended on shots ${fmt(elbowLow)} - lock out at finish.`);
+          if (belowSh.length)     bullets.push(`Release below shoulder on shots ${fmt(belowSh)} - finish above shoulder.`);
+          if (kneeLow.length)     bullets.push(`Limited knee bend on shots ${fmt(kneeLow)} - add a bit more power.`);
+          if (gazeOff.length)     bullets.push(`Gaze off rim on shots ${fmt(gazeOff)} - keep eyes on rim through release.`);
 
           if (bullets.length) {
             lines.push('Notable patterns: ' + bullets.slice(0,3).join(' '));
@@ -1298,44 +1313,22 @@ window.addEventListener('shot:feedback:request', (e) => {
   function seededRandom(seed){ const x = Math.sin(seed*9301+49297)*233280; return x - Math.floor(x); }
   function pick(arr, seed){ return arr[Math.floor(seededRandom(seed)*arr.length)] || arr[0]; }
 
-  function craftCoachingLine(shot, golden, opts={}) {
-    const p = shot.poseSnapshot || {};
-    const seed = (shot.ts || Date.now()) + (opts.bumpSeed ? 101 : 0);
-
-    // strengths for positive first sentence
-    const strengths = [];
-    if (p.releaseAboveShoulder) strengths.push('high release');
-    if (Number.isFinite(p.shoulderToWristAngle) && p.shoulderToWristAngle >= 50) strengths.push('vertical arm');
-    if (Number.isFinite(p.kneeFlex) && p.kneeFlex >= (golden?.kneeFlex || 28) * 0.8) strengths.push('good knee load');
-    if (Number.isFinite(p.stanceWidthFeet) && golden?.stanceWidthFeet &&
-        Math.abs(p.stanceWidthFeet - golden.stanceWidthFeet) <= 15) strengths.push('balanced base');
-    if (Number.isFinite(shot.entryAngle) && golden?.entryAngle &&
-        Math.abs(shot.entryAngle - golden.entryAngle) <= 4) strengths.push('target entry angle');
-
-    const first = phrasePraise(strengths, seed);
-
-    // pick best cue with variety
+  function craftPoseLine(shot, golden, opts={}) {
     const issues = buildIssues(shot, golden);
     const chosen = chooseCue(issues);
-    const cueTxt = chosen ? chosen.msg : 'Hold your follow-through for a count.';
-    const bridges = ['Quick cue:', 'Small tweak:', 'Next rep,', 'Dial this in:'];
-    const bridge = bridges[ seed % bridges.length ];
+    const base = chosen ? chosen.msg : 'Pose metrics captured. Focus on a tall, balanced release.';
+    if (opts.bumpSeed) {
+      return base;
+    }
+    return base;
+  }
 
-    return `${first} ${bridge} ${cueTxt}`;
+  function craftCoachingLine(shot, golden, opts={}) {
+    return craftPoseLine(shot, golden, opts);
   }
 
   function craftMissLine(shot, golden, opts={}) {
-    const seed = (shot.ts || Date.now()) + (opts.bumpSeed ? 303 : 0);
-    const openers = ['Good look.', 'Right idea.', 'Close.', 'Almost.', 'Not far off.'];
-    const opener = openers[ seed % openers.length ];
-
-    const issues = buildIssues(shot, golden);
-    const chosen = chooseCue(issues);
-    const cueTxt = chosen ? chosen.msg : 'Load a touch more with your knees and finish high.';
-    const bridges = ['Fix this next:', 'Quick cue:', 'Small tweak:', 'Next rep,'];
-    const bridge = bridges[(seed+1) % bridges.length];
-
-    return `${opener} ${bridge} ${cueTxt}`;
+    return craftPoseLine(shot, golden, opts);
   }
 
   // ---- Issue builder with severity + category (new)
@@ -1353,7 +1346,7 @@ window.addEventListener('shot:feedback:request', (e) => {
     if (Number.isFinite(p.stanceWidthFeet) && g.stanceWidthFeet) {
       const d = (p.stanceWidthFeet - g.stanceWidthFeet);
       const ad = Math.abs(d);
-      if (ad > 35) push('feetWidth', 9, d < 0 ? 'Feet too narrow — widen ~2–3".' : 'Feet too wide — bring them in slightly.');
+      if (ad > 35) push('feetWidth', 9, d < 0 ? 'Feet too narrow - widen ~2-3".' : 'Feet too wide - bring them in slightly.');
       else if (ad > 20) push('feetWidth', 6, d < 0 ? 'Open your base a touch for balance.' : 'Narrow your base slightly to stay stacked.');
     }
 
@@ -1365,7 +1358,7 @@ window.addEventListener('shot:feedback:request', (e) => {
     }
     if (Number.isFinite(p.feetStagger)) {
       const over = p.feetStagger - (g.feetStagger||6);
-      if (over > 16) push('feetStagger', 6, 'Level your feet — reduce the front/back stagger.');
+      if (over > 16) push('feetStagger', 6, 'Level your feet - reduce the front/back stagger.');
       else if (over > 10) push('feetStagger', 4, 'Even out your stance front-to-back.');
     }
 
@@ -1393,17 +1386,17 @@ window.addEventListener('shot:feedback:request', (e) => {
       push('releaseHeight', 7, 'Release above your shoulder line.');
     }
     if (p.wristY!=null && p.elbowY!=null && p.wristY > p.elbowY + 10) {
-      push('wristFinish', 6, 'Snap the wrist high — finish above the elbow.');
+      push('wristFinish', 6, 'Snap the wrist high - finish above the elbow.');
     }
 
     // Ball metrics
     if (Number.isFinite(shot.entryAngle) && g.entryAngle) {
       const d = shot.entryAngle - g.entryAngle;
-      if (d < -6) push('entryFlat', 9, 'Entry angle is flat — add arc.');
-      else if (d > 6) push('entrySteep', 7, 'Entry angle is steep — soften the arc.');
+      if (d < -6) push('entryFlat', 9, 'Entry angle is flat - add arc.');
+      else if (d > 6) push('entrySteep', 7, 'Entry angle is steep - soften the arc.');
     } else if (Number.isFinite(shot.entryAngle)) {
-      if (shot.entryAngle < 44) push('entryFlat', 8, 'A bit flat — add arc.');
-      else if (shot.entryAngle > 54) push('entrySteep', 6, 'A tad steep — soften the arc.');
+      if (shot.entryAngle < 44) push('entryFlat', 8, 'A bit flat - add arc.');
+      else if (shot.entryAngle > 54) push('entrySteep', 6, 'A tad steep - soften the arc.');
     }
 
     // arc height vs golden
@@ -1416,12 +1409,12 @@ window.addEventListener('shot:feedback:request', (e) => {
     // apex rise vs golden (power on release)
     if (Number.isFinite(shot.apexRiseFromRelease) && g.apexRiseFromRelease) {
       const d = shot.apexRiseFromRelease - g.apexRiseFromRelease;
-      if (d < -18) push('powerLow', 9, 'Add power on release — drive up through the ball.');
+      if (d < -18) push('powerLow', 9, 'Add power on release - drive up through the ball.');
       else if (d < -10) push('powerLow', 6, 'A touch more upward energy on release.');
     }
     if (Number.isFinite(shot.apexRiseFromReleaseNorm) && g.apexRiseFromReleaseNorm) {
       const d = shot.apexRiseFromReleaseNorm - g.apexRiseFromReleaseNorm;
-      if (d < -0.15) push('powerLow', 9, 'Increase lift — get more rise before the apex.');
+      if (d < -0.15) push('powerLow', 9, 'Increase lift - get more rise before the apex.');
     }
 
     // Sort by severity descending
@@ -1447,17 +1440,7 @@ window.addEventListener('shot:feedback:request', (e) => {
   }
 
   // Light variety wrappers
-  function phrasePraise(strengths, seed) {
-    const opens = ['Money.', 'Buckets.', 'Splash.', 'Nice make.', 'There it is.', 'Cash.'];
-    const connectors = ['Lock that in.', 'That’s repeatable.', 'Keep that feel.', 'Love that tempo.'];
-    const r = (n)=> Math.floor((Math.sin((seed+n)*9301+49297)*233280)%opens.length + opens.length) % opens.length;
-    const r2= (n)=> Math.floor((Math.sin((seed+n)*7411+19333)*233280)%connectors.length + connectors.length) % connectors.length;
-    const opener = opens[r(1)];
-    const praise = strengths?.length ? `Nice ${strengths[r2(2)%strengths.length]}.` : connectors[r2(3)];
-    return `${opener} ${praise}`;
-  }
-
-  // keep a tiny history so we don’t repeat exact lines back-to-back
+  // keep a tiny history so we don't repeat exact lines back-to-back
   window.__coachLineHistory = [];
   function avoidRepeat(text, shot, golden, made) {
     const recent = window.__coachLineHistory.slice(-4);
@@ -1553,7 +1536,7 @@ window.addEventListener('shot:feedback:request', (e) => {
       const angleDeg=(a,b)=>deg(Math.atan2(a.y-b.y, b.x-a.x));   // vertical-ish measure
       const signed  =(a,b)=>deg(Math.atan2(b.y-a.y, b.x-a.x));   // signed around body
 
-      // Feet angles (ankle → toe) and differences / stagger
+      // Feet angles (ankle -> toe) and differences / stagger
       const footAngle = (ankle, toe) => deg(Math.atan2(toe.y-ankle.y, toe.x-ankle.x));
       const leftFootAngle  = footAngle(kp[L_ANK], kp[L_TOE]);
       const rightFootAngle = footAngle(kp[R_ANK], kp[R_TOE]);
@@ -1767,17 +1750,17 @@ Draft to refine (optional): '${draftLine}'` : ''}
     const rating = window.computeShotRating?.(shot.poseSnapshot, golden) ?? 50;
 
     let html = `
-      <strong>🤖 Coach Feedback</strong><br>
+      <strong>ðŸ¤– Coach Feedback</strong><br>
       <div style="font-size: 18px; margin-bottom: 6px;">
-        🏅 Shot Rating: <strong style="color:${rating >= 80 ? 'lightgreen' : rating >= 50 ? 'orange' : 'red'}">${rating}/100</strong>
+        ðŸ… Shot Rating: <strong style="color:${rating >= 80 ? 'lightgreen' : rating >= 50 ? 'orange' : 'red'}">${rating}/100</strong>
         ${golden ? `<span style="opacity:.7;">(vs ${golden.count} reference shots)</span>` : ``}
       </div>
       ${tips.length ? `<ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`
-                    : `<span style="color:lightgreen;">✅ No major pose issues detected.</span>`}
+                    : `<span style="color:lightgreen;">âœ… No major pose issues detected.</span>`}
     `;
     if (shot.discarded) {
       html = `<div style="color: orange; font-weight: bold; margin-bottom: 6px;">
-        ⚠️ Shot was discarded: ${shot.missReason || 'No reason provided'}
+        âš ï¸ Shot was discarded: ${shot.missReason || 'No reason provided'}
       </div>` + html;
     }
 
@@ -1838,14 +1821,14 @@ Draft to refine (optional): '${draftLine}'` : ''}
   // Feet
   if (Number.isFinite(p.stanceWidthFeet) && g.stanceWidthFeet){
     const d = p.stanceWidthFeet - g.stanceWidthFeet;
-    if (d < -20) issues.push("Feet too narrow — widen ~2–3\".");
-    else if (d > 20) issues.push("Feet too wide — narrow slightly.");
+    if (d < -20) issues.push("Feet too narrow - widen ~2-3\".");
+    else if (d > 20) issues.push("Feet too wide - narrow slightly.");
   }
   if (Number.isFinite(p.feetAngleDiff) && p.feetAngleDiff > (g.feetAngleDiff||8) + 6){
-    issues.push("Feet not parallel — square both toes to the rim.");
+    issues.push("Feet not parallel - square both toes to the rim.");
   }
   if (Number.isFinite(p.feetStagger) && p.feetStagger > (g.feetStagger||6) + 10){
-    issues.push("Feet staggered — level your base.");
+    issues.push("Feet staggered - level your base.");
   }
 
   // Power / lower body
@@ -1863,7 +1846,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
     issues.push("Get your shooting arm more vertical on release.");
   }
   if (p.wristY!=null && p.elbowY!=null && p.wristY > p.elbowY + 10){
-    issues.push("Finish higher — snap the wrist above the elbow.");
+    issues.push("Finish higher - snap the wrist above the elbow.");
   }
   if ((g.releaseAboveShoulder ?? true) && !p.releaseAboveShoulder){
     issues.push("Release above your shoulder line.");
@@ -1871,17 +1854,17 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
   // Ball metrics if present
   if (Number.isFinite(shot.entryAngle) && g.entryAngle){
-    if (shot.entryAngle < g.entryAngle - 5) issues.push("Entry angle a bit flat — add arc.");
-    else if (shot.entryAngle > g.entryAngle + 5) issues.push("Entry angle steep — soften the arc.");
+    if (shot.entryAngle < g.entryAngle - 5) issues.push("Entry angle a bit flat - add arc.");
+    else if (shot.entryAngle > g.entryAngle + 5) issues.push("Entry angle steep - soften the arc.");
   }
 
   return issues;
   };
 
-// ───────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Hands-Free Doach (standalone, no global collisions)
 // Exposes: window.doachHandsFree.start(), .stop(), .toggle(), .isActive()
-// ───────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 (() => {
   if (window.__doachHFInit) return;          // prevent duplicate init
   window.__doachHFInit = true;
@@ -1893,7 +1876,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
     return;
   }
 
-  // --- light metrics → answer helper (kept local to avoid globals)
+  // --- light metrics -> answer helper (kept local to avoid globals)
   function answerFromMetrics(q, last, golden){
     if (!last?.poseSnapshot) return "I need a shot first to analyze.";
     const p = last.poseSnapshot;
@@ -1903,16 +1886,16 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
     if (/foot|feet|base|stance/.test(q)) {
       const w = Math.round(p.stanceWidthFeet||p.stanceWidth||0);
-      const tgt = g.stanceWidthFeet ? `, target ${Math.round(g.stanceWidthFeet)}px (Δ${w-Math.round(g.stanceWidthFeet)})` : '';
+      const tgt = g.stanceWidthFeet ? `, target ${Math.round(g.stanceWidthFeet)}px (Î”${w-Math.round(g.stanceWidthFeet)})` : '';
       const angle = Math.round(p.feetAngleDiff||0);
       const stag  = Math.round(p.feetStagger||0);
-      return say(`Feet width ${w}px${tgt}. Toe alignment off by ${angle}°. ${stag>10?'Feet staggered; level your base.':'Base is level.'}`);
+      return say(`Feet width ${w}px${tgt}. Toe alignment off by ${angle}Â°. ${stag>10?'Feet staggered; level your base.':'Base is level.'}`);
     }
     if (/release|follow/.test(q)) {
       const ang = Math.round(p.shoulderToWristAngle ?? 0);
       const high = p.releaseAboveShoulder ? "above" : "below";
       const wristVsElbow = (p.wristY!=null && p.elbowY!=null && p.wristY > p.elbowY + 10) ? "low" : "high";
-      return say(`Arm angle ${ang}°. Release is ${high} shoulder. Wrist finished ${wristVsElbow}. Aim for a higher vertical finish.`);
+      return say(`Arm angle ${ang}Â°. Release is ${high} shoulder. Wrist finished ${wristVsElbow}. Aim for a higher vertical finish.`);
     }
     if (/power|leg|knee/.test(q)) {
       const k = Math.round(p.kneeFlex||0);
@@ -1922,7 +1905,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
     if (/arc|entry/.test(q)) {
       const ea = Math.round(last.entryAngle ?? 0);
       const ga = g.entryAngle ? Math.round(g.entryAngle) : 50;
-      return say(`Entry angle ${ea}°. ${Math.abs(ea-ga)<=5?'On target.': ea<ga?'A bit flat — add arc.':'A tad steep — soften the arc.'}`);
+      return say(`Entry angle ${ea}Â°. ${Math.abs(ea-ga)<=5?'On target.': ea<ga?'A bit flat - add arc.':'A tad steep - soften the arc.'}`);
     }
     if (/(accur|make|made)/.test(q)) {
       return say('Pose-only mode: accuracy tracking is disabled. Focus on repeating the pose cues.');
@@ -1963,7 +1946,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
       const box = document.getElementById('coachNotes');
       if (box) box.innerHTML =
-        `<strong>🎙 You:</strong> ${transcript}<br><strong>🤖 Doach:</strong> ${reply}`;
+        `<strong>ðŸŽ™ You:</strong> ${transcript}<br><strong>ðŸ¤– Doach:</strong> ${reply}`;
     };
 
     hfRec.onerror = (ev) => {
@@ -2038,14 +2021,14 @@ function rememberKey(key) {
 }
 
 window.addEventListener('shot:summary', (e) => {
-  // If we’ve already handled THIS object, bail (covers re-dispatch)
+  // If we've already handled THIS object, bail (covers re-dispatch)
   if (e.detail && e.detail.__doachHandled) return;
 
   const shot = e.detail;
   const key = makeShotKey(shot || {});
   if (key && __processedShotKeys.has(key)) return; // already handled a twin
 
-  // Mark original payload so a re-dispatch of the same object won’t run again
+  // Mark original payload so a re-dispatch of the same object won't run again
   if (shot) shot.__doachHandled = true;
   rememberKey(key);
 
@@ -2064,9 +2047,9 @@ window.addEventListener('shot:summary', (e) => {
 
 
 
-// ───────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // DOACH Voice Q&A (single, hardened instance)
-// ───────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 (function () {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return; }
@@ -2116,14 +2099,14 @@ window.addEventListener('shot:summary', (e) => {
       const w = p.stanceWidth;
       parts.push(w == null
         ? "I couldn't see your feet clearly."
-        : `Stance width was ${Math.round(w)}px — ${w < 100 ? 'a bit narrow' : 'solid'}. Aim for about shoulder width plus a bit.`);
+        : `Stance width was ${Math.round(w)}px - ${w < 100 ? 'a bit narrow' : 'solid'}. Aim for about shoulder width plus a bit.`);
     }
     // Release / wrist / elbow
     if (/(release|wrist|elbow|follow)/.test(n)) {
       const ang = p.shoulderToWristAngle;
       parts.push(ang == null
         ? "I couldn't read your arm angle."
-        : `Release angle was ~${Math.round(ang)}°. Try finishing near 50–60° with a full follow-through.`);
+        : `Release angle was ~${Math.round(ang)}Â°. Try finishing near 50-60Â° with a full follow-through.`);
     }
     // Power / knee bend
     if (/(power|legs|knee|dip|bend)/.test(n)) {
@@ -2135,8 +2118,8 @@ window.addEventListener('shot:summary', (e) => {
     // Arc / entry
     if (/(arc|entry|angle)/.test(n)) {
       const arc = Math.round(L.arcHeight || 0);
-      const entry = L.entryAngle ?? '–';
-      parts.push(`Arc ~${arc}px, entry ${entry}°. Target mid-40s to low-50s.`);
+      const entry = L.entryAngle ?? '-';
+      parts.push(`Arc ~${arc}px, entry ${entry}Â°. Target mid-40s to low-50s.`);
     }
     // Accuracy (pose-only mode disabled tracking)
     if (/(make|accuracy|percent|score)/.test(n)) {
@@ -2145,7 +2128,7 @@ window.addEventListener('shot:summary', (e) => {
 
     if (!parts.length) {
       const issues = window.summarizePoseIssues?.(L) || [];
-      parts.push(`Pose snapshot: arc ${Math.round(L.arcHeight || 0)}px, entry ${L.entryAngle ?? '–'}°, release ${L.releaseAngle ?? '–'}°. Focus on smooth, tall mechanics.`);
+      parts.push(`Pose snapshot: arc ${Math.round(L.arcHeight || 0)}px, entry ${L.entryAngle ?? '-'}Â°, release ${L.releaseAngle ?? '-'}Â°. Focus on smooth, tall mechanics.`);
       if (issues[0]) parts.push(issues[0]);
     }
     return parts.join(' ');
@@ -2244,7 +2227,7 @@ window.addEventListener('shot:summary', (e) => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-              prompt: `You are Doach. User asked: "${finalText}". Use this context JSON:\n${JSON.stringify(ctx)}\nGive a specific, actionable answer in 1–2 short sentences.`,
+              prompt: `You are Doach. User asked: "${finalText}". Use this context JSON:\n${JSON.stringify(ctx)}\nGive a specific, actionable answer in 1-2 short sentences.`,
               model: DOACH.model
             })
           });
@@ -2260,7 +2243,7 @@ window.addEventListener('shot:summary', (e) => {
   recog.onerror = (e) => {
     const err = e?.error || String(e);
 
-    // Common & harmless — ignore (optional soft retry)
+    // Common & harmless - ignore (optional soft retry)
     if (err === 'no-speech') {
       if (armed && !document.hidden) {
         clearTimeout(restartTimer);
@@ -2272,7 +2255,7 @@ window.addEventListener('shot:summary', (e) => {
     starting = false;
     listening = false;
 
-    // Require a new user gesture for these — do not auto-restart
+    // Require a new user gesture for these - do not auto-restart
     if (['aborted', 'not-allowed', 'service-not-allowed', 'audio-capture'].includes(err)) {
       armed = false;
       clearTimeout(restartTimer);
@@ -2324,6 +2307,7 @@ window.addEventListener('shot:summary', (e) => {
 })();
 
   })();
+
 
 
 

@@ -1853,9 +1853,9 @@ function computeTotals(list){
   return { taken, made, acc };
 }
 
-// Record a shot summary and update the session HUD
-window.recordShotSummary = async function recordShotSummary(summary) {
-  // de-dupe
+// --- Central sink for every finalized shot (FIFO finalize) ---
+window.recordShotSummary = function recordShotSummary(summary) {
+  // de-dupe small repeats
   const key = `${+summary.made}|${Math.round(summary.arcHeight||0)}|${summary.entryAngle}|${summary.releaseAngle}|${summary.frameExit||''}`;
   if (window.__lastShotKey === key) return;
   window.__lastShotKey = key;
@@ -1864,79 +1864,72 @@ window.recordShotSummary = async function recordShotSummary(summary) {
   if (!summary.doach && window.__lastCoachText) summary.doach = window.__lastCoachText;
 
   const list = (window.__shotList ||= []);
+
+  // 1) Try to match a pending placeholder by frame (if provided)
+  const sFrame = Number(summary.frameRelease ?? summary.frame ?? summary.frameExit);
+  let matchIdx = -1;
+  if (Number.isFinite(sFrame)) {
+    for (let i = 0; i < list.length; i++) {
+      const s = list[i];
+      if (s?.pending && Number.isFinite(s.frameRelease) && s.frameRelease <= sFrame) { matchIdx = i; break; }
+    }
+  }
+  // 2) Otherwise, FIFO: earliest pending
+  if (matchIdx === -1) matchIdx = list.findIndex(s => s?.pending === true);
+
   let idx;
-  // If the last record is a pending release placeholder, finalize it
-  const last = list.at?.(-1) || null;
-  if (last && last.pending) {
-    Object.assign(last, summary, { pending: false });
-    idx = list.length;
+  if (matchIdx !== -1) {
+    Object.assign(list[matchIdx], summary, { pending: false });
+    idx = matchIdx + 1;
     summary.__idx = idx;
   } else {
-    idx  = list.push(summary);      // 1-based index
-    summary.__idx = idx;            // keep the index on the object for later
+    // No pending to finalize (edge case): append
+    idx = list.push(summary);
+    summary.__idx = idx;
   }
-  summary.idx = Math.max(0, idx - 1);
-  summary.coachIdx = summary.idx;
 
-  // If the full table is open, rebuild it so copy stays clean
+  // If the full table is open, refresh/add that specific row
   const modal = document.getElementById('fullShotModal');
-  if (modal && modal.style.display === 'block') {
-    try {
-      renderFullShotTable();
-      if (typeof wireFullShotModalActions === 'function') wireFullShotModalActions();
-    } catch {}
+  if (modal) {
+    const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    let tr = modal.querySelector(`tbody tr[data-shot-idx="${idx}"]`);
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.setAttribute('data-shot-idx', idx);
+      tr.innerHTML = `
+        <td class="num">${idx}</td>
+        <td class="result">${summary.made ? '✅' : '❌'}</td>
+        <td class="arc">${Math.round(summary.arcHeight ?? 0) || '–'}</td>
+        <td class="entry">${summary.entryAngle ?? '–'}</td>
+        <td class="release">${summary.releaseAngle ?? '–'}</td>
+        <td class="coach" title="${esc(summary.doach||'')}">${summary.doach ? esc(summary.doach) : '—'}</td>
+        <td class="fix">
+          <div style="display:flex;gap:6px">
+            <button class="vc-btn btn-make"  title="Mark Make" data-id="${idx}">✅</button>
+            <button class="vc-btn btn-miss"  title="Mark Miss" data-id="${idx}">❌</button>
+            <button class="vc-btn btn-ai"    title="AI Review" data-id="${idx}">🤖</button>
+          </div>
+        </td>`;
+      modal.querySelector('tbody')?.appendChild(tr);
+    } else {
+      tr.querySelector('.result') && (tr.querySelector('.result').textContent = summary.made ? '✅' : '❌');
+      tr.querySelector('.arc')     && (tr.querySelector('.arc').textContent     = Math.round(summary.arcHeight ?? 0) || '–');
+      tr.querySelector('.entry')   && (tr.querySelector('.entry').textContent   = summary.entryAngle ?? '–');
+      tr.querySelector('.release') && (tr.querySelector('.release').textContent = summary.releaseAngle ?? '–');
+      const cell = tr.querySelector('.coach');
+      if (cell) { const text = esc(summary.doach || '—'); cell.textContent = text; cell.title = text; }
+    }
   }
-  // HUD counters
-  const { taken, made, acc } = computeTotals(list);
+
+  // HUD counters (unchanged)
+  const taken = list.length;
+  const made  = list.filter(s => s.made).length;
+  const acc   = taken ? (made / taken) * 100 : 0;
   const start = (window.__sessionStart ||= Date.now());
   const elapsedSec = Math.floor((Date.now() - start) / 1000);
-  updateSessionHUD({ taken, made, accuracy: acc, elapsedSec });
-
-  // Attach/update per-shot coach line immediately for the table (no extra speech)
-  try {
-    const last = list[idx - 1];
-    const snap = last?.poseSnapshot
-      || (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints
-          ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-          : null);
-    const sForCoach = { ...summary, poseSnapshot: snap };
-    window.doachOnShot?.(sForCoach); // respect DOACH_ONLY_REALTIME inside doachOnShot
-  } catch {}
-
-  // End-of-session prompt at 10 shots; reuse central prompt logic
-  const capNow = getSessionCap();
-  if (shouldEnforceSessionCap() && taken === capNow && !window.__sessionCapPrompted) {
-    window.__sessionCapPrompted = true;
-    try { window.dispatchEvent(new CustomEvent('doach:show-cap-prompt', { detail: { cap: capNow, taken } })); } catch {}
-    if (window.__sessionContinue === true) {
-      window.__sessionCapPrompted = false;
-      try { window.__sessionCapped = false; } catch {}
-      try { window.__capAwait = false; } catch {}
-    } else {
-      try { window.autoEndSessionAndSummarize?.(); } catch {}
-    }
-  }
-
-  // Persist summary to backend even if no shot:summary event fired
-  try {
-    let sid = (window.__SESSION_ID || null);
-    if (!sid) { try { sid = await ensureSessionId(); } catch {} }
-    if (sid) {
-      let idxPost = null;
-      try { idxPost = Number.isFinite(window.__SHOT_IDX) ? Number(window.__SHOT_IDX) : (list.length - 1); } catch {}
-      const payload = {
-        idx: idxPost,
-        t: Date.now(),
-        made: (summary?.made ?? null),
-        arcHeight: (summary?.arcHeight ?? null),
-        entryAngle: (summary?.entryAngle ?? null),
-        releaseAngle: (summary?.releaseAngle ?? null),
-        missReason: (summary?.missReason ?? null)
-      };
-      fetch(`/api/sessions/${sid}/shot`, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
-    }
-  } catch {}
+  try { updateSessionHUD({ taken, made, accuracy: acc, elapsedSec }); } catch {}
 };
+
 
 // Wire correction buttons for the full-session modal (id: fullShotModal)
 function wireFullShotModalActions() {
