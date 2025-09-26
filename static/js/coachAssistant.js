@@ -1639,6 +1639,7 @@ window.addEventListener('shot:feedback:request', (e) => {
     // Local draft (always compute; used for polish or fallback)
     let localText = made ? craftCoachingLine(shot, golden) : craftMissLine(shot, golden);
     localText = avoidRepeat(localText, shot, golden, made);
+    }
 
     // Choose how to use the LLM
     const mode = (window.DOACH?.llmMode || 'polish').toLowerCase();
