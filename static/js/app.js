@@ -44,8 +44,8 @@ window.POSE_STREAK_NEED    = window.POSE_STREAK_NEED ?? 2;
 window.__POSE_ONLY_MODE    = true;                        // allow fallback summaries
 window.USE_MICROCLIP       = true;
 window.__RELEASE_ONLY      = true;                        // demo: relaxed pose gate
-try { setReleaseKnobs({ scoreThresh: 0.7, streakNeed: 1, hudScoreTrip: 0.5 }); } catch {}
-
+  try { setReleaseKnobs({ scoreThresh: 0.7, streakNeed: 1, hudScoreTrip: 0.5 }); } catch {}
+window.REL_COOLDOWN_MS     = 2000;                        // 2s between shots
 window.USE_MICROCLIP       = window.USE_MICROCLIP ?? true; // save 3s clip per shot
 window.__MICROCLIP_MS      = window.__MICROCLIP_MS ?? 3000;
 
@@ -339,7 +339,7 @@ function shotArcProx(hoopBox){
 
     // pose gate if available
     if (!opts?.bypassGate) {
-      const hist = (window.playerState?.frameHistory || []).slice(-5);
+      const hist = (window.playerState?.frameHistory || []).slice(-8);
       const gate = window.releaseGate ? window.releaseGate(hist) : { released:true, tests:{} };
       if (!gate.released) return false;
     }
@@ -403,6 +403,17 @@ function shotArcProx(hoopBox){
     }
     window.__shotTrackingArmed = false;
     scheduleArmWhenReady(300);
+
+    // Cap check: end and show table at 3
+    const taken = (window.getShotRecords?.() || []).length;
+    const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 3));
+    const cap   = Number(capFn());
+    if (Number.isFinite(cap) && taken >= cap) {
+      try { window.endSessionAtCap?.(); } catch {}
+      try { window.autoEndSessionAndSummarize?.(); } catch {}
+      try { window.renderFullShotTable?.(); } catch {}
+    }
+
   });
 })();
 
@@ -886,9 +897,9 @@ document.addEventListener('DOMContentLoaded', ()=>{
   camBtn?.addEventListener('click', ()=>startCamera());
 
   // Re-arm when hoop is locked
-  window.addEventListener('hoop:locked',    ()=>window.startShotTrackingCountdown?.(5));
-  window.addEventListener('hoop:confirmed', ()=>window.startShotTrackingCountdown?.(5));
-  setTimeout(() => { try { scheduleArmWhenReady(0); } catch {} }, (3 * 1000) + 50);
+  window.addEventListener('hoop:locked',    ()=>{ window.startShotTrackingCountdown?.(5); setTimeout(()=>scheduleArmWhenReady(0), 5050); });
+  window.addEventListener('hoop:confirmed', ()=>{ window.startShotTrackingCountdown?.(5); setTimeout(()=>scheduleArmWhenReady(0), 5050); });
+
 
 
   // Tiny paint loop
