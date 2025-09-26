@@ -513,6 +513,16 @@ window.addEventListener('shot:summary', (e) => {
     // Not at cap: disarm and re-arm soon
     W.__shotTrackingArmed = false;
     scheduleArmWhenReady(300);
+    setTimeout(() => {
+      try {
+        const currentTaken = (W.getShotRecords?.() || []).length;
+        const capFnLater = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(W.SESSION_SIZE || 3));
+        const capLater = Number(capFnLater());
+        if (!Number.isFinite(capLater) || currentTaken < capLater) {
+          if (W.__shotTrackingArmed !== true) scheduleArmWhenReady?.(0);
+        }
+      } catch {}
+    }, 1100);
   }
 });
 
@@ -561,6 +571,22 @@ function scheduleArmWhenReady(delay=200){
   }, Math.max(0,delay));
 }
 window.scheduleArmWhenReady = scheduleArmWhenReady;
+
+(function guardEarlyEnd(){
+  const W = /** @type {any} */ (window);
+  if (W.__guardEarlyEndInstalled === true) return;
+  W.__guardEarlyEndInstalled = true;
+  window.addEventListener('hud:end-session', (evt) => {
+    try {
+      const taken = (W.getShotRecords?.() || []).length;
+      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(W.SESSION_SIZE || 3));
+      const cap = Number(capFn());
+      if (Number.isFinite(cap) && taken < cap) {
+        evt.stopImmediatePropagation?.();
+      }
+    } catch {}
+  }, { capture: true });
+})();
 
 // ---------- Hoop pick once ----------
 // One-time hoop picker (tap once to lock the rim)
@@ -672,23 +698,23 @@ export function enableHoopPickOnce() {
                 try { if (window.__shotTrackingArmed !== true) latched = false; } catch {}
                 try { if (!H) latched = false; } catch {}
               }
+              
               if (latched) {
                 try { window.__GATE_LATCH_FRAME = fidx; } catch {}
-                // Global cooldown to avoid double-trigger while follow-through holds
                 const now = performance.now();
                 const cd  = Number(window.REL_COOLDOWN_MS || (window.REL_CFG?.cooldownMs) || 2000);
                 const since = now - (Number(window.__REL_LAST_FIRE_MS) || 0);
-                const shouldFire = since >= cd;
-                // Compute proximity and dispatch unified release
                 const prox = (typeof window.proxFromHoop === 'function' && typeof window.canonHoop === 'function')
-                              ? window.proxFromHoop(window.canonHoop(H)) : null;
-                if (shouldFire) {
-                  const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { gate, prox, poseApproved: true });
-                  if (!ok) {
-                    try { if (window.DOACH_RELEASE_TRACE) console.log('[gate:suppress]', { frame: fidx, reason:'safe-blocked' }); } catch {}
+                  ? window.proxFromHoop(window.canonHoop(H)) : null;
+                if (since >= cd) {
+                  const ok = window.safeEmitRelease?.(fidx, 'pose-heuristic', { gate, prox, poseApproved: true, bypassGate: true });
+                  if (ok === false) {
+                    try { if (window.DOACH_RELEASE_TRACE === true) console.log('[gate:suppress]', { frame: fidx, reason:'safe-blocked' }); } catch {}
+                  } else {
+                    try { window.__REL_LAST_FIRE_MS = now; } catch {}
                   }
                 } else {
-                  try { if (window.DOACH_RELEASE_TRACE) console.log('[gate:suppress]', { frame: fidx, reason:'cooldown', remaining: Math.ceil(cd - since) }); } catch {}
+                  try { if (window.DOACH_RELEASE_TRACE === true) console.log('[gate:suppress]', { frame: fidx, reason:'cooldown', remaining: Math.ceil(cd - since) }); } catch {}
                 }
               }
             }

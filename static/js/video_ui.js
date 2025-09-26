@@ -1793,7 +1793,7 @@ try {
     // If cap reached, don’t keep showing “waiting…”
     try {
       const taken = (window.getShotRecords?.() || []).length;
-      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 3));
+      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 10));
       const cap   = Number(capFn());
       if (Number.isFinite(cap) && taken >= cap) clearWaiting();
     } catch {}
@@ -1807,7 +1807,7 @@ try {
   function maybeOpenTable() {
     try {
       const taken = (window.getShotRecords?.() || []).length;
-      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 3));
+      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 10));
       const cap   = Number(capFn());
       if (!Number.isFinite(cap) || taken < cap) return;
 
@@ -1853,10 +1853,10 @@ function computeTotals(list){
   return { taken, made, acc };
 }
 
-// --- Central sink for every finalized shot (FIFO finalize) ---
+// --- Central sink for every finalized shot (index by shotId) ---
 window.recordShotSummary = function recordShotSummary(summary) {
   // de-dupe small repeats
-  const key = `${+summary.made}|${Math.round(summary.arcHeight||0)}|${summary.entryAngle}|${summary.releaseAngle}|${summary.frameExit||''}`;
+  const key = `${summary.shotId||'?' }|${+summary.made}|${Math.round(summary.arcHeight||0)}|${summary.entryAngle}|${summary.releaseAngle}`;
   if (window.__lastShotKey === key) return;
   window.__lastShotKey = key;
 
@@ -1865,70 +1865,68 @@ window.recordShotSummary = function recordShotSummary(summary) {
 
   const list = (window.__shotList ||= []);
 
-  // 1) Try to match a pending placeholder by frame (if provided)
-  const sFrame = Number(summary.frameRelease ?? summary.frame ?? summary.frameExit);
-  let matchIdx = -1;
-  if (Number.isFinite(sFrame)) {
-    for (let i = 0; i < list.length; i++) {
-      const s = list[i];
-      if (s?.pending && Number.isFinite(s.frameRelease) && s.frameRelease <= sFrame) { matchIdx = i; break; }
-    }
-  }
-  // 2) Otherwise, FIFO: earliest pending
-  if (matchIdx === -1) matchIdx = list.findIndex(s => s?.pending === true);
-
-  let idx;
-  if (matchIdx !== -1) {
-    Object.assign(list[matchIdx], summary, { pending: false });
-    idx = matchIdx + 1;
-    summary.__idx = idx;
+  // Prefer explicit shotId → 1-based row index
+  let idx = Number(summary.shotId);
+  if (Number.isFinite(idx) && idx > 0) {
+    while (list.length < idx) list.push({ pending: true });
+    Object.assign(list[idx - 1], summary, { pending: false });
   } else {
-    // No pending to finalize (edge case): append
-    idx = list.push(summary);
-    summary.__idx = idx;
+    // Fallback: earliest pending
+    const p = list.findIndex(s => s?.pending === true);
+    if (p !== -1) Object.assign(list[p], summary, { pending: false });
+    else list.push(Object.assign({ pending: false }, summary));
+    idx = (p !== -1 ? p + 1 : list.length);
   }
+  summary.__idx = idx;
 
-  // If the full table is open, refresh/add that specific row
+  // If the minimal table is open, refresh that row (coach + clip only for demo)
   const modal = document.getElementById('fullShotModal');
   if (modal) {
-    const esc = (s) => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-    let tr = modal.querySelector(`tbody tr[data-shot-idx="${idx}"]`);
-    if (!tr) {
-      tr = document.createElement('tr');
-      tr.setAttribute('data-shot-idx', idx);
-      tr.innerHTML = `
-        <td class="num">${idx}</td>
-        <td class="result">${summary.made ? '✅' : '❌'}</td>
-        <td class="arc">${Math.round(summary.arcHeight ?? 0) || '–'}</td>
-        <td class="entry">${summary.entryAngle ?? '–'}</td>
-        <td class="release">${summary.releaseAngle ?? '–'}</td>
-        <td class="coach" title="${esc(summary.doach||'')}">${summary.doach ? esc(summary.doach) : '—'}</td>
-        <td class="fix">
-          <div style="display:flex;gap:6px">
-            <button class="vc-btn btn-make"  title="Mark Make" data-id="${idx}">✅</button>
-            <button class="vc-btn btn-miss"  title="Mark Miss" data-id="${idx}">❌</button>
-            <button class="vc-btn btn-ai"    title="AI Review" data-id="${idx}">🤖</button>
-          </div>
-        </td>`;
-      modal.querySelector('tbody')?.appendChild(tr);
-    } else {
-      tr.querySelector('.result') && (tr.querySelector('.result').textContent = summary.made ? '✅' : '❌');
-      tr.querySelector('.arc')     && (tr.querySelector('.arc').textContent     = Math.round(summary.arcHeight ?? 0) || '–');
-      tr.querySelector('.entry')   && (tr.querySelector('.entry').textContent   = summary.entryAngle ?? '–');
-      tr.querySelector('.release') && (tr.querySelector('.release').textContent = summary.releaseAngle ?? '–');
-      const cell = tr.querySelector('.coach');
-      if (cell) { const text = esc(summary.doach || '—'); cell.textContent = text; cell.title = text; }
+    const tbody = modal.querySelector('tbody');
+    if (tbody) {
+      let tr = tbody.querySelector(`tr[data-shot-idx="${idx}"]`);
+      if (!tr) {
+        tr = document.createElement('tr');
+        tr.setAttribute('data-shot-idx', idx);
+        tr.innerHTML = `<td class="num">${idx}</td><td class="coach"></td><td class="clip"></td>`;
+        tbody.appendChild(tr);
+      }
+      const coach = String(summary.doach || '—');
+      const tdCoach = tr.querySelector('.coach');
+      if (tdCoach) { tdCoach.textContent = coach; tdCoach.title = coach; }
+
+      const tdClip = tr.querySelector('.clip');
+      if (tdClip) {
+        tdClip.textContent = '';
+        const href =
+          (summary.clip?.path) ||
+          (function () {
+            try {
+              const sid = window.__SESSION_ID;
+              return sid != null ? `/api/sessions/${sid}/shot_video?index=${idx-1}` : null;
+            } catch { return null; }
+          })();
+        if (href) {
+          const a = document.createElement('a');
+          a.href = href; a.target = '_blank'; a.rel = 'noopener';
+          a.textContent = 'clip';
+          tdClip.appendChild(a);
+        } else {
+          tdClip.textContent = summary.clip?.status === 'recording' ? 'recording…' : 'processing…';
+        }
+      }
     }
   }
 
-  // HUD counters (unchanged)
-  const taken = list.length;
-  const made  = list.filter(s => s.made).length;
-  const acc   = taken ? (made / taken) * 100 : 0;
-  const start = (window.__sessionStart ||= Date.now());
-  const elapsedSec = Math.floor((Date.now() - start) / 1000);
-  try { updateSessionHUD({ taken, made, accuracy: acc, elapsedSec }); } catch {}
+  // HUD counters unchanged (optional)
+  try {
+    const taken = list.length;
+    const start = (window.__sessionStart ||= Date.now());
+    const elapsedSec = Math.floor((Date.now() - start) / 1000);
+    updateSessionHUD?.({ taken, elapsedSec });
+  } catch {}
 };
+
 
 
 // Wire correction buttons for the full-session modal (id: fullShotModal)

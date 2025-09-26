@@ -54,7 +54,7 @@ function formatCoachLine(s) {
     const poseLine = (s?.poseSnapshot && typeof composePoseFeedback === 'function')
       ? composePoseFeedback(s.poseSnapshot)
       : '';
-    if (poseLine && typeof poseLine === 'string') cues.push(poseLine.trim());
+    if (poseLine && typeof poseLine === 'string') cues.unshift(poseLine.trim());
     for (const note of issues) {
       const txt = typeof note === 'string' ? note.trim() : '';
       if (txt && !cues.includes(txt)) cues.push(txt);
