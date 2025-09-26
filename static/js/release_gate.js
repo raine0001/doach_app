@@ -97,8 +97,8 @@ export function releaseGate(lastFrames) {
         if (Array.isArray(kps) && kps.length >= 33) okCount++;
       }
     }
-    // Warmup deemed OK if ≥5 of the last 8 frames have 33 keypoints
-    const warmOK = okCount >= 5;
+    const warmNeed = (window.__RELEASE_ONLY === true) ? 2 : 5;
+    const warmOK = okCount >= warmNeed;
     if (warmOK) { try { window.__POSE_WARMUP_OK = true; } catch {} }
     const armed = (window.__shotTrackingArmed === true);
     // Gate: do not allow any release until warmup is satisfied AND session is armed
