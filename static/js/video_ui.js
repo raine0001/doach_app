@@ -714,39 +714,13 @@ export function createPlaybackControls(video) {
   };
 }
 
-// Show shot summary overlay
-// export function showShotSummaryOverlay(summary) {
-//   const div = document.createElement('div');
-//   div.className = 'shot-overlay-summary';
-//   div.style.position = 'absolute';
-//   div.style.bottom = '20px';
-//   div.style.right = '20px';
-//   div.style.background = 'rgba(0,0,0,0.7)';
-//   div.style.color = 'white';
-//   div.style.padding = '10px';
-//   div.style.borderRadius = '8px';
-//   div.style.zIndex = '99';
-
-//   const arcLabel = (() => { try { return arcHeightLabel(summary); } catch { return 'good'; } })();
-//   div.innerHTML = `
-//     <strong>${summary.made ? 'Made' : 'Missed'} Shot</strong><br>
-//     Arc: ${arcLabel}<br>
-//     Entry Angle: ${summary.entryAngle}&#176;<br>
-//     Release Angle: ${summary.releaseAngle}&#176;<br>
-//     Accuracy: ${summary.accuracy}% (${summary.madeShots}/${summary.totalShots})<br>
-//   `;
-
-//   document.querySelector('.video-box').appendChild(div);
-//   setTimeout(() => div.remove(), 2500);
-// }
 
 // Helper - hoop selection, user must confirm hoop on startup
 window.__hoopConfirmed = false;
 
+// starts off hoop selection prompt process  (required to trigger session flow start)
 export function requireHoopOrPrompt() {
   if (isHoopReady()) return true;
-  const name = window.__USER_NAME || 'Player';
-  showPromptMessage(`Hi ${name}, tap the hoop to begin session`, 3000);
   if (!window.__hoopPickArmed) {
     window.__hoopPickArmed = true;
     window.enableHoopPickOnce?.();   // arm picker again if needed
@@ -757,7 +731,7 @@ export function requireHoopOrPrompt() {
 window.isHoopReady = isHoopReady;
 window.requireHoopOrPrompt = requireHoopOrPrompt;
 
-// â”-€ Unified prompt system (uses #overlayPrompt if present, else #promptBar) â”-€
+// Unified prompt system (uses #overlayPrompt if present, else #promptBar) â”-€
 
 function hasCenter(h) {
   return Number.isFinite(h?.cx ?? h?.x) && Number.isFinite(h?.cy ?? h?.y);
@@ -2715,15 +2689,7 @@ async function showCenterCountdownAndPrompt(sec = 5) {
         box.querySelector('#npSkip') .addEventListener('click', ()=> pick(name));
       });
     }
-    name = (localStorage.getItem('firstname') || name || 'player');
-    const promptEl = showCenterPrompt('Get readyâ€¦');
-    try { speak(`Hi ${name}, tap the hoop to begin the session.`); } catch {}
-    for (let i = sec; i >= 1; i--) {
-      promptEl.textContent = String(i);
-      await new Promise(r => setTimeout(r, 1000));
-    }
-    promptEl.textContent = 'Tap the hoop to start session';
-    setTimeout(hideCenterPrompt, 2200);
+    
     try { window.enableHoopPickOnce?.(); } catch {}
   } catch {}
 }

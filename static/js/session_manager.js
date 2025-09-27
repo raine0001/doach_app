@@ -51,7 +51,7 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
     try {
       // Analyzer runs fully in the background; keep user playback at 1x
       window.USE_FBF_DURING_SHOT = false;   // do not pause/step the visible player
-      // Recommended demo defaults
+      // demo defaults  (none of which is used in demo mode, but set for consistency)
       window.ROI_SUPERSAMPLE = Number(window.ROI_SUPERSAMPLE || 1.6);
       window.BALL_MAX_STEP   = Number(window.BALL_MAX_STEP || 32);
       window.EXIT_BELOW_MARGIN = Number(window.EXIT_BELOW_MARGIN || 14);
@@ -69,9 +69,9 @@ async function uploadBlob(url, blob, filename='clip.webm', field='file') {
       window.REL_POSE_STREAK = 1; 
       window.REL_UPWARD_MIN_FRAMES = 1; 
       window.RELEASE_DELAY_FRAMES = 1;
+      
       try {
-        const name = (localStorage.getItem('firstname') || 'player');
-        speak(`Hi ${name}, select the hoop, then shoot when ready.`);
+        speak(`session started.`);
       } catch {}
       
       const demoCap = Number(window.DEMO_SESSION_CAP ?? window.__SESSION_CAP ?? window.SESSION_CAP ?? 3);

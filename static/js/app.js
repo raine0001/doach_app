@@ -32,7 +32,7 @@ import {
 
 import {
   showPromptMessage as uiShowPromptMessage,
-  requireHoopOrPrompt 
+  // requireHoopOrPrompt 
 } from './video_ui.js';
 
 import { setReleaseKnobs } from './release_gate.js';
