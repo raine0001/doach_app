@@ -606,8 +606,10 @@ export function enableHoopPickOnce() {
   ov.style.zIndex        = '100';
   vid.style.pointerEvents = 'none';
   const name = getDisplayName();
-  showPromptCompat(`Hi ${name}, Tap the Hoop to Begin`, 4000);   // prompt upon login
-  speak(`Hi ${name}, Let's get started, tap the Hoop, then shoot when ready.`);
+  
+  // owns prompt upon login
+  showPromptCompat(`Hi ${name}, Tap the Hoop to Begin`, 4000);   
+  speak(`Hi ${name}, Let's get started, place your camera in a position that will have you and the hoop in frame, tap the Hoop, then get into position to shoot.`);
 
 
   // Refresh rect/mapping now that picking is armed
@@ -1035,17 +1037,6 @@ document.addEventListener('DOMContentLoaded', ()=>{
   ensureOverlayCss(); 
   initOverlay?.(ov); 
   syncOverlayToVideo();
-
-  (fetchUserName?.() ?? Promise.resolve()).catch(()=>{}).finally(() => {
-    const name = getDisplayName();
-    showPromptCompat(`Hi ${name}`, 3000);
-    speak(`Hi ${name}, welcome to Doach`);
-    const attempt = () => {
-      try { if (typeof requireHoopOrPrompt === 'function') { requireHoopOrPrompt(); return; } } catch {}
-      setTimeout(attempt, 300);
-    };
-    attempt();
-  });
 
   const bootVideoPipelines = async () => {
     try { if (!window.poseDetector) await initPoseDetector?.(); } catch {}
