@@ -6,6 +6,10 @@ import { arcHeightLabel } from './shot_utils.js';
 import { enableHoopPickOnce } from './app.js';
 import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, canonHoop } from './hoop_tracker.js';
 
+window.DEMO = true;   // demo mode
+window.DEMO_MINIMAL_TABLE = true;   // always show the skinny table
+window.SESSION_MANAGER_OWNS_ENDING = false; // let UI auto-end at cap
+
 
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection;
@@ -106,6 +110,66 @@ try { if (typeof window.__logObserverEvent !== 'function') window.__logObserverE
 const formatCameraFacing = (label) => ((label === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + label;
 const formatHudCameraLabel = (label) => formatCameraFacing(label) + ' Camera';
 const formatCapDisplay = (cap) => (Number.isFinite(cap) && cap > 0) ? String(cap) : SYMBOL_INFINITY;
+
+// --- Mobile viewport and video tag fixes - keep HUD on page
+(function installMobileViewportFixes(){
+  // ensure a sane viewport on iOS
+  const id = 'doach-viewport';
+  let tag = document.querySelector(`meta[name="viewport"]`);
+  if (!tag) { tag = document.createElement('meta'); tag.name = 'viewport'; document.head.appendChild(tag); tag.id = id; }
+  tag.setAttribute('content', [
+    'width=device-width',
+    'initial-scale=1',
+    'maximum-scale=1',
+    'viewport-fit=cover',      // use the whole screen on notch phones
+    'user-scalable=no'         // prevent accidental pinch zoom breaking layout
+  ].join(', '));
+
+  // lock body to the visual viewport height (svh works on modern Safari)
+  const cssId = 'doach-mobile-css';
+  if (!document.getElementById(cssId)) {
+    const css = document.createElement('style');
+    css.id = cssId;
+    css.textContent = `
+      html, body { margin:0; padding:0; height:100%; background:#000; overscroll-behavior: none; }
+      .session-container, #videoPlayer { width:100%; height:100svh; object-fit: cover; }
+      #hudRoot { inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+      .hud-card, .hud-pill { -webkit-tap-highlight-color: transparent; }
+      button.vc-btn { font: 600 12px system-ui; border-radius: 10px; padding: 6px 10px; }
+    `;
+    document.head.appendChild(css);
+  }
+
+  // make sure the video tag cooperates with iOS autoplay
+  window.addEventListener('load', () => {
+    const v = document.getElementById('videoPlayer');
+    if (v) { v.setAttribute('playsinline',''); v.muted = true; }
+  });
+})();
+
+(function installHudAutoscale(){
+  function scaleHUD(){
+    const bar = document.getElementById('sessionHUD');
+    if (!bar) return;
+    const maxW = window.innerWidth - 24; // margins
+    // measure natural width
+    bar.style.transformOrigin = 'bottom center';
+    bar.style.transform = 'translateX(-50%) scale(1)';
+    const w = bar.getBoundingClientRect().width;
+    if (w > maxW) {
+      const s = Math.max(0.72, maxW / w);
+      bar.style.transform = `translateX(-50%) scale(${s})`;
+    }
+  }
+  window.addEventListener('resize', scaleHUD);
+  window.addEventListener('orientationchange', () => setTimeout(scaleHUD, 250));
+  const ro = new ResizeObserver(scaleHUD);
+  ro.observe(document.documentElement);
+  window.__hudScaleRO = ro;
+  setTimeout(scaleHUD, 50);
+})();
+
+
 
 // --- Minimal demo helpers ---
 function getClipHrefForShot(idx1Based, shot) {
@@ -221,187 +285,297 @@ function mountConnectionBanner() {
 }
 window.mountConnectionBanner = mountConnectionBanner;
 
-// Slow_arbiter.js - make sure it reads SLOW_RATE
-(function installSlowArbiter(){  
-  // Fully opt-in only. Unless explicitly enabled, do nothing.
-  if (window.ENABLE_SLOWMO !== true) { return; }
-  if (window.__SESSION_ACTIVE) return;
-  if (window.__SlowInstalled) return; window.__SlowInstalled = true;
+// === Camera facing control (Front/Back) — robust, with logs ===
+(function installCameraSwitcher(){
+  if (window.__cameraSwitcherInstalled) return; window.__cameraSwitcherInstalled = true;
 
-  const getV = () => document.getElementById('videoPlayer') || document.querySelector('video');
-  let desired = 1, capTo = 0;
+  const log = (...a)=>{ try{ console.log('[camera]', ...a); }catch{} };
+  const warn = (...a)=>{ try{ console.warn('[camera]', ...a); }catch{} };
 
-  function cfgRate() {
-    const r = Number(window.SLOW_RATE ?? 0.35);
-    return (isFinite(r) && r > 0 && r <= 1) ? r : 0.35;
-  }
-  function setRate(r, why){
-    const v = getV(); if (!v) return;
-    if (v.playbackRate !== r) { try { v.playbackRate = r; } catch {} }
-    desired = r;
-    // console.log('[Slow]', why, 'â†’', r);
+  // Persisted pref
+  function readPref(){ try { return localStorage.getItem('cam_facing') || 'Back'; } catch { return 'Back'; } }
+  function writePref(v){
+    try { localStorage.setItem('cam_facing', v); } catch {}
+    try { localStorage.setItem('doach_camera_facing', v === 'Back' ? 'environment' : 'user'); } catch {}
   }
 
-  window.addEventListener('shot:release', (e) => {
-    if (window.DEMO_SHOTSTORE_OWNS_ROWS === true) return;
-    // In live sessions or when FBF disabled, never alter playback rate
-    if (window.__SESSION_ACTIVE || window.USE_FBF_DURING_SHOT === false) return;
-    if (window.__fbfActive) return;
-    capTo = performance.now() + 2500;
-    setRate(cfgRate(), 'release');
-    console.log('[video_ui] shot:release()');
-  });
+  // Stop current stream cleanly
+  function stopStream(){
+    const v = document.getElementById('videoPlayer');
+    const s = v && v.srcObject;
+    if (s?.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch{} });
+    if (v) v.srcObject = null;
+  }
 
-  // HUD counters: reflect shot in-progress on release
-  try {
-    if (!window.__hudReleaseWired) {
-      window.__hudReleaseWired = true;
-  window.addEventListener('shot:release', (e) => {
+  // Ensure labels are available, then map likely front/back deviceIds
+  async function primeCatalog(){
+    const haveMedia = !!(document.getElementById('videoPlayer')?.srcObject);
+    let devs = await navigator.mediaDevices.enumerateDevices();
+    let vids = devs.filter(d=>d.kind==='videoinput');
+
+    if (!vids.some(v=>v.label)) {
+      // iOS/Safari often hides labels until we’ve granted camera once
+      if (!haveMedia) {
         try {
-          // Cap session at cap_DEFAULT shots
-          try {
-            const cap = getSessionCap();
-            const cur = Array.isArray(window.__shotList) ? window.__shotList.length : 0;
-            if (shouldEnforceSessionCap() && cur >= cap) return;
-          } catch {}
-          // Auto-create a backend session if missing
-          try { ensureSessionId(); } catch {}
-          // Ignore any release before hoop is confirmed/locked
-          if (window.__hoopConfirmed !== true) return;
-          if (!window.getLockedHoopBox?.()) return;
-          if (window.__shotTrackingArmed !== true) return;
-          // Require live pose before logging
-          try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
-          // UI cooldown only; trust the upstream release latch
-          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 3000);
-          const now = performance.now();
-          const lastUiMs = Number(window.__UI_LAST_RELEASE_MS || 0);
-          if (now - lastUiMs < unlockMs) return; // UI cooldown: ignore rapid repeats
-
-          // Trust upstream latch; UI enforces only armed + hoop + cooldown
-
-          // Ensure a pending shot record exists immediately on pose release
-          const list = (window.__shotList ||= []);
-          const rf = Number(e?.detail?.frame || 0);
-          const lastEntry = list.at?.(-1) || null;
-          const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
-          if (!same) {
-            const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-              ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-              : null;
-            list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
-            try { console.log('[HUD:add-pending]', { frame: rf, len: list.length }); } catch {}
-            try { window.__SHOT_IDX = (list.length - 1); } catch {}
-          }
-          window.__UI_LAST_RELEASE_MS = now;
-          const taken = list.length;
-          const made = (window.shotLog?.filter?.(s => s.made).length || 0);
-          const acc = taken ? Math.round((made / taken) * 100) : 0;
-          window.mountSessionHUD?.();
-          window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
-          window.setSessionStatus?.('Shot ' + taken + ' in progress');
-          if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
-            try {
-              const cap = getSessionCap();
-              const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-              if (shouldEnforceSessionCap() && Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
-                try { window.__sessionCapped = true; } catch {}
-                try { window.__capAwait = true; } catch {}
-                // Do NOT stop camera/analyzer yet; allow final summary to emit
-                try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
-                try {
-                  window.__capTimer = setTimeout(() => {
-                    try { if (window.__capAwait && window.__summaryShown !== true) window.autoEndSessionAndSummarize?.(); } catch {}
-                  }, Math.max(1200, Number(window.CAP_SUMMARY_GRACE_MS || 1600)));
-                } catch {}
-              }
-            } catch {}
-          }
-        } catch {}
-      });
+          const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          tmp.getTracks().forEach(t=>t.stop());
+        } catch(e){ warn('permission probe failed', e); }
+        devs = await navigator.mediaDevices.enumerateDevices();
+        vids = devs.filter(d=>d.kind==='videoinput');
+      }
     }
-  } catch {}
+    // Heuristics for front/back
+    const isFront = d => /front|user/i.test(d.label);
+    const isBack  = d => /back|rear|environment|world/i.test(d.label);
 
-  window.addEventListener('shot:summary', () => {
-    capTo = 0;
-    setRate(1, 'summary');
-    if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
+    let front = vids.find(isFront) || vids[0] || null;
+    let back  = vids.find(isBack)  || vids.find(d=>front && d.deviceId!==front.deviceId) || vids[1] || null;
+
+    window.__CAMERA_CATALOG = {
+      front: front?.deviceId || null,
+      back:  back?.deviceId  || null,
+      count: vids.length,
+      raw: vids.map(v=>({label:v.label, id:v.deviceId}))
+    };
+    log('catalog', window.__CAMERA_CATALOG);
+    return window.__CAMERA_CATALOG;
+  }
+
+  // Convert label -> constraint
+  function labelToFacing(label){ return (String(label).toLowerCase().startsWith('b')) ? 'environment' : 'user'; }
+
+  async function startWithConstraints(cons){
+    const v = document.getElementById('videoPlayer');
+    if (!v) return false;
+
+    // mobile autoplay sanity
+    try { v.setAttribute('playsinline',''); v.muted = true; } catch {}
+    const stream = await navigator.mediaDevices.getUserMedia({ video: cons, audio: false });
+    v.srcObject = stream;
+    try { await v.play?.(); } catch {}
+    try { syncOverlayToVideo?.(); } catch {}
+    return true;
+  }
+
+  async function restartCamera(label){
+    if (!navigator.mediaDevices?.getUserMedia) { warn('mediaDevices not available'); return false; }
+    const wantBack = (label === 'Back');
+
+    // 1) Prefer exact deviceId once we know it
+    try {
+      const cat = window.__CAMERA_CATALOG || await primeCatalog();
+      const id  = wantBack ? cat.back : cat.front;
+      if (id) {
+        stopStream();
+        log('switching via deviceId', label, id);
+        const ok = await startWithConstraints({ deviceId: { exact: id } });
+        if (ok) return true;
+        warn('deviceId path failed, falling back to facingMode');
+      }
+    } catch(e){ warn('deviceId switch error', e); }
+
+    // 2) Fallback to facingMode exact (works on iOS Safari most of the time)
+    try {
+      stopStream();
+      const facing = labelToFacing(label);
+      log('switching via facingMode', label, facing);
+      const ok = await startWithConstraints({ facingMode: { exact: facing } });
+      if (ok) return true;
+    } catch(e){ warn('facingMode exact failed', e); }
+
+    // 3) Last resort loose facing
+    try {
+      const facing = labelToFacing(label);
+      log('switching via loose facingMode', label, facing);
+      stopStream();
+      const ok = await startWithConstraints({ facingMode: facing });
+      if (ok) return true;
+    } catch(e){ warn('facingMode loose failed', e); }
+
+    warn('all switch attempts failed');
+    return false;
+  }
+
+  // Public API
+  window.getCameraFacing = () => window.__CAM_FACING || readPref();
+  window.setCameraFacing = async function(label){
+    const current = window.getCameraFacing();
+    const target  = (label === 'Front' || label === 'Back') ? label : (current === 'Back' ? 'Front' : 'Back');
+    const ok = await restartCamera(target);
+    if (ok) {
+      window.__CAM_FACING = target;
+      writePref(target);
       try {
-        if (window.__capAwait && window.__summaryShown !== true) {
-          window.__capAwait = false;
-          try { if (window.__capTimer) clearTimeout(window.__capTimer); } catch {}
-          setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
-        }
+        const hud = document.getElementById('hudCameraToggle') || document.getElementById('hud-camera-toggle') || document.getElementById('cameraToggle');
+        if (hud) hud.textContent = formatHudCameraLabel(target);
       } catch {}
+      try { window.dispatchEvent(new Event('camera:facing-changed')); } catch {}
+      try { window.dispatchEvent(new CustomEvent('camera:changed', { detail:{ label: target }})); } catch {}
     }
-  });
+    return ok;
+  };
 
-  // On end-session, speak and open summary table automatically
-  window.addEventListener('hud:end-session', () => {
-    try { if (window.PREF_VOICE_INTRO === true) speak('I am finalizing the session with shot results.'); } catch {}
-    try { renderFullShotTable(); wireFullShotModalActions(); } catch {}
-  });
-
-  window.addEventListener('shot:end', () => { setRate(1, 'end'); });
-
-  // NEW: unlock on early "end" signal too
-  window.addEventListener('shot:end', () => {
-    capTo = 0;
-    setRate(1, 'end');
-  });
-
-  // enforce / cap
-  (function tick(){
-    const v = getV();
-    if (window.__fbfActive) { requestAnimationFrame(tick); return; }
-    if (v && v.playbackRate !== desired) setRate(desired, 'enforce');
-    // hard stop if tracker has finalized or we bounced to idle
-    const bs = window.ballState || {};
-    if (desired < 0.99 && (bs.state === 'FROZEN' || bs.state === 'IDLE')) setRate(1, 'state');
-    if (desired < 0.99 && capTo && performance.now() > capTo) setRate(1, 'cap');
-    requestAnimationFrame(tick);
+  // Wrap startCamera so initial start honors preference
+  (function wrapStartCamera(){
+    const orig = window.startCamera;
+    window.startCamera = async function(){
+      const label = window.getCameraFacing();
+      const ok = await restartCamera(label);
+      if (!ok && typeof orig === 'function') return orig();
+      return ok;
+    };
   })();
 
-  // media hygiene - any manual interaction cancels slow-mo
-  const v = getV();
-  if (v) {
-    v.addEventListener('play',    () => setRate(1, 'play'));
-    v.addEventListener('pause',   () => setRate(1, 'pause'));
-    v.addEventListener('seeking', () => setRate(1, 'seek'));
-    v.addEventListener('ended',   () => setRate(1, 'ended'));
-    // Keep 1x during live sessions and uploaded demos; diagnose offenders changing rate
+  // Click binding: tolerate multiple ids and data attributes
+  function bind(el){
+    if (!el || el.__camBound) return;
+    el.__camBound = true;
+    el.addEventListener('click', async (ev) => {
+      ev.preventDefault?.();
+      const next = (window.getCameraFacing() === 'Back') ? 'Front' : 'Back';
+      log('toggle clicked; switching to', next);
+      await window.setCameraFacing(next);
+    });
+  }
+  bind(document.getElementById('hudCameraToggle'));
+  bind(document.getElementById('hud-camera-toggle'));
+  bind(document.getElementById('cameraToggle'));
+
+  // Delegation fallback if your HUD recreates the button each shot
+  document.addEventListener('click', (ev) => {
+    const t = ev.target?.closest?.('#hudCameraToggle, #hud-camera-toggle, #cameraToggle, [data-action="camera-toggle"]');
+    if (!t) return;
+    ev.preventDefault?.();
+    const next = (window.getCameraFacing() === 'Back') ? 'Front' : 'Back';
+    log('delegated toggle; switching to', next);
+    window.setCameraFacing(next);
+  }, { capture: true });
+
+  // Initialize label display
+  (function init(){
+    window.__CAM_FACING = window.__CAM_FACING || readPref();
     try {
-      clearInterval(window.__rateGuard);
-      window.__rateGuard = setInterval(() => {
-        try {
-          if (!window.__BG_ONLY && v.playbackRate !== 1) {
-            console.warn('[rateGuard] forcing 1x (was', v.playbackRate, ')');
-            v.playbackRate = 1;
-          }
-        } catch {}
-      }, 500);
+      const hud = document.getElementById('hudCameraToggle') || document.getElementById('hud-camera-toggle') || document.getElementById('cameraToggle');
+      if (hud) hud.textContent = formatHudCameraLabel(window.__CAM_FACING);
     } catch {}
+  })();
+})();
+
+// --- Compatibility shims so legacy HUD code works with the new switcher ---
+(function installCameraFacingShims(){
+  // Map 'environment'/'user' to 'Back'/'Front'
+  function envToLabel(facing){
+    const f = String(facing||'').toLowerCase();
+    return (f === 'environment' || f === 'back' || f === 'rear') ? 'Back' : 'Front';
+  }
+
+  // Legacy: setPreferredFacing('environment'|'user')
+  if (typeof window.setPreferredFacing !== 'function') {
+    window.setPreferredFacing = async (facing) => {
+      return window.setCameraFacing?.(envToLabel(facing));
+    };
+  }
+
+  // Legacy: flipCamera()
+  if (typeof window.flipCamera !== 'function') {
+    window.flipCamera = async () => {
+      return window.setCameraFacing?.(); // toggles current
+    };
+  }
+
+  // Legacy: setPreferredCamera(deviceId) -> try device first, then facing fallback
+  if (typeof window.setPreferredCamera !== 'function') {
+    window.setPreferredCamera = async (deviceId) => {
+      try {
+        const v = document.getElementById('videoPlayer');
+        // Stop any existing stream
+        const s = v?.srcObject;
+        if (s?.getTracks) s.getTracks().forEach(t => { try { t.stop(); } catch {} });
+        if (v) v.srcObject = null;
+
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: { exact: deviceId } },
+          audio: false
+        });
+        if (v) {
+          v.setAttribute?.('playsinline','');
+          v.muted = true;
+          v.srcObject = stream;
+          await v.play?.();
+        }
+        // Best guess on label sync
+        const devs = await navigator.mediaDevices.enumerateDevices();
+        const d = devs.find(d => d.deviceId === deviceId);
+        const lab = (d?.label || '').toLowerCase();
+        const label = /back|rear|environment/.test(lab) ? 'Back' : 'Front';
+        window.__CAM_FACING = label;
+        try { localStorage.setItem('cam_facing', label); } catch {}
+        try { localStorage.setItem('doach_camera_facing', label === 'Back' ? 'environment' : 'user'); } catch {}
+        window.dispatchEvent?.(new CustomEvent('camera:changed', { detail:{ label } }));
+        window.dispatchEvent?.(new Event('camera:facing-changed'));
+        return true;
+      } catch (e) {
+        console.warn('[camera] setPreferredCamera failed', e);
+        return false;
+      }
+    };
   }
 })();
 
+
+
 // --- Minimal HUD wires (always-on) -------------------------------------------
-// Ensure the session HUD 'shots taken' and coach prefixes advance even when
-// slow-mo arbiter is disabled. Reuses the same guard flag to avoid double wiring.
 (function installMinimalHudWires(){
   try {
-    if (window.__hudReleaseWired) return; // already wired by slowmo block
+    if (window.__hudReleaseWired) return;
     window.__hudReleaseWired = true;
+
+    // Helper: current session cap with overrides
+    function getSessionCap() {
+      if (window.__sessionContinue === true) return Infinity;
+
+      // 1) ?cap=3
+      try {
+        const q = new URLSearchParams(location.search || '');
+        const qp = q.get('cap');
+        const parsed = Number(qp);
+        if (qp != null && qp !== '' && Number.isFinite(parsed) && parsed > 0) return parsed;
+      } catch {}
+
+      // 2) Globals (allow any of these to drive the cap)
+      const env = Number(
+        window.__SESSION_CAP ??
+        window.SESSION_CAP ??
+        window.SESSION_SIZE ??
+        window.TEST_SESSION_SIZE
+      );
+      if (Number.isFinite(env) && env > 0) return env;
+
+      // 3) LocalStorage
+      try {
+        const ls = Number(localStorage.getItem('doach.sessionCap'));
+        if (Number.isFinite(ls) && ls > 0) return ls;
+      } catch {}
+
+      // 4) Default (fallback to constant or 10)
+      const def = Number(window.SESSION_SIZE_DEFAULT);
+      return (Number.isFinite(def) && def > 0) ? def : 10;
+    }
+    try { window.getSessionCap = getSessionCap; } catch {}
+
+    const shouldEnforceSessionCap = () => window.__sessionContinue !== true;
 
     window.addEventListener('shot:release', (e) => {
       try {
-        // Ignore any release before hoop is confirmed/locked
+        // Only count releases after a confirmed hoop and armed tracking
         if (window.__hoopConfirmed !== true) return;
         if (!window.getLockedHoopBox?.()) return;
-        // Ensure a pending shot record exists immediately on pose release
+
+        // Create a pending row immediately so HUD reflects progress
         const list = (window.__shotList ||= []);
         const rf = Number(e?.detail?.frame || 0);
-        const lastEntry = list.at?.(-1) || null;
-        const same = lastEntry && Number.isFinite(lastEntry.frameRelease) && lastEntry.frameRelease === rf;
+        const last = list.at?.(-1) || null;
+        const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
         if (!same) {
           const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
             ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
@@ -409,19 +583,27 @@ window.mountConnectionBanner = mountConnectionBanner;
           list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
           try { window.__SHOT_IDX = (list.length - 1); } catch {}
         }
+
+        // HUD numbers
         const taken = list.length;
         const made = (window.shotLog?.filter?.(s => s.made).length || 0);
         const acc  = taken ? Math.round((made / taken) * 100) : 0;
         window.mountSessionHUD?.();
-        window.updateSessionHUD?.({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart||Date.now()))/1000) });
+        window.updateSessionHUD?.({
+          taken,
+          made,
+          accuracy: acc,
+          elapsedSec: Math.floor((Date.now() - (window.__sessionStart || Date.now())) / 1000)
+        });
         window.setSessionStatus?.('Shot ' + taken + ' in progress');
 
-        // HARD STOP at cap: lock session and present summary
+        // HARD STOP at cap (UI-owned ending only)
         if (window.SESSION_MANAGER_OWNS_ENDING === true) return;
         try {
           const cap = getSessionCap();
           const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
           if (shouldEnforceSessionCap() && Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
+            // Lock state and auto open minimal summary
             try { window.__sessionCapped = true; } catch {}
             try { window.__sessionEnded = true; } catch {}
             try { window.__SESSION_ACTIVE = false; } catch {}
@@ -433,14 +615,13 @@ window.mountConnectionBanner = mountConnectionBanner;
       } catch {}
     });
 
-    // End on final summary as a backstop (ensures table even if release-path end was skipped)
+    // Backstop: if the scorer emitted summary without our release path, still end at cap
     window.addEventListener('shot:summary', () => {
       if (window.SESSION_MANAGER_OWNS_ENDING === true) return;
       try {
         const cap   = getSessionCap();
         const taken = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
         if (shouldEnforceSessionCap() && Number.isFinite(cap) && taken >= cap && window.__summaryShown !== true) {
-          // Lock and present now
           try { window.__sessionCapped = true; } catch {}
           try { window.__sessionEnded = true; } catch {}
           try { window.__SESSION_ACTIVE = false; } catch {}
@@ -450,119 +631,12 @@ window.mountConnectionBanner = mountConnectionBanner;
         }
       } catch {}
     }, { passive:true });
+
   } catch {}
 })();
 
-// ---- Global slow-mo FPS ----
-window.FRAMEbyFRAME_RATE = window.FRAMEbyFRAME_RATE ?? 1.0; // default 1 fps
-window.setFBFRate = (fps) => {
-  window.FRAMEbyFRAME_RATE = Math.max(0.25, Number(fps) || 1.0);
-  console.log('[video_ui] slow-mo fps =', window.FRAMEbyFRAME_RATE);
-};
 
-const SESSION_SIZE_DEFAULT = 3;  // default cap if nothing else provided
-function getSessionCap() {
-  if (window.__sessionContinue === true) return Infinity;
-  // Query-string override (?cap=3)
-  try {
-    const q = new URLSearchParams(location.search || '');
-    const qp = q.get('cap');
-    const parsed = Number(qp);
-    if (qp != null && qp !== '' && Number.isFinite(parsed) && parsed > 0) return parsed;
-  } catch {}
 
-  // Global values (SESSION_CAP, SESSION_SIZE, etc.)
-  const env = Number(window.__SESSION_CAP ?? window.SESSION_CAP ?? window.SESSION_SIZE ?? window.TEST_SESSION_SIZE);
-  if (Number.isFinite(env) && env > 0) return env;
-
-  // LocalStorage override
-  let ls = null;
-  try { ls = Number(localStorage.getItem('doach.sessionCap')); } catch {}
-  if (Number.isFinite(ls) && ls > 0) return ls;
-
-  // Fallback default
-  return SESSION_SIZE_DEFAULT;
-}
-try { window.getSessionCap = getSessionCap; } catch {}
-
-let __capEnforceTimer = null;
-
-export function moveUploadToSidebar() {
-  const chooseBtn = document.getElementById('videoInput');
-  const menuContainer = document.getElementById('sidebar-content');
-
-  if (chooseBtn && menuContainer) {
-    const label = document.createElement('label');
-    label.innerHTML = 'ðŸ“‚ <strong>Upload Video</strong>';
-    label.style.cursor = 'pointer';
-    label.className = 'sidebar-upload-btn';
-    label.appendChild(chooseBtn);
-    chooseBtn.style.display = 'none';
-    menuContainer.appendChild(label);
-  }
-}
-
-// â”--------€ Single-frame step (RVFC/arbiter-safe) â”--------€
-
-// Keep a tiny state so any old callers don't crash
-let __framePlay = { on:false, timer:null, cleanup:null, fps:12, video:null };
-
-function getVideoEl() {
-  return window.__videoEl
-      || window.video
-      || document.getElementById('videoPlayer')
-      || document.querySelector('video');
-}
-
-function getFPS(v) {
-  // prefer a known fps if you set it elsewhere; fall back to 10
-  return Number(window.__videoFPS) > 0 ? Number(window.__videoFPS) : 10;
-}
-
-// No-op, just clears any legacy timers if they exist
-export function cancelFramePlay(){
-  if (__framePlay.timer) clearTimeout(__framePlay.timer);
-  if (__framePlay.cleanup) { try{ __framePlay.cleanup(); }catch{} }
-  __framePlay = { on:false, timer:null, cleanup:null, fps:12, video:null };
-}
-
-// play control - step forward & back one frame
-export async function stepFrame(video, dir = +1){
-  video = video || getVideoEl();
-  if (!video) return;
-
-  try { video.pause(); } catch {}
-  const fps  = getFPS(video);
-  const dt   = (1 / fps) * (dir >= 0 ? 1 : -1);
-  const next = Math.max(0, Math.min((video.duration || Infinity), (video.currentTime || 0) + dt));
-  if (Math.abs(next - (video.currentTime || 0)) < 1e-6) return;
-
-  // wait until that frame is actually decoded/presented
-  const once = new Promise(res => video.addEventListener('seeked', res, { once:true }));
-  video.currentTime = next;
-  try { await once; } catch {}
-
-  // If app.js exposes a one-shot render hook, use it; otherwise
-  // any overlays will refresh next time you play.
-  if (typeof window.renderCurrentFrameOnce === 'function') {
-    try { window.renderCurrentFrameOnce(video); } catch {}
-  } else {
-    // Emit a lightweight signal in case the analyzer listens for manual steps
-    window.dispatchEvent(new CustomEvent('video:stepped', { detail: { time: video.currentTime }}));
-  }
-}
-
-// Legacy FBF shell (kept only so old callers wonâ€™t crash)
-export function startFramePlay(/* video, fps */){
-  console.log('[video_ui] startFramePlay() ignored (RVFC/arbiter active)');
-  cancelFramePlay();
-}
-
-window.frameMode = {
-  on()  { console.log('[video_ui] frameMode.on() ignored (RVFC/arbiter active)'); },
-  off() { cancelFramePlay(); },
-  isOn(){ return false; }
-};
 
 
 // UI toggle for scorer mode (Weighted / Hybrid)
@@ -623,95 +697,6 @@ export function setSessionStatus(text = '') {
   }
   badge.textContent = text || 'SESSION IN PROGRESSâ€¦';
   badge.style.display = text === null ? 'none' : 'block';
-}
-
-// -----------------------------------------------------------------//
-// â”--------€ Playback controls UI (mounted inside hudRoot) â”--------€//
-// -----------------------------------------------------------------//
-export function createPlaybackControls(video) {
-  window.__videoEl = video;
-  // remove any previous bar (prevent duplicates after re-load)
-  const root = ensureHudRoot(); // <-- always sit above the video
-  root.querySelectorAll('.video-controls').forEach(el => el.remove());
-
-  // In background-only mode, do not render transport controls at all.
-  if (window.__BG_ONLY) {
-    return;
-  }
-
-  // Camera switcher now lives in the bottom HUD as an icon button
-
-  // Skip transport controls for live camera feeds (srcObject present)
-  // but still mount the session HUD so the bottom bar is always visible.
-  try {
-    if (video && video.srcObject) {
-      try { mountSessionHUD(); setSessionStatus('SESSION IN PROGRESS'); } catch {}
-      return;
-    }
-  } catch {}
-
-  // If a live session is active, do NOT render playback transport controls.
-  // We still mount the session HUD/status, but keep user playback in real-time.
-  if (window.__SESSION_ACTIVE) {
-    mountSessionHUD();
-    setSessionStatus('SESSION IN PROGRESS');
-    return;
-  }
-
-  const container = document.createElement('div');
-  container.className = 'video-controls hud-card hud-pill';
-  Object.assign(container.style, {
-    position: 'absolute',
-    left: '50%',
-    transform: 'translateX(-50%)',
-    bottom: '88px',            // sits above the bottom HUD
-    display: 'flex',
-    gap: '8px',
-    pointerEvents: 'auto',
-    zIndex: 10010              // over the HUD
-  });
-
-  const mk = (txt, title, on) => {
-    const b = document.createElement('button');
-    b.className = 'vc-btn';
-    b.textContent = txt;
-    b.title = title || '';
-    b.addEventListener('click', (e) => { e.stopPropagation(); on?.(); });
-    return b;
-  };
-
-  // ---- buttons ----
-  const bHome  = mk('Go to start',    () => { cancelFramePlay(); video.pause(); video.currentTime = 0; });
-  const bPause = mk('Pause',          () => { cancelFramePlay(); video.pause(); });
-  const bPlay  = mk('Play', () => {
-    if (!requireHoopOrPrompt()) return;
-    cancelFramePlay(); try { video.playbackRate = 1.0; } catch {}
-    video.play();
-  });
-  const bAuto  = mk('Auto-step', () => {
-    if (!requireHoopOrPrompt()) return;
-    if (__framePlay.on) { cancelFramePlay(); bAuto.dataset.active='0'; }
-    else { startFramePlay(video, Number(window.FRAMEbyFRAME_RATE) || 1.0); video.pause(); bAuto.dataset.active='1'; }
-  });
-  const bNext  = mk('Next',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,+1); });
-  const bPrev  = mk('Prev',  () => { if (!requireHoopOrPrompt()) return; stepFrame(video,-1); });
-
-  [bPrev,bHome,bPlay,bPause,bAuto,bNext].forEach(b => container.appendChild(b));
-  root.appendChild(container);
-
-  // keep things tidy
-  video.addEventListener('ended', () => { cancelFramePlay(); bAuto.dataset.active = '0'; });
-  video.addEventListener('play',  () => { if (__framePlay.on) video.pause(); }); // donâ€™t fight auto-step
-
-  // lift the rest of the HUD too (metrics + status)
-  mountSessionHUD();
-  setSessionStatus('SESSION IN PROGRESSâ€¦');
-
-  // handy toggle for HTML
-  window.togglePlay = () => {
-    if (!requireHoopOrPrompt()) { video.pause(); return; }
-    video.paused ? video.play() : video.pause();
-  };
 }
 
 

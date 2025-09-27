@@ -241,6 +241,7 @@
     panel.openClose = ()=>{ panel.classList.remove('open'); panel.__unesc?.(); };
     panel.setBody = (n)=>{ body.innerHTML=''; body.append(n); };
     __panels.add(panel);
+    window.__makeSidePanel = makeSidePanel;
     return panel;
   }
 
@@ -1405,21 +1406,17 @@ function loadDoachPrefs() {
 function saveDoachPrefs(p) {
   localStorage.setItem('doach_prefs', JSON.stringify(p||{}));
 }
+
+// ---------- Preferences (pop-out) :: DEMO-LEAN ----------
+
+// 1) Defaults with demo toggles included
 function getDefaults() {
   return {
-    // playback
-    slowmoFps: Number(window.FRAMEbyFRAME_RATE ?? 3.0),
-
-    // proximity
-    proxX:      (window.PREF_PROX?.x ?? 200),
-    proxYAbove: (window.PREF_PROX?.yAbove ?? 170),
-    proxYBelow: (window.PREF_PROX?.yBelow ?? 100),
-
-    // scoring
+    // scoring (kept)
     scorerMode: (window.SHOT_SCORER_MODE || 'weighted'),
     weightedThresh: Number(window.WEIGHTED_THRESH ?? 0.75),
 
-    // overlay visibility
+    // overlay visibility (basic)
     show: {
       ball: (window.PREF_SHOW?.ball ?? true),
       trails: (window.PREF_SHOW?.trails ?? true),
@@ -1427,229 +1424,149 @@ function getDefaults() {
       hoop: (window.PREF_SHOW?.hoop ?? true),
       backboard: (window.PREF_SHOW?.backboard ?? false),
       net: (window.PREF_SHOW?.net ?? false),
+
+      // NEW demo toggles
+      poseLines: (window.SHOW_POSE_LINES === true),
+      releaseGate: (window.SHOW_RELEASE_GATE === true)
     },
 
     // audio/permissions
     audioOn: (window.PREF_AUDIO_ENABLED !== false),
     allowMic: (window.PREF_ALLOW_MIC !== false),
-    allowCamera: !!window.PREF_ALLOW_CAMERA,
-
-    // advanced weights/tunables (optional)
-    weights: {
-      hoop:       (window.PREF_WEIGHTS?.hoop ?? 0.15),
-      net:        (window.PREF_WEIGHTS?.net ?? 0.20),
-      tubeHit:    (window.PREF_WEIGHTS?.tubeHit ?? 0.30),
-      netMoved:   (window.PREF_WEIGHTS?.netMoved ?? 0.40),
-      trailCenter:(window.PREF_WEIGHTS?.trailCenter ?? 0.25),
-    },
-    tunables: {
-      TAIL: (window.PREF_TUNABLES?.TAIL ?? 28),
-      ELLIPSE_X: (window.PREF_TUNABLES?.ELLIPSE_X ?? 0.45),
-      ELLIPSE_Y: (window.PREF_TUNABLES?.ELLIPSE_Y ?? 0.45),
-      NET_PAD: (window.PREF_TUNABLES?.NET_PAD ?? 10),
-      LINE_XTOL_MULT: (window.PREF_TUNABLES?.LINE_XTOL_MULT ?? 1.1),
-      NETLINE_POS: (window.PREF_TUNABLES?.NETLINE_POS ?? 0.92),
-      DEPTH_POS: (window.PREF_TUNABLES?.DEPTH_POS ?? 1.22),
-      TUBE_WIDTH_RATIO: (window.PREF_TUNABLES?.TUBE_WIDTH_RATIO ?? 0.55),
-      TUBE_MIN_CONSEC: (window.PREF_TUNABLES?.TUBE_MIN_CONSEC ?? 3),
-      TUBE_ALLOW_GAPS: (window.PREF_TUNABLES?.TUBE_ALLOW_GAPS ?? 2),
-      SMALL_UP_TOL: (window.PREF_TUNABLES?.SMALL_UP_TOL ?? 1.5),
-      TRAIL_RADIUS: (window.PREF_TUNABLES?.TRAIL_RADIUS ?? 15),
-      CENTER_LANE_MIN: (window.PREF_TUNABLES?.CENTER_LANE_MIN ?? 18),
-    }
+    allowCamera: !!window.PREF_ALLOW_CAMERA
   };
 }
+
+function loadDoachPrefs() {
+  try { return JSON.parse(localStorage.getItem('doach_prefs')) || {}; } catch { return {}; }
+}
+function saveDoachPrefs(p) {
+  localStorage.setItem('doach_prefs', JSON.stringify(p||{}));
+}
+
+// 2) Apply prefs to globals (ties SHOW_POSE_LINES + SHOW_RELEASE_GATE)
 function applyPrefs(p) {
-  // playback
-  window.FRAMEbyFRAME_RATE = Number(p.slowmoFps) || 1.0;
-
-  // proximity (shot_logger + overlay will read these)
-  window.PREF_PROX = {
-    x: Number(p.proxX) || 200,
-    yAbove: Number(p.proxYAbove) || 170,
-    yBelow: Number(p.proxYBelow) || 100
-  };
-
   // scoring
   window.SHOT_SCORER_MODE = String(p.scorerMode || 'weighted').toLowerCase();
   window.WEIGHTED_THRESH  = Math.max(0.5, Math.min(0.95, Number(p.weightedThresh)||0.75));
 
   // visibility
-  window.PREF_SHOW = {
+  const show = {
     ball: !!p.show.ball, trails: !!p.show.trails, player: !!p.show.player,
     hoop: !!p.show.hoop, backboard: !!p.show.backboard, net: !!p.show.net
   };
+  window.PREF_SHOW = show;
+
+  // demo toggles -> hard globals
+  window.SHOW_POSE_LINES   = !!p.show.poseLines;
+  window.SHOW_RELEASE_GATE = !!p.show.releaseGate;
 
   // audio / mic / camera
   window.PREF_AUDIO_ENABLED = !!p.audioOn;
   window.PREF_ALLOW_MIC     = !!p.allowMic;
   window.PREF_ALLOW_CAMERA  = !!p.allowCamera;
 
-  // advanced (used by scorer if you wire the optional patch below)
-  window.PREF_WEIGHTS  = {...p.weights};
-  window.PREF_TUNABLES = {...p.tunables};
-
   saveDoachPrefs(p);
-  console.log('[prefs] applied', p);
+
+  // let overlays react immediately
+  try { window.dispatchEvent(new CustomEvent('prefs:changed', { detail: { prefs: p } })); } catch {}
+  // force an overlay repaint if available
+  try { window.drawLiveOverlay?.(window.lastDetectedFrame?.objects || [], window.playerState); } catch {}
+
+  console.log('[prefs] applied (demo lean)', p);
 }
 
-function numInput(v, opts={min:0,max:999,step:1}) {
-  const i=document.createElement('input'); i.type='number';
-  i.min=opts.min; i.max=opts.max; i.step=opts.step; i.value=v; return i;
-}
-function rng(id, label, min, max, step, val, hint='') {
-  const row=document.createElement('div'); row.className='doach-field';
-  const lab=document.createElement('label'); lab.textContent=label;
-  if (hint) lab.title = hint;
-  const r=document.createElement('input'); r.type='range'; r.className='doach-range';
-  r.min=min; r.max=max; r.step=step; r.value=val;
-  const out=document.createElement('output'); out.value=val;
-  r.oninput=()=> out.value=r.value;
-  row.append(lab, r, out); r.id=id; return row;
-}
-function chk(id, label, checked) {
-  const row=document.createElement('div'); row.className='doach-field';
-  const lab=document.createElement('label'); lab.textContent=label;
-  const c=document.createElement('input'); c.type='checkbox'; c.checked=!!checked; c.id=id;
-  row.append(lab, c); return row;
-}
-function sel(id, label, options, value) {
-  const row=document.createElement('div'); row.className='doach-field';
-  const lab=document.createElement('label'); lab.textContent=label;
-  const s=document.createElement('select'); s.id=id;
-  options.forEach(([v,t])=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; o.selected=(v===value); s.appendChild(o); });
-  row.append(lab, s); return row;
-}
-function twoCols(a,b){ const row=document.createElement('div'); row.className='doach-row'; const c1=document.createElement('div'); c1.className='col'; const c2=document.createElement('div'); c2.className='col'; c1.append(a); c2.append(b); row.append(c1,c2); return row;}
-
-// Global side-panel helper (define once)
-if (!window.__makeSidePanel) {
-  window.__makeSidePanel = function makeSidePanel(title) {
-    const panel = document.createElement('div');
-    panel.className = 'doach-sidepanel';
-    panel.setAttribute('role','dialog');
-    panel.setAttribute('aria-label', title);
-
-    // start hidden (off-screen)
-    panel.style.transform = 'translateX(110%)';
-
+// 3) Minimal Preferences panel UI
+async function openPreferencesPanel() {
+  console.log('[menu] openPreferencesPanel (demo lean)');
+  const factory = window.__makeSidePanel || (title => {
+    // tiny fallback panel if someone forgets to export makeSidePanel
+    const wrap = document.createElement('div');
+    wrap.className = 'doach-sidepanel open';
+    wrap.style.cssText = 'position:fixed;top:0;right:0;bottom:0;width:420px;z-index:10045;background:rgba(14,14,18,.98);color:#fff;border-left:1px solid rgba(255,255,255,.12);';
     const head = document.createElement('div');
     head.className = 'doach-panel-head';
-    const ttl = document.createElement('div'); ttl.textContent = title;
-    const closeBtn = document.createElement('button');
-    closeBtn.className = 'doach-btn ghost';
-    closeBtn.textContent = 'Close';
-    closeBtn.onclick = () => panel.openClose?.();
-    head.append(ttl, closeBtn);
-
+    head.style.cssText = 'display:flex;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid rgba(255,255,255,.12);font:600 14px system-ui;';
+    head.innerHTML = `<div>${title||'Preferences'}</div>`;
+    const close = document.createElement('button');
+    close.className = 'doach-btn ghost';
+    close.textContent = 'Close';
+    close.onclick = () => document.body.removeChild(wrap);
+    head.appendChild(close);
     const body = document.createElement('div');
     body.className = 'doach-panel-body';
-
-    panel.append(head, body);
-    document.body.appendChild(panel);
-
-    function onEsc(e){ if (e.key === 'Escape') panel.openClose(); }
-
-    // ✅ force transform inline so it shows even if CSS didn’t win specificity
-    panel.open = () => {
-      panel.classList.add('open');
-      panel.style.transform = 'translateX(0)';
-      window.addEventListener('keydown', onEsc);
+    body.style.cssText = 'padding:12px;overflow:auto;height:calc(100% - 48px);';
+    wrap.append(head, body);
+    document.body.appendChild(wrap);
+    return {
+      setBody(n){ body.innerHTML=''; body.appendChild(n); },
+      open(){ /* already open */ },
+      openClose(){ try{ document.body.removeChild(wrap); }catch{} }
     };
-    panel.openClose = () => {
-      panel.classList.remove('open');
-      panel.style.transform = 'translateX(110%)';
-      window.removeEventListener('keydown', onEsc);
-    };
-    panel.setBody = (node) => { body.innerHTML = ''; body.append(node); };
+  });
+  const panel = (openPreferencesPanel.panel ||= factory('Preferences'));
 
-    return panel;
-  };
-}
-
-
-// Open / display preferences panel
-async function openPreferencesPanel() {
-  console.log('[menu] openPreferencesPanel');
-  const panel = (openPreferencesPanel.panel ||= window.__makeSidePanel('Preferences'));
   const body  = document.createElement('div');
+
   const defs  = getDefaults();
   const saved = loadDoachPrefs();
-  const prefs = {...defs, ...saved,
-    show: {...defs.show, ...(saved.show||{})},
-    weights: {...defs.weights, ...(saved.weights||{})},
-    tunables:{...defs.tunables, ...(saved.tunables||{})},
+  const prefs = {
+    ...defs,
+    ...saved,
+    show: { ...defs.show, ...(saved.show || {}) }
   };
 
-  // Playback
-  body.append(
-    rng('pf_slowmo','Slow-mo frame rate (fps)', 0.25, 6, 0.05, prefs.slowmoFps, 'Frame-by-frame replay speed.')
-  );
+  // simple helpers
+  const field = (label, input) => {
+    const row = document.createElement('div'); row.className = 'doach-field';
+    const lab = document.createElement('label'); lab.textContent = label;
+    row.append(lab, input); return row;
+  };
+  const chk = (id, label, checked) => {
+    const input = document.createElement('input'); input.type = 'checkbox'; input.id = id; input.checked = !!checked;
+    return field(label, input);
+  };
+  const sel = (id, label, options, value) => {
+    const s = document.createElement('select'); s.id = id;
+    options.forEach(([v,t])=>{ const o=document.createElement('option'); o.value=v; o.textContent=t; o.selected=(v===value); s.appendChild(o); });
+    return field(label, s);
+  };
+  const rng = (id, label, min, max, step, val, hint='') => {
+    const wrap=document.createElement('div'); wrap.className='doach-field';
+    const lab=document.createElement('label'); lab.textContent=label; if (hint) lab.title=hint;
+    const r=document.createElement('input'); r.type='range'; r.className='doach-range';
+    r.min=min; r.max=max; r.step=step; r.value=val;
+    const out=document.createElement('output'); out.value=val; r.oninput=()=> out.value=r.value;
+    r.id=id; wrap.append(lab, r, out); return wrap;
+  };
 
-  // Proximity
-  body.append(twoCols(
-    (()=>{ const f=document.createElement('div'); f.className='doach-field'; f.append(
-      (()=>{ const l=document.createElement('label'); l.textContent='Proximity ±X (px)'; return l;})(),
-      (()=>{ const i=numInput(prefs.proxX,{min:50,max:500,step:5}); i.id='pf_proxX'; return i;})()
-    ); return f; })(),
-    (()=>{ const f=document.createElement('div'); f.className='doach-field'; f.append(
-      (()=>{ const l=document.createElement('label'); l.textContent='Above rim (px)'; return l;})(),
-      (()=>{ const i=numInput(prefs.proxYAbove,{min:20,max:300,step:5}); i.id='pf_proxUp'; return i;})()
-    ); return f; })()
-  ));
-  body.append(
-    (()=>{ const f=document.createElement('div'); f.className='doach-field'; f.append(
-      (()=>{ const l=document.createElement('label'); l.textContent='Below rim (px)'; return l;})(),
-      (()=>{ const i=numInput(prefs.proxYBelow,{min:20,max:300,step:5}); i.id='pf_proxDn'; return i;})()
-    ); return f; })()
-  );
+  // DISPLAY
+  body.append(document.createElement('hr'));
+  const hDisp = document.createElement('div'); hDisp.textContent = 'Display'; hDisp.style.cssText='font:600 13px system-ui; opacity:.85; margin:6px 0;';
+  body.append(hDisp);
+  body.append(chk('pf_show_poseLines', 'Show pose lines', prefs.show.poseLines));
+  body.append(chk('pf_show_releaseGate', 'Show release gate HUD', prefs.show.releaseGate));
+  // body.append(chk('pf_show_player', 'Show players', prefs.show.player));
+  // body.append(chk('pf_show_ball',   'Show ball',    prefs.show.ball));
+  // body.append(chk('pf_show_trails', 'Show ball trail', prefs.show.trails));
+  // body.append(chk('pf_show_hoop',   'Show hoop',    prefs.show.hoop));
+  // body.append(chk('pf_show_bb',     'Show backboard', prefs.show.backboard));
+  // body.append(chk('pf_show_net',    'Show net',     prefs.show.net));
 
-  // Scoring
-  body.append(
-    sel('pf_mode', 'Shot scorer mode', [['weighted','Weighted (trail only)'],['hybrid','Hybrid (region OR trail)']], (prefs.scorerMode||'weighted'))
-  );
-  body.append(
-    rng('pf_thresh','Make threshold', 0.5, 0.95, 0.01, prefs.weightedThresh, 'Trail score required for a make.')
-  );
+  // SCORER
+  // body.append(document.createElement('hr'));
+  // const hScore = document.createElement('div'); hScore.textContent = 'Scorer'; hScore.style.cssText='font:600 13px system-ui; opacity:.85; margin:6px 0;';
+  // body.append(hScore);
+  // body.append(sel('pf_mode', 'Mode', [['weighted','Weighted'],['hybrid','Hybrid']], (prefs.scorerMode||'weighted')));
+  // body.append(rng('pf_thresh', 'Make threshold', 0.5, 0.95, 0.01, Number(prefs.weightedThresh ?? 0.75)));
 
-  // Visibility
-  body.append(chk('pf_show_ball','Show ball', prefs.show.ball));
-  body.append(chk('pf_show_trails','Show ball trail', prefs.show.trails));
-  body.append(chk('pf_show_player','Show players', prefs.show.player));
-  body.append(chk('pf_show_hoop','Show hoop', prefs.show.hoop));
-  body.append(chk('pf_show_bb','Show backboard', prefs.show.backboard));
-  body.append(chk('pf_show_net','Show net', prefs.show.net));
-
-  // Audio / permissions
+  // PERMISSIONS / AUDIO
+  body.append(document.createElement('hr'));
+  const hPerm = document.createElement('div'); hPerm.textContent = 'Permissions & Audio'; hPerm.style.cssText='font:600 13px system-ui; opacity:.85; margin:6px 0;';
+  body.append(hPerm);
   body.append(chk('pf_audio_on','Audio on (TTS)', prefs.audioOn));
   body.append(chk('pf_allow_mic','Allow microphone', prefs.allowMic));
   body.append(chk('pf_allow_cam','Allow camera', prefs.allowCamera));
-
-  // Advanced (collapsed summary)
-  const advBtn = document.createElement('button');
-  advBtn.className='doach-btn ghost';
-  advBtn.textContent='Advanced: weights & tunables';
-  const advWrap = document.createElement('div');
-  advWrap.style.display='none';
-  advBtn.onclick = () => advWrap.style.display = advWrap.style.display==='none' ? 'block' : 'none';
-
-  // weights
-  advWrap.append(
-    rng('pf_w_hoop','Weight: hoop ellipse', 0, 0.6, 0.01, prefs.weights.hoop),
-    rng('pf_w_net','Weight: net region', 0, 0.6, 0.01, prefs.weights.net),
-    rng('pf_w_tube','Weight: tube run', 0, 0.7, 0.01, prefs.weights.tubeHit),
-    rng('pf_w_netMoved','Weight: net moved', 0, 0.7, 0.01, prefs.weights.netMoved),
-    rng('pf_w_trail','Weight: center stripe', 0, 0.6, 0.01, prefs.weights.trailCenter)
-  );
-
-  // a couple key tunables (you can add the whole set if you want)
-  advWrap.append(
-    rng('pf_t_tail','Trail tail length', 6, 60, 1, prefs.tunables.TAIL),
-    rng('pf_t_tubeW','Tube width ratio', 0.3, 1.2, 0.01, prefs.tunables.TUBE_WIDTH_RATIO),
-    rng('pf_t_lineTol','Center x-tolerance', 0.5, 2.0, 0.05, prefs.tunables.LINE_XTOL_MULT)
-  );
-
-  body.append(advBtn, advWrap);
 
   // Actions
   const actions = document.createElement('div'); actions.className='doach-actions';
@@ -1658,51 +1575,33 @@ async function openPreferencesPanel() {
   actions.append(applyBtn, resetBtn);
   body.append(actions);
 
-  // read + apply
   function readPrefsFromUI() {
     return {
-      slowmoFps: Number(body.querySelector('#pf_slowmo').value),
-
-      proxX:      Number(body.querySelector('#pf_proxX').value),
-      proxYAbove: Number(body.querySelector('#pf_proxUp').value),
-      proxYBelow: Number(body.querySelector('#pf_proxDn').value),
-
       scorerMode: (body.querySelector('#pf_mode')?.value || 'weighted'),
       weightedThresh: Number(body.querySelector('#pf_thresh').value),
-
       show: {
-        ball:   body.querySelector('#pf_show_ball').checked,
-        trails: body.querySelector('#pf_show_trails').checked,
-        player: body.querySelector('#pf_show_player').checked,
-        hoop:   body.querySelector('#pf_show_hoop').checked,
+        poseLines: body.querySelector('#pf_show_poseLines').checked,
+        releaseGate: body.querySelector('#pf_show_releaseGate').checked,
+        player:  body.querySelector('#pf_show_player').checked,
+        ball:    body.querySelector('#pf_show_ball').checked,
+        trails:  body.querySelector('#pf_show_trails').checked,
+        hoop:    body.querySelector('#pf_show_hoop').checked,
         backboard: body.querySelector('#pf_show_bb').checked,
-        net:    body.querySelector('#pf_show_net').checked,
+        net:     body.querySelector('#pf_show_net').checked
       },
-
       audioOn:    body.querySelector('#pf_audio_on').checked,
       allowMic:   body.querySelector('#pf_allow_mic').checked,
-      allowCamera:body.querySelector('#pf_allow_cam').checked,
-
-      weights: {
-        hoop: Number(body.querySelector('#pf_w_hoop').value),
-        net: Number(body.querySelector('#pf_w_net').value),
-        tubeHit: Number(body.querySelector('#pf_w_tube').value),
-        netMoved: Number(body.querySelector('#pf_w_netMoved').value),
-        trailCenter: Number(body.querySelector('#pf_w_trail').value)
-      },
-      tunables: {
-        TAIL: Number(body.querySelector('#pf_t_tail').value),
-        TUBE_WIDTH_RATIO: Number(body.querySelector('#pf_t_tubeW').value),
-        LINE_XTOL_MULT: Number(body.querySelector('#pf_t_lineTol').value),
-        // keep other tunables as previous value to avoid losing them
-        ...prefs.tunables
-      }
+      allowCamera:body.querySelector('#pf_allow_cam').checked
     };
   }
 
-  applyBtn.onclick = () => { applyPrefs(readPrefsFromUI()); closeAllMenus('apply-prefs'); };
-  resetBtn.onclick = () => { const d=getDefaults(); saveDoachPrefs(d); applyPrefs(d); panel.openClose(); };
+  applyBtn.onclick = () => { applyPrefs(readPrefsFromUI()); panel.openClose?.(); };
+  resetBtn.onclick = () => { const d=getDefaults(); saveDoachPrefs(d); applyPrefs(d); panel.openClose?.(); };
 
   panel.setBody(body);
   panel.open();
 }
+
+// expose for menu item
+window.openPreferencesPanel = openPreferencesPanel;
+

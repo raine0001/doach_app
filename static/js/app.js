@@ -11,15 +11,12 @@ import {
   drawLiveOverlay,
   sendFrameToDetect,
   syncOverlayToVideo,
-  installOverlayTracer,
-  removeOverlayTracer
 } from './fix_overlay_display.js';
 
 import {
   handleHoopSelection,
   getLockedHoopBox,
   canonHoop,
-  asTopLeft,
   stabilizeLockedHoop,
   filterObjectsToLockedHoop
 } from './hoop_tracker.js';
@@ -32,7 +29,6 @@ import {
 
 import {
   showPromptMessage as uiShowPromptMessage,
-  // requireHoopOrPrompt 
 } from './video_ui.js';
 
 import { setReleaseKnobs } from './release_gate.js';
