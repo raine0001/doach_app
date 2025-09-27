@@ -36,9 +36,10 @@ import {
 } from './video_ui.js';
 
 import { setReleaseKnobs } from './release_gate.js';
+import { speak } from './coach_voice.js';
 
 // ---------- Minimal knobs ----------
-window.SESSION_SIZE        = window.SESSION_SIZE ?? 3;            // cap shots per session
+window.SESSION_SIZE        = window.SESSION_SIZE ?? 1;            // cap shots per session
 window.REL_COOLDOWN_MS     = window.REL_COOLDOWN_MS ?? 1200;
 window.POSE_STREAK_NEED    = window.POSE_STREAK_NEED ?? 2;
 window.__POSE_ONLY_MODE    = true;                                // allow fallback summaries
@@ -605,7 +606,8 @@ export function enableHoopPickOnce() {
   ov.style.zIndex        = '100';
   vid.style.pointerEvents = 'none';
   const name = getDisplayName();
-  showPromptCompat(`Hi ${name}, tap the hoop to begin session`, 4000);
+  showPromptCompat(`Hi ${name}, Tap the Hoop to Begin`, 4000);   // prompt upon login
+  speak(`Hi ${name}, Let's get started, tap the Hoop, then shoot when ready.`);
 
 
   // Refresh rect/mapping now that picking is armed
@@ -1036,7 +1038,8 @@ document.addEventListener('DOMContentLoaded', ()=>{
 
   (fetchUserName?.() ?? Promise.resolve()).catch(()=>{}).finally(() => {
     const name = getDisplayName();
-    showPromptCompat(`Hi ${name}, tap the hoop to begin session`, 4000);
+    showPromptCompat(`Hi ${name}`, 3000);
+    speak(`Hi ${name}, welcome to Doach`);
     const attempt = () => {
       try { if (typeof requireHoopOrPrompt === 'function') { requireHoopOrPrompt(); return; } } catch {}
       setTimeout(attempt, 300);
