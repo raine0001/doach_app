@@ -277,6 +277,30 @@ window.updateSessionHUD = updateSessionHUD;
     return ok;
   };
 
+  // Legacy helpers to support older callsites expecting the previous camera API.
+  window.setPreferredFacing = async function(pref){
+    const facing = String(pref || '').toLowerCase();
+    const label = (facing === 'user' || facing === 'front') ? 'Front' : 'Back';
+    try {
+      const ok = await window.setCameraFacing(label);
+      return ok;
+    } catch (err) {
+      console.warn('[camera] setPreferredFacing failed', err);
+      return false;
+    }
+  };
+
+  window.flipCamera = async function(){
+    try {
+      const current = window.getCameraFacing();
+      const target = current === 'Back' ? 'Front' : 'Back';
+      return await window.setCameraFacing(target);
+    } catch (err) {
+      console.warn('[camera] flipCamera failed', err);
+      return false;
+    }
+  };
+
   // Wrap startCamera so initial start honors preference
   (function wrapStartCamera(){
     const orig = window.startCamera;

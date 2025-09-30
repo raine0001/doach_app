@@ -48,7 +48,6 @@ window.__POSE_ONLY_MODE = true;                           // allow fallback summ
 window.USE_MICROCLIP    = window.USE_MICROCLIP ?? true;
 window.__MICROCLIP_MS   = window.__MICROCLIP_MS ?? 3000;  // 3s clip
 
-window.REL_COOLDOWN_MS = 900;         // faster re-arm
 window.NEXT_SHOT_UNLOCK_MS = 800;     // UI unlock sooner
 window.DOACH_RELEASE_TRACE = true;    // logs snapshots and forced summaries
 
@@ -669,24 +668,27 @@ function startPreDetectWarm(videoEl){
 
 
 // ---------- Pose sampler → release ----------
-(function installPoseSampler(){
-  if (window.__poseSamplerInstalled) return;
-  window.__poseSamplerInstalled = true;
+function tryRelease() {
+  if (window.__shotTrackingArmed !== true) return;
 
-  function tryRelease() {
-    if (window.__shotTrackingArmed !== true) return;
-    const hist = (window.playerState?.frameHistory || []).slice(-8);
-    const gate = window.releaseGate ? window.releaseGate(hist) : { released: false };
-    if (!gate.released) return;
-    const f = window.playerState?.lastFrame ?? 0;
-    window.safeEmitRelease?.(f, 'pose-sampler', { gate, poseApproved: true, bypassGate: true });
-  }
+  // Cooldown hard-stop: don't even attempt a release during the window
+  const now = performance.now();
+  const since = now - (Number(window.__REL_LAST_FIRE_MS || 0));
+  const need  = Number(window.REL_COOLDOWN_MS || 1200);
+  if (since < need) return;
 
-  function loop(){ try{ tryRelease(); }catch{} window.__poseSamplerT = setTimeout(loop, Number(window.COACH_POSE_MS||120)); }
-  loop();
+  // Honor UI lock too
+  if (window.__RELEASE_LOCK_UNTIL && now < window.__RELEASE_LOCK_UNTIL) return;
 
-  window.addEventListener('hud:end-session', ()=>{ try{ clearTimeout(window.__poseSamplerT); }catch{} }, { passive:true });
-})();
+  const hist = (window.playerState?.frameHistory || []).slice(-8);
+  const gate = window.releaseGate ? window.releaseGate(hist) : { released: false };
+  if (!gate.released) return;
+
+  const f = window.playerState?.lastFrame ?? 0;
+  // We can keep bypassGate true because we've already computed the gate above.
+  window.safeEmitRelease?.(f, 'pose-sampler', { gate, poseApproved: true, bypassGate: true });
+}
+
 
 
 // ---------- Boot ----------

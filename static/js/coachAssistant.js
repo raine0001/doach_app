@@ -261,6 +261,27 @@ function preferShotNumber(s) {
 })();
 
 
+// === Session review: one and only one ===
+(function(){
+  if (window.__endSummaryOnceWired) return;
+  window.__endSummaryOnceWired = true;
+
+  function doSummaryOnce(){
+    if (window.__SESSION_REVIEW_DONE) return;
+    window.__SESSION_REVIEW_DONE = true;
+    try { summarizeSessionPose?.(); } catch {}
+  }
+
+  // Run once, small delay to let last shot settle
+  window.addEventListener('hud:end-session', () => {
+    setTimeout(doSummaryOnce, 900);
+  }, { passive:true });
+
+  // Reset guard when a new session starts
+  window.addEventListener('hud:start-session', () => {
+    window.__SESSION_REVIEW_DONE = false;
+  }, { passive:true });
+})();
 
 
 
