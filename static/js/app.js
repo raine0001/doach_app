@@ -638,7 +638,7 @@ window.startCamera = startCamera;
 function startPreDetectWarm(videoEl){
   if (window.__warmLoop) { try { clearTimeout(window.__warmLoop); } catch {} window.__warmLoop = null; }
   const buf=document.createElement('canvas'); const ctx=buf.getContext('2d',{willReadFrequently:true});
-  let lastPD=0; const MIN_DT=100;
+  let lastPD=0; const MIN_DT = Number(window.__PREDETECT_MIN_DT || 100);
 
   async function tick(){
     if (!videoEl?.videoWidth) return schedule();

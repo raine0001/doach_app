@@ -12,10 +12,15 @@
       const enableDebug = flag('debug');
       const enableTrace = enableDebug || flag('releaseTrace');
 
-      window.__LOCAL_DETECTOR = false;
+      const ua = (navigator.userAgent || '').toLowerCase();
+      const isAndroid = /android/.test(ua);
+      const isIOS = /iphone|ipad|ipod/.test(ua);
+
+      window.__LOCAL_DETECTOR = isAndroid ? true : false;
       window.__forceServerDetect = false;
-      window.PD_PREFETCH_FPS = 10;
+      window.PD_PREFETCH_FPS = isAndroid ? 6 : (isIOS ? 8 : 10);
       window.PREF_LIVE_TIPS = true;
+      window.__PREDETECT_MIN_DT = isAndroid ? 80 : 100;
 
       window.DEBUG_FORCE_POSE_ACTIVE = enableDebug;
       window.DEBUG_FORCE_HOOP_LOCKED = enableDebug;
