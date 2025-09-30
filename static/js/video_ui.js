@@ -164,7 +164,17 @@ export function mountSessionHUD() {
     let savedMuted = false;
     try { if (localStorage.getItem('doach_muted') != null) savedMuted = JSON.parse(localStorage.getItem('doach_muted')); } catch {}
     applyMute(savedMuted);
-    muteBtn.addEventListener('click', (e) => { e.stopPropagation(); applyMute(muteBtn.getAttribute('data-muted') !== '1'); });
+    muteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const nextMuted = muteBtn.getAttribute('data-muted') !== '1';
+      applyMute(nextMuted);
+      if (!nextMuted) {
+        try {
+          const prime = window.primeCoachAudio?.();
+          if (prime && typeof prime.then === 'function') { prime.catch(() => {}); }
+        } catch {}
+      }
+    });
 
     // Camera flip
     const updateHudCamButton = () => { camBtn.textContent = formatHudCameraLabel(currentFacingLabel()); };
