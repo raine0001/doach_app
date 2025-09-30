@@ -311,8 +311,14 @@ function shotArcProx(hoopBox){
   window.safeEmitRelease = function safeEmitRelease(frame, via='unknown', opts={}) {
     // short cooldown latch
     const now = performance.now();
-    if (window.__RELEASE_LOCK_UNTIL && now < window.__RELEASE_LOCK_UNTIL) return false;
-    window.__RELEASE_LOCK_UNTIL = now + Number(window.NEXT_SHOT_UNLOCK_MS ?? 1200);
+    const __now = performance.now();
+    if (window.__RELEASE_LOCK_UNTIL && __now < window.__RELEASE_LOCK_UNTIL) return false;
+    {
+      const need = Number(window.REL_COOLDOWN_MS || 1200);
+      const ui   = Number(window.NEXT_SHOT_UNLOCK_MS ?? 1200);
+      // lock until the longer of UI unlock or cooldown
+      window.__RELEASE_LOCK_UNTIL = __now + Math.max(need, ui);
+    }
 
     // time latch
     if (Number.isFinite(window.__releaseLatchUntil) && now < window.__releaseLatchUntil) return false;
@@ -668,26 +674,49 @@ function startPreDetectWarm(videoEl){
 
 
 // ---------- Pose sampler → release ----------
-function tryRelease() {
-  if (window.__shotTrackingArmed !== true) return;
+(function installPoseSampler(){
+  if (window.__poseSamplerInstalled) return;
+  window.__poseSamplerInstalled = true;
 
-  // Cooldown hard-stop: don't even attempt a release during the window
-  const now = performance.now();
-  const since = now - (Number(window.__REL_LAST_FIRE_MS || 0));
-  const need  = Number(window.REL_COOLDOWN_MS || 1200);
-  if (since < need) return;
+  function tryRelease() {
+    if (window.__shotTrackingArmed !== true) return;
+    const hist = (window.playerState?.frameHistory || []).slice(-8);
+    const gate = window.releaseGate ? window.releaseGate(hist) : { released: false };
+    if (!gate.released) return;
+    const f = window.playerState?.lastFrame ?? 0;
+    window.safeEmitRelease?.(f, 'pose-sampler', { gate, poseApproved: true, bypassGate: true });
+  }
 
-  // Honor UI lock too
-  if (window.__RELEASE_LOCK_UNTIL && now < window.__RELEASE_LOCK_UNTIL) return;
+  function loop(){ try{ tryRelease(); }catch{} window.__poseSamplerT = setTimeout(loop, Number(window.COACH_POSE_MS||120)); }
+  loop();
 
-  const hist = (window.playerState?.frameHistory || []).slice(-8);
-  const gate = window.releaseGate ? window.releaseGate(hist) : { released: false };
-  if (!gate.released) return;
+  window.addEventListener('hud:end-session', ()=>{ try{ clearTimeout(window.__poseSamplerT); }catch{} }, { passive:true });
+})();
 
-  const f = window.playerState?.lastFrame ?? 0;
-  // We can keep bypassGate true because we've already computed the gate above.
-  window.safeEmitRelease?.(f, 'pose-sampler', { gate, poseApproved: true, bypassGate: true });
-}
+// === Sampler stand-down after a release (no duplicate shots during cooldown) ===
+(function(){
+  // block the sampler until this time
+  window.__SAMPLER_BLOCK_UNTIL = 0;
+
+  // set block on each release
+  window.addEventListener('shot:release', () => {
+    const need = Number(window.REL_COOLDOWN_MS || 1200);
+    window.__SAMPLER_BLOCK_UNTIL = performance.now() + need;
+  }, { passive:true });
+
+  // tiny guard for the sampler loop (add at the top of tryRelease)
+  const _origTryRelease = window.__TRY_RELEASE_ORIG__ || null;
+  if (!_origTryRelease && typeof tryRelease === 'function') {
+    window.__TRY_RELEASE_ORIG__ = tryRelease;
+    window.tryRelease = function(){
+      if (performance.now() < (window.__SAMPLER_BLOCK_UNTIL || 0)) return;
+      return window.__TRY_RELEASE_ORIG__.apply(this, arguments);
+    };
+  }
+})();
+
+
+
 
 
 

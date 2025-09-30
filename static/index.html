@@ -455,6 +455,9 @@
             }
           } catch {}
           try {
+            await window.primeCoachAudio?.();
+          } catch {}
+          try {
             // Prefer immediate camera start; then trigger session HUD start
             if (window.startCamera) await window.startCamera();
           } catch {}

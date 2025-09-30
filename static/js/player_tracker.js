@@ -477,7 +477,7 @@ export async function initPoseDetector() {
   debugBox.style.borderRadius = '8px';
   debugBox.style.fontSize = '0.85rem';
   debugBox.style.zIndex = '999';
-  debugBox.innerText = 'Waiting...';
+  debugBox.innerText = 'Session Recording...';
   document.body.appendChild(debugBox);
   window.__debugBox = debugBox;
 }

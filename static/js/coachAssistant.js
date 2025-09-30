@@ -261,27 +261,29 @@ function preferShotNumber(s) {
 })();
 
 
-// === Session review: one and only one ===
+// === Session review: exactly-once per session id ===
 (function(){
   if (window.__endSummaryOnceWired) return;
   window.__endSummaryOnceWired = true;
 
-  function doSummaryOnce(){
-    if (window.__SESSION_REVIEW_DONE) return;
-    window.__SESSION_REVIEW_DONE = true;
+  function runOnce() {
+    const sid = window.__SESSION_ID || 'no-session';
+    if (window.__SESSION_REVIEW_FOR_SID === sid) return;   // already ran for this session
+    window.__SESSION_REVIEW_FOR_SID = sid;
     try { summarizeSessionPose?.(); } catch {}
   }
 
-  // Run once, small delay to let last shot settle
+  // run once, small settle delay for last shot
   window.addEventListener('hud:end-session', () => {
-    setTimeout(doSummaryOnce, 900);
+    setTimeout(runOnce, 900);
   }, { passive:true });
 
-  // Reset guard when a new session starts
+  // reset guard on new session
   window.addEventListener('hud:start-session', () => {
-    window.__SESSION_REVIEW_DONE = false;
+    window.__SESSION_REVIEW_FOR_SID = null;
   }, { passive:true });
 })();
+
 
 
 

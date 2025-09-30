@@ -194,9 +194,6 @@ async function endSession(reason = 'normal') {
   // single finalizer: dim + open table (UI-owned)
   try { await window.autoEndSessionAndSummarize?.(); } catch {}
 
-  // announce end
-  try { window.dispatchEvent(new CustomEvent('hud:end-session', { detail: { reason } })); } catch {}
-
   // flip flags
   try { window.__SESSION_ACTIVE = false; } catch {}
 
