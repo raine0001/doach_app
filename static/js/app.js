@@ -252,6 +252,58 @@ function shotArcProx(hoopBox){
   try { return window.__shotArcModule?.()?.proxFromHoop?.(hoopBox) ?? null; } catch { return null; }
 }
 
+// --- Pick the best release frame from very recent history and snapshot it
+(function(){
+  // local helpers (no global pollution)
+  function angleFromHorizontal(u){
+    if (!u || !Number.isFinite(u.x) || !Number.isFinite(u.y)) return null;
+    return Math.abs(Math.atan2(u.y, u.x) * 180 / Math.PI); // 0=horiz, 90=vertical
+  }
+
+  // Score a frame: higher is more "release-like"
+  function scoreFrameKP(kp){
+    if (!Array.isArray(kp) || kp.length < 33) return -1e9;
+    const sh = kp[12], wr = kp[16]; // right side (more stable for most)
+    if (!sh || !wr) return -1e9;
+
+    // 1) wrist above shoulder (strong cue)
+    const wristAbove = (wr.y < sh.y) ? 1 : 0;
+
+    // 2) forearm verticality (closer to 90 better)
+    const fore = { x: wr.x - sh.x, y: wr.y - sh.y };
+    const angH = angleFromHorizontal(fore);        // 0..90
+    const vertScore = Number.isFinite(angH) ? (90 - Math.abs(90 - angH)) : -90; // 90 at perfect vertical
+
+    // 3) small bias toward frames with higher wrist (lower y in screen coords)
+    const wristHeightBias = Number.isFinite(wr.y) ? (-wr.y) : 0;
+
+    // composite: weight wristAbove strongly, then verticality, then small height bias
+    return wristAbove * 200 + vertScore * 2 + wristHeightBias * 0.02;
+  }
+
+  // Choose the "best" frame from the last ~10 frames and snapshot it
+  window.snapshotAtRelease = function snapshotAtRelease(hoopBox){
+    try {
+      const hist = (window.playerState?.frameHistory || []);
+      if (!hist.length) return null;
+
+      // Look at the last ~10 frames; widen to 14 if you want more slack
+      const slice = hist.slice(-10);
+      let best = null, bestScore = -1e9;
+
+      for (const f of slice) {
+        const kp = f?.keypoints;
+        const s = scoreFrameKP(kp);
+        if (s > bestScore) { bestScore = s; best = kp; }
+      }
+      if (!best) return null;
+
+      return window.extractPoseSnapshot?.(best, hoopBox) || null;
+    } catch { return null; }
+  };
+})();
+
+
 // ---------- Release emitter (single source) ----------
 (function installReleaseCore(){
   if (window.safeEmitRelease) return;
@@ -289,20 +341,23 @@ function shotArcProx(hoopBox){
       if (!gate.released) return false;
     }
 
-    // Snapshot: prefer explicit capture; else synthesize from keypoints
+    // Capture the release snapshot from recent history (not the idle/reset pose)
     try {
-      const live = (window.capturePoseSnapshot?.() || window.getLatestPoseSnapshot?.() || null);
-      if (live) window.__LAST_POSE_SNAP = live;
-    } catch {}
-    try {
-      const kps  = window.playerState?.keypoints || null;
-      const snap = (typeof window.extractPoseSnapshot === "function")
-        ? window.extractPoseSnapshot(kps, hoopBox)
-        : null;
+      const lockedHoop = window.getLockedHoopBox?.() || null;   // OK if null
+      let snap = window.snapshotAtRelease?.(lockedHoop) || null;
+
+      // Failsafe: if history picker failed, fall back to current keypoints once
+      if (!snap) {
+        const kps = window.playerState?.keypoints || null;
+        snap = window.extractPoseSnapshot?.(kps, lockedHoop) || null;
+      }
+
       if (snap) {
-        window.__LAST_POSE_SNAP = snap; // upgrade to the per-release snapshot
+        window.updateShot?.(shotId, { poseSnapshot: snap });
+        window.__LAST_POSE_SNAP = snap; // always refresh to per-shot release
       }
     } catch {}
+
 
     // Create shot record (UI) and assign identity
     window.__REL_LAST_FIRE_MS = now;
