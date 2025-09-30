@@ -83,6 +83,187 @@ function preferShotNumber(s) {
   return Number(window.__SHOT_ID || 0);
 }
 
+/* === Pose cue engine v3: normalized scoring + variety (drop-in) ============== */
+(function(){
+  const VARIETY_WINDOW = 4;       // keep last N categories to avoid repeats
+  const MIN_ALT_RATIO  = 0.70;    // runner-up must be at least 70% of top severity
+
+  function targets(g){
+    // sensible defaults; merged with your golden if present
+    return Object.assign({
+      stanceRatioIdeal: 1.20,     // ~shoulder width
+      stanceRatioMin:   0.95,     // too narrow below this
+      stanceRatioMax:   1.55,     // too wide above this
+      feetAngleMax:     10,       // degrees; difference between toes
+      feetToHoopMax:    22,       // degrees; base vs hoop vector
+      armVertMax:       12,       // degrees from vertical
+      elbowExtMin:      150,      // degrees of extension
+      kneeFlexMin:      28,       // degrees (proxy from joint angle)
+      headToHoopMax:    25,       // degrees
+      frameOffsetMax:   90        // px from hoop center
+    }, g || {});
+  }
+
+  function rankIssues(p, g){
+    const t = targets(g);
+    const issues = [];
+    const push = (cat, sev, msgs) => { if (Number.isFinite(sev) && sev > 0 && msgs?.length) issues.push({ cat, sev, msgs }); };
+
+    // Power / knees
+    const kneeSev = Number.isFinite(p.kneeFlex) ? Math.max(0, t.kneeFlexMin - p.kneeFlex) : 0;
+    push('power', kneeSev, [
+      'Add more knee bend to generate power.',
+      'Load a bit more with the knees before you lift.',
+      'Sink slightly more to build upward force.'
+    ]);
+
+    // Arm verticality (0 is vertical, lower is better)
+    const armSev = Number.isFinite(p.armVerticalityDeg) ? Math.max(0, p.armVerticalityDeg - t.armVertMax) : 0;
+    push('armVertical', armSev, [
+      'Get the forearm more vertical on the finish.',
+      'Reach up taller at release.',
+      'Lift the forearm closer to vertical.'
+    ]);
+
+    // Elbow extension
+    const elbowSev = Number.isFinite(p.elbowExtDeg) ? Math.max(0, t.elbowExtMin - p.elbowExtDeg) : 0;
+    push('elbow', elbowSev, [
+      'Finish with stronger arm extension.',
+      'Straighten the elbow through the snap.',
+      'Drive to full elbow extension.'
+    ]);
+
+    // Release height
+    const relSev = (p.releaseAboveShoulder === false) ? 25 : 0;
+    push('releaseHeight', relSev, [
+      'Release above your shoulder line.',
+      'Finish higher — above the shoulder.'
+    ]);
+
+    // Feet to rim
+    const baseVsRimSev = Number.isFinite(p.feetToHoopDeg) ? Math.max(0, p.feetToHoopDeg - t.feetToHoopMax) : 0;
+    push('feetToHoop', baseVsRimSev, [
+      'Square your feet a touch more to the rim.',
+      'Point your toes a bit more toward the basket.'
+    ]);
+
+    // Toe parallel
+    const toeDiffSev = Number.isFinite(p.feetAngleDiff) ? Math.max(0, p.feetAngleDiff - t.feetAngleMax) : 0;
+    push('feetParallel', toeDiffSev, [
+      'Make your toes more parallel.',
+      'Match toe angles left and right.'
+    ]);
+
+    // Stance width: use ratio if available
+    if (Number.isFinite(p.stanceRatio)) {
+      const narrowSev = (p.stanceRatio < t.stanceRatioMin) ? (t.stanceRatioMin - p.stanceRatio) * 100 : 0;
+      const wideSev   = (p.stanceRatio > t.stanceRatioMax) ? (p.stanceRatio - t.stanceRatioMax) * 100 : 0;
+      push('stanceNarrow', narrowSev, [
+        'Wider base — feet near shoulder width.',
+        'Open your stance to shoulder-width.'
+      ]);
+      push('stanceWide', wideSev, [
+        'Feet too wide — bring them in slightly.',
+        'Narrow the stance a touch for balance.'
+      ]);
+    }
+
+    // Head / gaze
+    const headSev = Number.isFinite(p.headToHoopDeg) ? Math.max(0, p.headToHoopDeg - t.headToHoopMax) : 0;
+    push('gaze', headSev, [
+      'Keep eyes on the rim through the release.',
+      'Lock your gaze on the rim.'
+    ]);
+
+    // Follow-through hold
+    const holdSev = Number.isFinite(p.followThroughHoldFrames) ? Math.max(0, 2 - p.followThroughHoldFrames) * 10 : 0;
+    push('followThrough', holdSev, [
+      'Hold the follow-through for a beat.',
+      'Freeze the wrist and fingers for a moment.'
+    ]);
+
+    // Centering
+    const centerSev = Number.isFinite(p.frameOffsetX) ? Math.max(0, Math.abs(p.frameOffsetX) - t.frameOffsetMax) / 2 : 0;
+    push('centering', centerSev, [
+      'Center your body line with the rim before you lift.',
+      'Square your chest to the rim before you shoot.'
+    ]);
+
+    // Wrist snap
+    const wristSev = (p.fingersDown === false) ? 15 : 0;
+    push('wrist', wristSev, [
+      'Snap the wrist — fingers down on the finish.',
+      'Finish with fingers down.'
+    ]);
+
+    issues.sort((a,b) => b.sev - a.sev);
+    return issues;
+  }
+
+  function pickWithVariety(issues, shotId){
+    if (!issues.length) return null;
+    const hist = (window.__coachCueHistory ||= []);
+    const last = hist[hist.length - 1];
+
+    let choice = issues[0]; // top by severity
+    // If top repeats last and runner-up is strong, use runner-up
+    if (last && choice.cat === last && issues[1] && (issues[1].sev >= issues[0].sev * MIN_ALT_RATIO)) {
+      choice = issues[1];
+    }
+    // Avoid three-in-a-row same category if any alternative exists
+    const last2 = hist.slice(-2);
+    if (last2.length === 2 && last2[0] === last2[1] && last2[0] === choice.cat && issues[1]) {
+      choice = issues[1];
+    }
+
+    hist.push(choice.cat);
+    if (hist.length > VARIETY_WINDOW) window.__coachCueHistory = hist.slice(-VARIETY_WINDOW);
+
+    // Deterministic variant selection by shotId (stable phrasing across re-emits)
+    const msgs = choice.msgs || ['Good release — hold your follow-through.'];
+    const idx  = Number.isFinite(shotId) ? (shotId % msgs.length) : Math.floor(Math.random() * msgs.length);
+    return { text: msgs[idx], cat: choice.cat, sev: choice.sev };
+  }
+
+  // Main single-line composer used by formatCoachLine()
+  window.composePoseFeedback = function composePoseFeedbackV3(snap){
+    try{
+      const g = window.DOACH_MEM?.get?.()?.golden || null;
+      const issues = rankIssues(snap || {}, g);
+      const shotId = Number(window.__CURRENT_SHOT_ID) || Number(window.__SHOT_ID) || 0;
+
+      // First line with variety
+      const first = pickWithVariety(issues, shotId);
+      if (!first) return 'Good release — keep the rhythm.';
+
+      // If a strong second exists from a different category, append it for richness
+      const second = issues.find(i => i.cat !== first.cat && i.sev >= first.sev * 0.85);
+      if (second) {
+        const sMsgs = second.msgs || [];
+        const sText = sMsgs.length ? sMsgs[(shotId + 1) % sMsgs.length] : '';
+        if (sText) return `${first.text} ${sText}`;
+      }
+      return first.text;
+    } catch {
+      return 'Good release — hold your follow-through.';
+    }
+  };
+
+  // Keep summarizePoseIssues aligned for table bullets (top 2–3)
+  window.summarizePoseIssues = function summarizePoseIssuesV3(shot, golden){
+    try{
+      const p = shot?.poseSnapshot || {};
+      const g = golden || window.DOACH_MEM?.get?.()?.golden || null;
+      const issues = rankIssues(p, g).filter(i => i.sev >= 5).slice(0,3);
+      return issues.map(i => i.msgs[0]);
+    } catch { return []; }
+  };
+})();
+
+
+
+
+
 
 // === SNAPSHOT V2: force replace extractor + rescue bad summaries =================
 
