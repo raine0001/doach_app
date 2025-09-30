@@ -1,9 +1,9 @@
 // analyzer.js â€” RVFC + FBF analyzers (extracted from app.js)
-import { ensureOverlayCss, syncOverlayToVideo, updateDebugOverlay, drawLiveOverlay, sendFrameToDetect } from './fix_overlay_display.js';
+import { ensureOverlayCss, syncOverlayToVideo, updateDebugOverlay, drawLiveOverlay, sendFrameToDetect } from '../../static/js/fix_overlay_display.js';
 import { stabilizeLockedHoop, getLockedHoopBox, asTopLeft, canonHoop, filterObjectsToLockedHoop, autoDetectHoop } from './hoop_tracker.js';
-import { updatePlayerTracker, playerState } from './player_tracker.js';
-import { updateBall } from './ball_tracker.js';
-import { bufferDetectedObjects, scoringTick, checkShotConditions } from './shot_logger.js';
+import { updatePlayerTracker, playerState } from '../../static/js/player_tracker.js';
+import { updateBall } from '../../static/js/ball_tracker.js';
+import { bufferDetectedObjects, scoringTick, checkShotConditions } from '../../static/js/shot_logger.js';
 import { detectNetMotionFromCanvas } from './hoop_tracker.js';
 function __shotArcModule() {
   const api = window.shotArcModule || window.shotArc;

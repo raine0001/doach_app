@@ -1,6 +1,6 @@
-﻿// ball_tracker.js â€” minimal, selfâ€‘sufficient ball tracker
+// ball_tracker.js — minimal, self‑sufficient ball tracker
 // Responsibilities (only):
-//  - Maintain a ball trail given perâ€‘frame detections
+//  - Maintain a ball trail given per‑frame detections
 //  - Smooth via a lightweight Kalman filter (2D constant velocity)
 //  - Fill small gaps and clamp large jumps
 //  - Provide a renderer to draw the trail as circles
@@ -11,7 +11,7 @@
 // ---- Options (overridable at runtime) ----
 const OPT = {
   MAX_TRAIL_POINTS: Number(window.BALL_MAX_POINTS || 220),
-  GAP_FILL_MAX:     Number(window.BALL_GAP_FILL_MAX || 4),   // fill â‰¤N missing frames
+  GAP_FILL_MAX:     Number(window.BALL_GAP_FILL_MAX || 4),   // fill ≤N missing frames
   MAX_STEP:         Number(window.BALL_MAX_STEP || 58),      // px/frame clamp
   KF_PROCESS_NOISE: Number(window.BALL_KF_Q || 2.0),         // process noise strength
   KF_MEASURE_NOISE: Number(window.BALL_KF_R || 4.0),         // measurement noise
@@ -23,7 +23,7 @@ export function setBallOptions(o={}) {
   Object.assign(OPT, o || {});
 }
 
-// ---- Simple 2D constantâ€‘velocity Kalman filter ----
+// ---- Simple 2D constant‑velocity Kalman filter ----
 class Kalman2D {
   constructor(dt=1, q=2.0, r=4.0) {
     this.dt = dt;
@@ -271,7 +271,7 @@ export function drawBallArc(ctx, opts={}) {
     full = window.ballArc.trail;
   }
   
-  // In presentation modes we want only the post‑release arc. Allow fallback only if not strict.
+  // In presentation modes we want only the post-release arc. Allow fallback only if not strict.
   try {
     const strict = !!opts.strictArc;
     if (!strict && (!full || full.length < 3) && Array.isArray(window.ballState?.trail) && window.ballState.trail.length >= 3) {
@@ -279,7 +279,7 @@ export function drawBallArc(ctx, opts={}) {
     }
   } catch {}
   if (!full || !full.length) return;
-  // Optionally show only the top segment: a few frames after release → a few frames before hoop
+  // Optionally show only the top segment: a few frames after release ? a few frames before hoop
   let arc = full;
   try {
     const TRIM = (opts.trimTop ?? window.ARC_TRIM_TOP);

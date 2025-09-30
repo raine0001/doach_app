@@ -1,12 +1,63 @@
 // coach_voice.js — simple speech synthesis + optional voice command
 
-export function speak(text) {
+let __preferredWebVoice = null;
+
+function selectPreferredVoice() {
   try {
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.0; u.pitch = 1.0; u.lang = 'en-US';
-    window.speechSynthesis.cancel();
-    window.speechSynthesis.speak(u);
+    const synth = window.speechSynthesis;
+    if (!synth || !synth.getVoices) return;
+    const voices = synth.getVoices();
+    if (!voices || !voices.length) return;
+    const preferredNames = [
+      'Samantha',
+      'com.apple.ttsbundle.Samantha-compact',
+      'Google US English Female',
+      'English (US) Female',
+      'Microsoft Aria Online (Natural) - English (United States)',
+      'en-US-Wavenet-F'
+    ];
+    for (const name of preferredNames) {
+      const match = voices.find(v => v.name === name || v.voiceURI === name);
+      if (match) { __preferredWebVoice = match; return; }
+    }
+    const female = voices.find(v => /female/i.test(v.name || '') && (v.lang || '').toLowerCase().startsWith('en'));
+    if (female) { __preferredWebVoice = female; return; }
+    const english = voices.find(v => (v.lang || '').toLowerCase().startsWith('en'));
+    __preferredWebVoice = english || voices[0];
   } catch {}
+}
+
+try {
+  if (typeof window !== 'undefined' && window.speechSynthesis) {
+    window.speechSynthesis.addEventListener?.('voiceschanged', selectPreferredVoice);
+    selectPreferredVoice();
+  }
+} catch {}
+
+function speakWeb(text) {
+  return new Promise((resolve) => {
+    try {
+      if (!text) { resolve(false); return; }
+      const synth = window.speechSynthesis;
+      if (!synth) { resolve(false); return; }
+      const utter = new SpeechSynthesisUtterance(String(text));
+      utter.rate = 0.98;
+      utter.pitch = 1.05;
+      utter.lang = 'en-US';
+      if (__preferredWebVoice) utter.voice = __preferredWebVoice;
+      utter.onend = () => resolve(true);
+      utter.onerror = () => resolve(false);
+      synth.cancel();
+      synth.speak(utter);
+    } catch (err) {
+      try { console.warn('[coach] speakWeb failed', err); } catch {}
+      resolve(false);
+    }
+  });
+}
+
+export function speak(text) {
+  speakWeb(text);
 }
 
 
@@ -21,7 +72,7 @@ const IS_MOBILE_SPEECH_ENV = (() => {
   }
 })();
 const FORCE_SERVER_TTS_KEY = 'doach_tts_force_server';
-const MAX_SPEECH_QUEUE = 2;
+const MAX_SPEECH_QUEUE = 6;
 const SERVER_TTS_TIMEOUT_MS = 1600;
 
 let __speechQueue = [];
@@ -40,7 +91,7 @@ export function doachSpeak(text, opts = {}) {
   if (!text) return Promise.resolve(false);
   try { if (window.__coachMuted) return Promise.resolve(false); } catch {}
 
-  const job = { text: String(text), opts, resolve: null };
+  const job = { text: String(text), opts, resolve: null, attempts: 0 };
   const result = new Promise((resolve) => { job.resolve = resolve; });
 
   __speechQueue.push(job);
@@ -59,24 +110,49 @@ async function runSpeechQueue() {
   const job = __speechQueue.shift();
   if (!job) return;
   __speechBusy = true;
+  job.attempts = (job.attempts || 0) + 1;
   const startTime = getNow();
   let ok = false;
   try {
     ok = await playSpeechJob(job.text, job.opts);
   } catch (err) {
     try { console.warn('[coach] speech error', err); } catch {}
-  } finally {
-    __speechBusy = false;
-    const finish = getNow();
-    try { job.resolve?.(ok); } catch {}
-    try { console.debug('[coach] speech', { ok, ms: Math.round(finish - startTime), text: job.text?.slice?.(0, 80) }); } catch {}
-    runSpeechQueue();
   }
+
+  const finish = getNow();
+  try { console.debug('[coach] speech', { ok, ms: Math.round(finish - startTime), text: job.text?.slice?.(0, 80), attempts: job.attempts }); } catch {}
+
+  if (!ok && IS_MOBILE_SPEECH_ENV && (job.attempts || 0) < 3) {
+    __speechBusy = false;
+    setTimeout(() => {
+      try { __speechQueue.unshift(job); } catch {}
+      runSpeechQueue();
+    }, 140);
+    return;
+  }
+
+  __speechBusy = false;
+  try { job.resolve?.(ok); } catch {}
+  runSpeechQueue();
 }
 
 async function playSpeechJob(text, opts = {}) {
   try { if (window.__coachMuted) return false; } catch {}
   if (!text) return false;
+
+  if (IS_MOBILE_SPEECH_ENV) {
+    try {
+      if (window.__iosAudioUnlocked !== true) {
+        const unlock = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : window.primeCoachAudio;
+        if (typeof unlock === 'function') {
+          const maybe = unlock();
+          if (maybe && typeof maybe.then === 'function') {
+            await maybe.catch(() => {});
+          }
+        }
+      }
+    } catch {}
+  }
 
   const prefs = (() => {
     try { return JSON.parse(localStorage.getItem('doach_tts') || '{}'); }
@@ -90,7 +166,10 @@ async function playSpeechJob(text, opts = {}) {
   let provider = rawProvider;
 
   if (provider === 'openai' || provider === 'gpt' || provider === 'ai') provider = 'server';
-  if (IS_MOBILE_SPEECH_ENV && !forceServer) provider = 'web';
+  if (!forceServer) {
+    provider = 'web';
+    try { localStorage.setItem('doach_tts', JSON.stringify({ ...prefs, provider: 'web' })); } catch {}
+  }
 
   const voice = opts.voice
     || prefs.voice

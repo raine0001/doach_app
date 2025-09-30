@@ -1234,29 +1234,42 @@ async function openMyDoachPanel(){
       };
     }
 
-    async function speakWithUnlock(line) {
+    function speakWithUnlock(line) {
       if (!line) return;
+      try {
+        if (window.__coachMuted) {
+          window.__coachMuted = false;
+          try { localStorage.setItem('doach_muted', 'false'); } catch {}
+        }
+      } catch {}
+
       try {
         const unlock = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : window.primeCoachAudio;
         if (typeof unlock === 'function') {
           const maybe = unlock();
-          if (maybe && typeof maybe.then === 'function') {
-            await maybe.catch(() => {});
+          if (maybe && typeof maybe.catch === 'function') {
+            maybe.catch(() => {});
           }
         }
       } catch {}
-      try { window.doachSpeak?.(line); } catch {}
+
+      try {
+        const speaker = window.doachSpeak || window.coachSpeak || window.speak;
+        if (typeof speaker === 'function') {
+          speaker(line);
+        }
+      } catch {}
     }
 
-    async function applyNow(){
+    function applyNow(){
       const p = readUI();
       window.doachSetPrefs?.(p);
-      await speakWithUnlock("Voice settings applied.");
+      speakWithUnlock("Voice settings applied.");
     }
-    async function testVoice(){
+    function testVoice(){
       const p = readUI();
       window.doachSetPrefs?.(p);
-      await speakWithUnlock("This is your Doach voice.");
+      speakWithUnlock("This is your Doach voice.");
     }
     async function savePreset(){
       const name = (nameInp.value||'').trim();

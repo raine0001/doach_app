@@ -124,6 +124,7 @@ async function startSession() {
 
   // start session voice cue
   try {
+    try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch {}
     if (localStorage.getItem('doach_muted') !== 'true') {
       const greeting = `Hi ${name}, let's get started. Tap the hoop to lock it, then take your first shot when you're ready.`;
       try { await primeCoachAudio?.(); } catch {}
@@ -209,6 +210,7 @@ async function endSession(reason = 'normal') {
 
   // optional voice cue
   try {
+    try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch {}
     if (localStorage.getItem('doach_muted') !== 'true') {
       const line = 'Session ended.';
       try { await primeCoachAudio?.(); } catch {}

@@ -1,0 +1,60 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Arc & Make/Miss</title>
+  <style>
+    body { background:#111; color:#eee; font-family:system-ui, sans-serif; }
+    #stage { position: relative; width: 960px; aspect-ratio: 16/9; background:#000; margin-top:12px; }
+    #stage > * { position:absolute; inset:0; display:block; }
+    #controls { display:flex; gap:12px; align-items:center; margin-bottom:8px; }
+    #shotList .shot { margin: 6px 0; }
+    button { cursor: pointer; }
+  </style>
+</head>
+<body>
+  <div id="arcmm">
+    <h2>Arc & Make/Miss</h2>
+
+    <div id="controls">
+      <label>Session:
+        <select id="sessionPicker"></select>
+      </label>
+      <button id="reloadSessions">Reload</button>
+      <button id="processAll">Process All</button>
+    </div>
+
+    <div id="shotList"></div>
+
+    <div id="stage">
+      <video id="mmVideo" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+      <canvas id="exportCanvas"></canvas>
+    </div>
+  </div>
+
+  <script>
+    // same-origin paths for your 10 clips baked into assets
+    const sid = "20250930_204140_927675";
+    const base = `/static/sessions/${sid}/clips`;
+    window.__DEMO_SHOTS = Array.from({length: 10}, (_,i) => {
+      const n = i + 1;
+      return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
+    });
+
+    // worker + fps hints
+    window.DETECTOR_WORKER_PATH = "/static/detector.worker.js";
+    window.__videoFPS = 30;
+  </script>
+
+
+  <script>
+    // Make sure the detector worker is resolvable from this page
+    window.DETECTOR_WORKER_PATH = "/static/js/detector.worker.js";
+    window.__videoFPS = 30;
+  </script>
+  <script src="/static/arc_mm/shot_arc.js"></script>
+  <script type="module" src="/static/arc_mm/arc_mm.js"></script>
+
+</body>
+</html>

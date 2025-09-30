@@ -1,6 +1,6 @@
 # Unified DOACH app.py — optimized for dual model use, cleaned init, and removed /detect_video_init
 
-from flask import Flask, request, Response, jsonify, send_from_directory, send_file, session
+from flask import Flask, request, Response, jsonify, send_from_directory, send_file, abort, url_for, Blueprint, current_app, session
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import numpy as np
@@ -33,6 +33,7 @@ import wave
 from datetime import date, datetime, timezone
 from collections import defaultdict
 import threading
+from arcmm_api import arcmm_api
 try:
     from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey
     from sqlalchemy.types import JSON as MyJSON
@@ -58,6 +59,9 @@ except Exception:
 
 app = Flask(__name__, static_folder='static', static_url_path='/static')
 CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+app.register_blueprint(arcmm_api)
+
 # Secret key for session cookies (load from .env if present)
 try:
     load_dotenv()
@@ -78,6 +82,10 @@ def _trace(*args, **kwargs):
             print(*args, **kwargs)
     except Exception:
         pass
+
+
+
+
 
 REQUIRED_LABELS = {'basketball', 'hoop', 'net', 'backboard', 'player'}
 CONFIDENCE_THRESHOLD = 0.01  # Lowered from 0.75 to 0.01 for improved detection
@@ -1710,6 +1718,7 @@ poll();
 </script>"""
     html = template.replace('__SID__', sid).replace('__STAMP__', str(stamp))
     return Response(html, mimetype='text/html')
+
 @app.get('/admin/session/<sid>/debug')
 def admin_session_debug(sid):
     """Return joined view: session.json + DB shots + pose_snapshots + ai_feedback + files"""
@@ -1892,6 +1901,7 @@ def admin_user_sessions(uid):
         return jsonify({'error': str(e)}), 500
 
 # new frame extraction routes
+
 @app.route('/save_yolo_label', methods=['POST'])
 def save_yolo_label():
     data = request.get_json()
@@ -1906,6 +1916,9 @@ def save_yolo_label():
     with open(label_path, 'w') as f:
         f.write(content.strip())
     return '', 200
+
+
+
 
 # ---------- Extractor Rotation helper ----------
 def _probe_video_rotation(video_path: str) -> int:

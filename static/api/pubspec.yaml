@@ -1,0 +1,17 @@
+dependencies:
+  flutter:
+    sdk: flutter
+  webview_flutter: ^4.7.0
+  shelf: ^1.4.1
+  shelf_router: ^1.1.4
+  path: ^1.9.0
+  mime: ^1.0.5
+
+flutter:
+  assets:
+    - assets/arc_mm/arc_mm.html
+    - assets/arc_mm/arc_mm.js
+    - assets/arc_mm/shot_arc.js
+    - assets/arc_mm/analyzer.js
+    - assets/arc_mm/hoop_tracker.js
+    - assets/arc_mm/detector.worker.js

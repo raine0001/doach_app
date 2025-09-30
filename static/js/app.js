@@ -21,7 +21,7 @@ import {
   canonHoop,
   stabilizeLockedHoop,
   filterObjectsToLockedHoop
-} from './hoop_tracker.js';
+} from '/static/arc_mm/hoop_tracker.js';
 
 import {
   initPoseDetector,
@@ -603,12 +603,20 @@ export async function startCamera(){
   v.autoplay = true;
 
   let stream;
-  try{
+  try {
     stream = await navigator.mediaDevices.getUserMedia({
-      video:{ width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30}},
-      audio:false
+      video: { width:{ideal:1280}, height:{ideal:720}, frameRate:{ideal:30} },
+      audio: false
     });
-  }catch(e){ console.warn('camera error', e); return false; }
+  } catch (errIdeal) {
+    console.warn('[camera] ideal constraints failed', errIdeal);
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+    } catch (errFallback) {
+      console.error('[camera] fallback getUserMedia failed', errFallback);
+      return false;
+    }
+  }
 
   v.srcObject = stream;
   await new Promise(res=>v.addEventListener('loadedmetadata', res, { once:true }));

@@ -9,7 +9,7 @@ import {
 } from './shot_utils.js';
 
 import { markRelease, freezeShot } from './ball_tracker.js';
-import { getLockedHoopBox } from './hoop_tracker.js';
+import { getLockedHoopBox } from '/static/arc_mm/hoop_tracker.js';
 
 
 // lazy accessor breaks the TDZ on cyclic imports

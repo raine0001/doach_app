@@ -21,7 +21,7 @@ window.addEventListener('hud:mute-toggle', (e) => {
 try {
   if (!localStorage.getItem('doach_tts')) {
     const v = (window.DOACH && window.DOACH.voice) || 'alloy';
-    localStorage.setItem('doach_tts', JSON.stringify({ provider: 'server', voice: v }));
+    localStorage.setItem('doach_tts', JSON.stringify({ provider: 'web', voice: v }));
   }
 } catch {}
 

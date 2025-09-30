@@ -6,7 +6,7 @@
 import { setOverlayInteractive, syncOverlayToVideo } from './fix_overlay_display.js';
 import { speak } from './coach_voice.js';
 import { enableHoopPickOnce } from './app.js';
-import { getLockedHoopBox, handleHoopSelection, canonHoop } from './hoop_tracker.js';
+import { getLockedHoopBox, handleHoopSelection, canonHoop } from '/static/arc_mm/hoop_tracker.js';
 
 // Soft demo toggles (ignored by logic that could conflict)
 window.DEMO = true;
@@ -126,8 +126,8 @@ function currentFacingLabel() {
   } catch {}
   return 'Back';
 }
-function formatHudCameraLabel(lab) {
-  return ((lab === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + lab + ' Camera';
+function formatHudCameraIcon(lab) {
+  return (lab === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT;
 }
 
 export function mountSessionHUD() {
@@ -139,15 +139,19 @@ export function mountSessionHUD() {
     bar.className = 'hud-card hud-pill';
     Object.assign(bar.style, {
       position:'absolute', left:'50%', transform:'translateX(-50%)',
-      bottom:'18px', gap:'20px', pointerEvents:'auto'
+      bottom:'calc(env(safe-area-inset-bottom, 0px) + 18px)', gap:'20px', pointerEvents:'auto'
     });
 
     bar.innerHTML = `
-      <button id="hudVoiceToggle" class="voice-toggle is-on" data-muted="0" aria-pressed="true" aria-label="Enable voice">
-        <span class="icon-on" aria-hidden="true">${ICON_AUDIO_ON}</span>
-        <span class="icon-off" aria-hidden="true">${ICON_AUDIO_OFF}</span>
-      </button>
-      <button id="hudCamFlip" class="vc-btn" title="Flip Camera"></button>
+      <div class="hud-controls">
+        <button id="hudVoiceToggle" class="hud-icon-btn voice-toggle is-on" data-muted="0" aria-pressed="true" aria-label="Toggle voice">
+          <span class="icon-on" aria-hidden="true">${ICON_AUDIO_ON}</span>
+          <span class="icon-off" aria-hidden="true">${ICON_AUDIO_OFF}</span>
+        </button>
+        <button id="hudCamFlip" class="hud-icon-btn" aria-label="Switch camera" title="Switch camera">
+          <span class="icon" aria-hidden="true">${formatHudCameraIcon(currentFacingLabel())}</span>
+        </button>
+      </div>
       <div class="hud-metric" id="mShots"><div class="num">0/${formatCapDisplay(window.SESSION_SIZE)}</div><div class="label">Shots Taken</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
     `;
@@ -313,7 +317,15 @@ export function mountSessionHUD() {
 
 
     // Camera flip
-    const updateHudCamButton = () => { camBtn.textContent = formatHudCameraLabel(currentFacingLabel()); };
+    const updateHudCamButton = () => {
+      const facing = currentFacingLabel();
+      const icon = formatHudCameraIcon(facing);
+      camBtn.dataset.facing = facing;
+      camBtn.innerHTML = `<span class="icon" aria-hidden="true">${icon}</span>`;
+      const next = facing === 'Back' ? 'front' : 'back';
+      camBtn.setAttribute('aria-label', `Switch to ${next} camera`);
+      camBtn.title = `Switch to ${next} camera`;
+    };
     updateHudCamButton();
     window.addEventListener('camera:facing-changed', updateHudCamButton);
 
@@ -415,7 +427,14 @@ window.updateSessionHUD = updateSessionHUD;
       writePref(target);
       try {
         const hud = document.getElementById('hudCamFlip');
-        if (hud) hud.textContent = formatHudCameraLabel(target);
+        if (hud) {
+          hud.dataset.facing = target;
+          const icon = formatHudCameraIcon(target);
+          hud.innerHTML = `<span class="icon" aria-hidden="true">${icon}</span>`;
+          const next = target === 'Back' ? 'front' : 'back';
+          hud.setAttribute('aria-label', `Switch to ${next} camera`);
+          hud.title = `Switch to ${next} camera`;
+        }
       } catch {}
       try { window.dispatchEvent(new Event('camera:facing-changed')); } catch {}
       try { window.dispatchEvent(new CustomEvent('camera:changed', { detail:{ label: target }})); } catch {}

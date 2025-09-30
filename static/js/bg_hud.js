@@ -1,4 +1,4 @@
-﻿// bg_hud.js -- diagnostic HUD for the background plane (FBF)
+// bg_hud.js -- diagnostic HUD for the background plane (FBF)
 // Provides live stats, ball detection log, mini-map, and diagnostic controls.
 
 (function installBGHud(){

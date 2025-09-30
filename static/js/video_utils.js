@@ -1,7 +1,7 @@
 // video_utils.js — Video Scaling, Canvas Sync, and Shot Analysis
 
 import { drawLiveOverlay } from './fix_overlay_display.js';
-import {getLockedHoopBox, drawHoopMarker, stabilizeLockedHoop, isUserLocked, autoDetectHoop} from './hoop_tracker.js';
+import {getLockedHoopBox, drawHoopMarker, stabilizeLockedHoop, isUserLocked, autoDetectHoop} from '/static/arc_mm/hoop_tracker.js';
 import { updateBall, ballState, markRelease } from './ball_tracker.js';
 import {playerState} from './player_tracker.js';
 import { attachHoop } from './app.js';

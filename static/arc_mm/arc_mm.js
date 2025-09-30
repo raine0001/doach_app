@@ -1,8 +1,8 @@
 // static/js/arc_mm.js
 // FBF analysis -> overlay composite -> recorded clip (VP8) with inline preview
 
-import { analyzeVideoFrameByFrame, runShotFBF } from '/static/js/analyzer.js';
-import { getLockedHoopBox, autoDetectHoop } from '/static/js/hoop_tracker.js';
+import { analyzeVideoFrameByFrame, runShotFBF } from './analyzer.js';
+import { getLockedHoopBox, autoDetectHoop } from './hoop_tracker.js';
 
 (function ArcMM() {
   const ui = {
@@ -38,6 +38,37 @@ import { getLockedHoopBox, autoDetectHoop } from '/static/js/hoop_tracker.js';
     ctx.drawImage(ui.video, 0, 0, w, h);
     ctx.drawImage(ui.overlay, 0, 0, w, h);
   }
+
+function drawHudOnExport(ctx){
+  const s = window.__lastSummary || {};
+  const line1 = `Result: ${s.result ? String(s.result).toUpperCase() : (s.made===true?'MAKE':s.made===false?'MISS':'—')}`;
+  const deg = n => typeof n==='number' ? `${Math.round(n)}°` : '—';
+  const num = n => (typeof n==='number' && isFinite(n)) ? Math.round(n) : '—';
+  const line2 = `Release ${deg(s.releaseAngle)}  •  Entry ${deg(s.entryAngle)}  •  Apex ${num(s.apexHeight)}`;
+
+  const pad = 8, ctxFont = Math.max(14, Math.floor(ctx.canvas.height*0.03));
+  ctx.save();
+  ctx.font = `${ctxFont}px system-ui, sans-serif`;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  const w1 = ctx.measureText(line1).width, w2 = ctx.measureText(line2).width;
+  const boxW = Math.max(w1, w2) + pad*2, boxH = ctxFont*2 + pad*3;
+  ctx.fillRect(pad, pad, boxW, boxH);
+  ctx.fillStyle = '#fff';
+  ctx.fillText(line1, pad*2, pad*2 + ctxFont*0.9);
+  ctx.fillText(line2, pad*2, pad*2 + ctxFont*2);
+  ctx.restore();
+}
+
+function compositeFrame(){
+  const ctx = ui.exportCan.getContext('2d');
+  ctx.clearRect(0,0,ui.exportCan.width, ui.exportCan.height);
+  ctx.drawImage(ui.video, 0,0, ui.exportCan.width, ui.exportCan.height);
+  ctx.drawImage(ui.overlay, 0,0, ui.exportCan.width, ui.exportCan.height);
+  drawHudOnExport(ctx); // add this
+}
+
+
+
 
   function pickMime() {
     const prefs = [

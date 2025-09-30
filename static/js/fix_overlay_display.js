@@ -4,7 +4,7 @@
 
 import { drawPoseSkeleton, drawWristTrail } from './player_tracker.js';
 import { drawHoopProximityDebug, drawShotTubeDebug } from './shot_logger.js';
-import { getLockedHoopBox, drawHoopMarker } from './hoop_tracker.js';
+import { getLockedHoopBox, drawHoopMarker } from '/static/arc_mm/hoop_tracker.js';
 import { drawBallTrails, drawBallArc } from './ball_tracker.js';
 import { drawFinalShotSummary } from './shot_utils.js';
 
