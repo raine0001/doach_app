@@ -1233,8 +1233,31 @@ async function openMyDoachPanel(){
         lang: (langSel.value||'en-US').trim()
       };
     }
-    function applyNow(){ const p = readUI(); window.doachSetPrefs?.(p); window.doachSpeak?.('Voice settings applied.'); }
-    function testVoice(){ const p = readUI(); window.doachSetPrefs?.(p); window.doachSpeak?.('This is your Doach voice.'); }
+
+    async function speakWithUnlock(line) {
+      if (!line) return;
+      try {
+        const unlock = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : window.primeCoachAudio;
+        if (typeof unlock === 'function') {
+          const maybe = unlock();
+          if (maybe && typeof maybe.then === 'function') {
+            await maybe.catch(() => {});
+          }
+        }
+      } catch {}
+      try { window.doachSpeak?.(line); } catch {}
+    }
+
+    async function applyNow(){
+      const p = readUI();
+      window.doachSetPrefs?.(p);
+      await speakWithUnlock("Voice settings applied.");
+    }
+    async function testVoice(){
+      const p = readUI();
+      window.doachSetPrefs?.(p);
+      await speakWithUnlock("This is your Doach voice.");
+    }
     async function savePreset(){
       const name = (nameInp.value||'').trim();
       if (!name) { alert('Enter a preset name'); return; }
