@@ -1144,7 +1144,12 @@ def api_tts():
                 "Content-Type": "application/json",
                 "Accept": "audio/mpeg"
             },
-            json={"model": "gpt-4o-mini-tts", "voice": voice, "input": speak_text},
+            json={
+                "model": "gpt-4o-mini-tts",
+                "voice": voice,
+                "input": speak_text,
+                "response_format": "mp3"   # <-- key addition for iOS
+            },
             stream=True, timeout=60
         )
 

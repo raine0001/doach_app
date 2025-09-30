@@ -614,5 +614,117 @@ main {
 
 
 
+/* =========================
+   HUD + Voice Toggle Styles
+   ========================= */
+
+/* Keep HUD above video/overlay/export canvases */
+#hud, .hud {
+  position: relative;
+  z-index: 1002;
+  pointer-events: none; /* HUD wrapper can ignore clicks… */
+}
+#hud * , .hud * {
+  pointer-events: auto; /* …controls inside can still be clicked */
+}
+
+/* Voice toggle root: never let layout collapse into a blank rounded blob */
+#hudVoiceToggle,
+[data-role="hud-voice-toggle"],
+#hud .voice-toggle, .hud .voice-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+
+  width: 40px;               /* keep a predictable hit target even if label hidden */
+  height: 32px;
+  padding: 0 10px;
+
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,0.12);
+  background: rgba(18,18,18,0.72);
+  backdrop-filter: blur(6px);
+  color: #eee;
+  font: 600 12px/1 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial;
+
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+
+  visibility: visible !important;
+  opacity: 1 !important;
+  z-index: 1003; /* above other HUD bits */
+}
+
+/* Icon wrappers inside the button.
+   Expected markup: <span class="icon-on">…</span><span class="icon-off">…</span><span class="voice-label">…</span>
+   Your JS should NO LONGER replace innerHTML. We switch purely with attributes/classes. */
+#hudVoiceToggle .icon-on,
+#hudVoiceToggle .icon-off,
+[data-role="hud-voice-toggle"] .icon-on,
+[data-role="hud-voice-toggle"] .icon-off {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  line-height: 0;
+}
+
+/* Label is optional; hide by default if you only want the icon. Flip to inline for verbose mode. */
+#hudVoiceToggle .voice-label,
+[data-role="hud-voice-toggle"] .voice-label {
+  display: none;            /* change to inline-block if you want "Voice On/Off" text */
+  white-space: nowrap;
+  font-weight: 600;
+  opacity: 0.9;
+}
+
+/* ----- State switching by data attribute or class ----- */
+#hudVoiceToggle[data-muted="1"] .icon-on,
+#hudVoiceToggle.is-muted .icon-on,
+[data-role="hud-voice-toggle"][data-muted="1"] .icon-on,
+[data-role="hud-voice-toggle"].is-muted .icon-on { display: none !important; }
+
+#hudVoiceToggle[data-muted="1"] .icon-off,
+#hudVoiceToggle.is-muted .icon-off,
+[data-role="hud-voice-toggle"][data-muted="1"] .icon-off,
+[data-role="hud-voice-toggle"].is-muted .icon-off { display: inline-block !important; }
+
+#hudVoiceToggle[data-muted="0"] .icon-off,
+#hudVoiceToggle.is-on .icon-off,
+[data-role="hud-voice-toggle"][data-muted="0"] .icon-off,
+[data-role="hud-voice-toggle"].is-on .icon-off { display: none !important; }
+
+#hudVoiceToggle[data-muted="0"] .icon-on,
+#hudVoiceToggle.is-on .icon-on,
+[data-role="hud-voice-toggle"][data-muted="0"] .icon-on,
+[data-role="hud-voice-toggle"].is-on .icon-on { display: inline-block !important; }
+
+/* Press states because humans love to mash buttons */
+#hudVoiceToggle:active,
+[data-role="hud-voice-toggle"]:active {
+  transform: translateY(1px);
+}
+
+/* Hover/focus sugar (kept subtle for mobile) */
+#hudVoiceToggle:hover, #hudVoiceToggle:focus-visible,
+[data-role="hud-voice-toggle"]:hover, [data-role="hud-voice-toggle"]:focus-visible {
+  border-color: rgba(255,255,255,0.22);
+  box-shadow: 0 0 0 2px rgba(255,255,255,0.08) inset;
+  outline: none;
+}
+
+/* If some overzealous container clips your controls, un-do it. */
+#hud, .hud, #hud * {
+  overflow: visible !important;
+}
+
+
+
+
+
 /* ---------------- end viewer -------------------- */
 /* ---------------- end viewer -------------------- */

@@ -47,7 +47,7 @@ export async function doachSpeak(text) {
         let playbackOk = false;
         let endedHandler = null;
         const waitForPlayback = new Promise((resolve, reject) => {
-          const timerMs = 2000;
+          const timerMs = 2200;
           let done = false;
 
           const finish = (ok, err) => {
@@ -56,10 +56,7 @@ export async function doachSpeak(text) {
             clearTimeout(timer);
             audio.removeEventListener('playing', onPlaying);
             audio.removeEventListener('error', onError);
-            audio.removeEventListener('stalled', onError);
-            audio.removeEventListener('abort', onError);
-            audio.removeEventListener('suspend', onError);
-            if (!ok && endedHandler) {
+            if (endedHandler) {
               audio.removeEventListener('ended', endedHandler);
               endedHandler = null;
             }
@@ -73,24 +70,14 @@ export async function doachSpeak(text) {
 
           const onPlaying = () => finish(true);
           const onError = (e) => finish(false, e?.error || e);
-          const onEndedDetection = () => {
-            if (endedHandler) {
-              audio.removeEventListener('ended', endedHandler);
-              endedHandler = null;
-            }
-            cleanup();
-            if (!done) finish(true);
-          };
+          const onEndedDetection = () => finish(true);
           endedHandler = onEndedDetection;
 
           const timer = setTimeout(() => finish(false, new Error('audio playback timeout')), timerMs);
 
-          audio.addEventListener('playing', onPlaying);
-          audio.addEventListener('error', onError);
-          audio.addEventListener('stalled', onError);
-          audio.addEventListener('abort', onError);
-          audio.addEventListener('suspend', onError);
-          audio.addEventListener('ended', onEndedDetection);
+          audio.addEventListener('playing', onPlaying, { once: true });
+          audio.addEventListener('error', onError, { once: true });
+          audio.addEventListener('ended', onEndedDetection, { once: true });
 
           audio.src = url;
           try { audio.load?.(); } catch {}
@@ -109,10 +96,6 @@ export async function doachSpeak(text) {
           await waitForPlayback;
           if (playbackOk) return;
         } catch (err) {
-          if (endedHandler) {
-            audio.removeEventListener('ended', endedHandler);
-            endedHandler = null;
-          }
           cleanup();
           try { console.warn('[coach] server TTS playback failed; falling back', err); } catch {}
           resetPrime('server playback failure');
@@ -170,6 +153,50 @@ function ensureCoachAudioElement() {
   __coachAudioEl = el;
   return el;
 }
+
+// --- iOS unlock: resume AudioContext + play a real <audio> once ---
+export async function unlockIOSAudio() {
+  try { await primeCoachAudio?.(); } catch {}
+
+  // 1) Web Audio path (some Safari builds only unlock via AudioContext.resume)
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      const ctx = window.__coachPrimeCtx || (window.__coachPrimeCtx = new Ctx());
+      if (ctx.state === 'suspended' && typeof ctx.resume === 'function') {
+        await ctx.resume();
+      }
+      // Play a 1-sample silent buffer through a zero gain node
+      const src = ctx.createBufferSource();
+      src.buffer = ctx.createBuffer(1, 1, 22050);
+      const gain = ctx.createGain(); gain.gain.value = 0;
+      src.connect(gain); gain.connect(ctx.destination);
+      try { src.start(0); src.stop(0); } catch {}
+    }
+  } catch {}
+
+  // 2) <audio> element path (some Safari builds only unlock via HTMLMediaElement.play())
+  try {
+    const el = (window.__coachAudioEl) || (typeof ensureCoachAudioElement === 'function' ? ensureCoachAudioElement() : null);
+    if (el) {
+      el.muted = false; el.volume = 1;
+      el.setAttribute?.('playsinline','');
+      el.playsInline = true;
+      el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA='; // silent blip
+      try {
+        const p = el.play?.();
+        if (p && p.catch) await p.catch(()=>{});
+      } catch {}
+      try { el.pause?.(); el.currentTime = 0; el.removeAttribute('src'); el.load?.(); } catch {}
+    }
+  } catch {}
+
+  return true;
+}
+
+// Make it globally callable from UI modules
+try { window.unlockIOSAudio = unlockIOSAudio; } catch {}
+
 
 export async function primeCoachAudio() {
   if (__coachAudioPrimed) return true;

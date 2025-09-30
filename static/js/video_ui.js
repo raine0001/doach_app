@@ -143,51 +143,218 @@ export function mountSessionHUD() {
     });
 
     bar.innerHTML = `
-      <button id="hudMute" class="vc-btn" title="Mute/Unmute"></button>
+      <button id="hudVoiceToggle" class="voice-toggle is-on" data-muted="0" aria-pressed="true" aria-label="Toggle voice">
+        <span class="icon-on" aria-hidden="true">${ICON_AUDIO_ON}</span>
+        <span class="icon-off" aria-hidden="true">${ICON_AUDIO_OFF}</span>
+      </button>
       <button id="hudCamFlip" class="vc-btn" title="Flip Camera"></button>
       <div class="hud-metric" id="mShots"><div class="num">0/${formatCapDisplay(window.SESSION_SIZE)}</div><div class="label">Shots Taken</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
     `;
     root.appendChild(bar);
 
+        // === Voice toggle wiring (drop-in) ===
+    (function wireHudVoiceToggle(){
+      const btn = document.getElementById('hudVoiceToggle');
+      if (!btn || btn.__voiceWired) return;
+      btn.__voiceWired = true;
+
+      // idempotent iOS unlock: WebAudio resume + real <audio>.play() of a silent blip
+      async function unlockIOSAudioOnce(){
+        if (window.__iosAudioUnlocked) return true;
+        window.__iosAudioUnlocked = true;
+
+        try { await window.primeCoachAudio?.(); } catch {}
+
+        // WebAudio path
+        try {
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if (Ctx) {
+            const ctx = window.__coachPrimeCtx || (window.__coachPrimeCtx = new Ctx());
+            if (ctx.state === 'suspended' && ctx.resume) await ctx.resume();
+            const src = ctx.createBufferSource();
+            src.buffer = ctx.createBuffer(1, 1, 22050);
+            const gain = ctx.createGain(); gain.gain.value = 0;
+            src.connect(gain); gain.connect(ctx.destination);
+            try { src.start(0); src.stop(0); } catch {}
+          }
+        } catch {}
+
+        // HTMLMediaElement path
+        try {
+          let el = window.__coachAudioEl;
+          if (!el) {
+            el = document.createElement('audio');
+            el.style.display = 'none';
+            el.setAttribute('playsinline',''); el.playsInline = true;
+            document.body.appendChild(el);
+            window.__coachAudioEl = el;
+          }
+          el.muted = false; el.volume = 1;
+          el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
+          try { await (el.play?.() || Promise.resolve()); } catch {}
+          try { el.pause?.(); el.removeAttribute('src'); el.load?.(); } catch {}
+        } catch {}
+
+        return true;
+      }
+
+      function setState(muted){
+        btn.dataset.muted = muted ? '1' : '0';
+        btn.setAttribute('aria-pressed', muted ? 'false' : 'true');
+        btn.classList.toggle('is-muted', !!muted);
+        btn.classList.toggle('is-on', !muted);
+        try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
+        try { window.__coachMuted = muted; } catch {}
+        try { window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted } })); } catch {}
+      }
+
+      // restore saved state
+      let savedMuted = false;
+      try { const raw = localStorage.getItem('doach_muted'); if (raw != null) savedMuted = JSON.parse(raw); } catch {}
+      setState(savedMuted);
+
+      // click -> toggle + announce
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const nextMuted = btn.dataset.muted !== '1';
+        // If turning ON, unlock iOS audio inside the same gesture
+        if (!nextMuted) {
+          try { await unlockIOSAudioOnce(); } catch {}
+        }
+        setState(nextMuted);
+
+        // announce using your existing speaker
+        try {
+          const speaker = window.doachSpeak || window.coachSpeak || window.speak;
+          if (typeof speaker === 'function') speaker(nextMuted ? 'Voice off.' : 'Voice on.');
+        } catch {}
+      }, { passive: true });
+
+      // safety net: first touch unlocks even before user hits the toggle
+      window.addEventListener('touchstart', () => { try { unlockIOSAudioOnce(); } catch {} }, { once: true, passive: true });
+    })();
+
+
     const muteBtn = bar.querySelector('#hudMute');
     const camBtn  = bar.querySelector('#hudCamFlip');
 
-    // Voice toggle
-    const applyMute = (muted, announce = false) => {
-      muteBtn.setAttribute('data-muted', muted ? '1' : '0');
-      muteBtn.textContent = muted ? ICON_AUDIO_OFF + ' Voice Off' : ICON_AUDIO_ON + ' Voice On';
-      try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
-      try { window.__coachMuted = muted; } catch {}
+    // ===== Voice toggle (no innerHTML stomping + iOS-safe) =====
+(() => {
+  // iOS unlock, idempotent
+  async function __unlockIOSAudioOnce() {
+    if (window.__iosAudioUnlocked) return true;
+    window.__iosAudioUnlocked = true;
 
-      const ev = new CustomEvent('hud:mute-toggle', { detail: { muted } });
-      try { window.dispatchEvent(ev); } catch {}
+    try { await window.primeCoachAudio?.(); } catch {}
 
-      if (announce) {
-        if (!muted) {
-          try {
-            const prime = window.primeCoachAudio?.();
-            if (prime && typeof prime.then === 'function') {
-              prime.catch(() => {});
-            }
-          } catch {}
-        }
-        try {
-          const speaker = window.doachSpeak || window.coachSpeak || window.speak;
-          if (typeof speaker === 'function') {
-            speaker(muted ? 'Voice off.' : 'Voice on.');
-          }
-        } catch {}
+    // WebAudio path
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (Ctx) {
+        const ctx = window.__coachPrimeCtx || (window.__coachPrimeCtx = new Ctx());
+        if (ctx.state === 'suspended' && ctx.resume) await ctx.resume();
+        const src = ctx.createBufferSource();
+        src.buffer = ctx.createBuffer(1, 1, 22050);
+        const gain = ctx.createGain(); gain.gain.value = 0;
+        src.connect(gain); gain.connect(ctx.destination);
+        try { src.start(0); src.stop(0); } catch {}
       }
-    };
+    } catch {}
+
+    // HTMLMediaElement path
+    try {
+      let el = window.__coachAudioEl;
+      if (!el) {
+        el = document.createElement('audio');
+        el.style.display = 'none';
+        el.setAttribute('playsinline',''); el.playsInline = true;
+        document.body.appendChild(el);
+        window.__coachAudioEl = el;
+      }
+      el.muted = false; el.volume = 1;
+      el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
+      try { await (el.play?.() || Promise.resolve()); } catch {}
+      try { el.pause?.(); el.removeAttribute('src'); el.load?.(); } catch {}
+    } catch {}
+
+    return true;
+  }
+
+  function findBtn() {
+    return document.getElementById('hudVoiceToggle')
+        || document.querySelector('[data-role="hud-voice-toggle"]')
+        || document.querySelector('#hud .voice-toggle, .hud .voice-toggle');
+  }
+
+  function setState(btn, muted) {
+    // Do NOT touch innerHTML/textContent. CSS should react to these only:
+    btn.dataset.muted = muted ? '1' : '0';
+    btn.setAttribute('aria-pressed', muted ? 'false' : 'true');
+    btn.classList.toggle('is-muted', !!muted);
+    btn.classList.toggle('is-on', !muted);
+    // force visible just in case
+    btn.style.display = '';
+    btn.style.visibility = 'visible';
+  }
+
+  function applyMute(btn, muted, announce = false) {
+    setState(btn, muted);
+    try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
+    try { window.__coachMuted = muted; } catch {}
+    try { window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted } })); } catch {}
+
+    if (!announce) return;
+
+    if (!muted) {
+      try {
+        const maybe = __unlockIOSAudioOnce();
+        if (maybe && maybe.catch) maybe.catch(()=>{});
+      } catch {}
+    }
+
+    try {
+      const speaker = window.doachSpeak || window.coachSpeak || window.speak;
+      if (typeof speaker === 'function') speaker(muted ? 'Voice off.' : 'Voice on.');
+    } catch {}
+  }
+
+  function wire(btn) {
+    // restore saved
     let savedMuted = false;
-    try { if (localStorage.getItem('doach_muted') != null) savedMuted = JSON.parse(localStorage.getItem('doach_muted')); } catch {}
-    applyMute(savedMuted, false);
-    muteBtn.addEventListener('click', (e) => {
+    try {
+      const raw = localStorage.getItem('doach_muted');
+      if (raw != null) savedMuted = JSON.parse(raw);
+    } catch {}
+    applyMute(btn, savedMuted, false);
+
+    btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const nextMuted = muteBtn.getAttribute('data-muted') !== '1';
-      applyMute(nextMuted, true);
+      const next = btn.dataset.muted !== '1';
+      applyMute(btn, next, true);
+    }, { passive: true });
+
+    // one-time unlock for early touch
+    window.addEventListener('touchstart', () => {
+      try { __unlockIOSAudioOnce(); } catch {}
+    }, { once: true, passive: true });
+  }
+
+  // Wait for button if HUD mounts late
+  const btnNow = findBtn();
+  if (btnNow) { if (!btnNow.__voiceWired){ btnNow.__voiceWired = true; wire(btnNow); } }
+  else {
+    const obs = new MutationObserver(() => {
+      const b = findBtn();
+      if (b) {
+        if (!b.__voiceWired){ b.__voiceWired = true; wire(b); }
+        obs.disconnect();
+      }
     });
+    try { obs.observe(document.documentElement, { childList: true, subtree: true }); } catch {}
+  }
+})();
+
 
     // Camera flip
     const updateHudCamButton = () => { camBtn.textContent = formatHudCameraLabel(currentFacingLabel()); };
