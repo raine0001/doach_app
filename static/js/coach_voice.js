@@ -115,6 +115,7 @@ export async function doachSpeak(text) {
           }
           cleanup();
           try { console.warn('[coach] server TTS playback failed; falling back', err); } catch {}
+          resetPrime('server playback failure');
         }
       }
     }
@@ -128,6 +129,13 @@ export async function doachSpeak(text) {
 const SILENT_PRIME_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
 let __coachAudioPrimed = false;
 let __coachAudioPriming = null;
+
+function resetPrime(reason = 'manual') {
+  try {
+    __coachAudioPrimed = false;
+    try { console.debug('[coach] prime reset', reason); } catch {}
+  } catch {}
+}
 
 let __coachAudioEl = null;
 
@@ -172,8 +180,8 @@ export async function primeCoachAudio() {
     const el = ensureCoachAudioElement();
     if (el) {
       try {
-        el.muted = true;
-        el.volume = 0;
+        el.muted = false;
+        el.volume = 0.0001;
         el.src = SILENT_PRIME_WAV;
         try { el.load?.(); } catch {}
         const play = el.play && el.play();
@@ -187,8 +195,9 @@ export async function primeCoachAudio() {
       } catch {}
       try { el.pause?.(); } catch {}
       try { el.currentTime = 0; } catch {}
+      try { el.volume = 1; } catch {}
       try { el.removeAttribute('src'); el.load?.(); } catch {}
-      try { el.muted = false; el.volume = 1; } catch {}
+      try { el.muted = false; } catch {}
     }
 
     if (!unlocked) {
