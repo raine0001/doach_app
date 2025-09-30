@@ -10,104 +10,205 @@ export function speak(text) {
 }
 
 
-export async function doachSpeak(text) {
-  try { if (window.__coachMuted) return; } catch {}
+const IS_MOBILE_SPEECH_ENV = (() => {
   try {
-    const prefs = (() => {
-      try { return JSON.parse(localStorage.getItem('doach_tts')||'{}'); } catch { return {}; }
-    })();
-    const provider = (prefs.provider || localStorage.getItem('doach_voice_provider') || 'server').toLowerCase();
-    const voice = prefs.voice || localStorage.getItem('doach_voice') || (window.DOACH && window.DOACH.voice) || 'alloy';
-    try { if (!__coachAudioPrimed) await primeCoachAudio?.(); } catch {}
-    if (provider === 'server') {
-      const r = await fetch('/api/tts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text, voice }) });
-      if (r.ok) {
-        const blob = await r.blob();
-        const url = URL.createObjectURL(blob);
-        const audio = ensureCoachAudioElement();
-        if (!audio) {
-          try { URL.revokeObjectURL(url); } catch {}
-          throw new Error('audio element unavailable');
-        }
+    const nav = (typeof navigator !== 'undefined') ? navigator : null;
+    if (!nav) return false;
+    const ua = String(nav.userAgent || nav.vendor || '').toLowerCase();
+    return /iphone|ipad|ipod|android/.test(ua);
+  } catch {
+    return false;
+  }
+})();
+const FORCE_SERVER_TTS_KEY = 'doach_tts_force_server';
+const MAX_SPEECH_QUEUE = 2;
+const SERVER_TTS_TIMEOUT_MS = 1600;
 
-        try { audio.pause?.(); } catch {}
-        try { audio.currentTime = 0; } catch {}
-        try { audio.muted = false; audio.volume = 1; } catch {}
-        try { audio.setAttribute('playsinline', ''); } catch {}
-        try { audio.playsInline = true; } catch {}
+let __speechQueue = [];
+let __speechBusy = false;
 
-        const cleanup = () => {
-          try { audio.pause?.(); } catch {}
-          try { audio.currentTime = 0; } catch {}
-          try { audio.src = ''; } catch {}
-          try { audio.removeAttribute('src'); audio.load?.(); } catch {}
-          try { URL.revokeObjectURL(url); } catch {}
-        };
-
-        let playbackOk = false;
-        let endedHandler = null;
-        const waitForPlayback = new Promise((resolve, reject) => {
-          const timerMs = 2200;
-          let done = false;
-
-          const finish = (ok, err) => {
-            if (done) return;
-            done = true;
-            clearTimeout(timer);
-            audio.removeEventListener('playing', onPlaying);
-            audio.removeEventListener('error', onError);
-            if (endedHandler) {
-              audio.removeEventListener('ended', endedHandler);
-              endedHandler = null;
-            }
-            if (ok) {
-              playbackOk = true;
-              resolve(true);
-            } else {
-              reject(err || new Error('audio playback failed'));
-            }
-          };
-
-          const onPlaying = () => finish(true);
-          const onError = (e) => finish(false, e?.error || e);
-          const onEndedDetection = () => finish(true);
-          endedHandler = onEndedDetection;
-
-          const timer = setTimeout(() => finish(false, new Error('audio playback timeout')), timerMs);
-
-          audio.addEventListener('playing', onPlaying, { once: true });
-          audio.addEventListener('error', onError, { once: true });
-          audio.addEventListener('ended', onEndedDetection, { once: true });
-
-          audio.src = url;
-          try { audio.load?.(); } catch {}
-
-          try {
-            const playPromise = audio.play();
-            if (playPromise && typeof playPromise.then === 'function') {
-              playPromise.catch(onError);
-            }
-          } catch (err) {
-            onError(err);
-          }
-        });
-
-        try {
-          await waitForPlayback;
-          if (playbackOk) return;
-        } catch (err) {
-          cleanup();
-          try { console.warn('[coach] server TTS playback failed; falling back', err); } catch {}
-          resetPrime('server playback failure');
-        }
-      }
+function getNow() {
+  try {
+    if (typeof performance !== 'undefined' && typeof performance.now === 'function') {
+      return performance.now();
     }
   } catch {}
-  // Fallback to web TTS
-  speak(text);
+  return Date.now();
 }
 
+export function doachSpeak(text, opts = {}) {
+  if (!text) return Promise.resolve(false);
+  try { if (window.__coachMuted) return Promise.resolve(false); } catch {}
 
+  const job = { text: String(text), opts, resolve: null };
+  const result = new Promise((resolve) => { job.resolve = resolve; });
+
+  __speechQueue.push(job);
+  if (__speechQueue.length > MAX_SPEECH_QUEUE) {
+    const dropped = __speechQueue.splice(0, __speechQueue.length - MAX_SPEECH_QUEUE);
+    dropped.forEach((j) => { try { j.resolve?.(false); } catch {} });
+    try { console.debug('[coach] speech queue trimmed', { dropped: dropped.length }); } catch {}
+  }
+
+  runSpeechQueue();
+  return result;
+}
+
+async function runSpeechQueue() {
+  if (__speechBusy) return;
+  const job = __speechQueue.shift();
+  if (!job) return;
+  __speechBusy = true;
+  const startTime = getNow();
+  let ok = false;
+  try {
+    ok = await playSpeechJob(job.text, job.opts);
+  } catch (err) {
+    try { console.warn('[coach] speech error', err); } catch {}
+  } finally {
+    __speechBusy = false;
+    const finish = getNow();
+    try { job.resolve?.(ok); } catch {}
+    try { console.debug('[coach] speech', { ok, ms: Math.round(finish - startTime), text: job.text?.slice?.(0, 80) }); } catch {}
+    runSpeechQueue();
+  }
+}
+
+async function playSpeechJob(text, opts = {}) {
+  try { if (window.__coachMuted) return false; } catch {}
+  if (!text) return false;
+
+  const prefs = (() => {
+    try { return JSON.parse(localStorage.getItem('doach_tts') || '{}'); }
+    catch { return {}; }
+  })();
+
+  const rawProvider = String(opts.provider || prefs.provider || localStorage.getItem('doach_voice_provider') || 'server').toLowerCase();
+  const forceServer = opts.forceServer === true
+    || prefs.forceServer === true
+    || localStorage.getItem(FORCE_SERVER_TTS_KEY) === 'true';
+  let provider = rawProvider;
+
+  if (provider === 'openai' || provider === 'gpt' || provider === 'ai') provider = 'server';
+  if (IS_MOBILE_SPEECH_ENV && !forceServer) provider = 'web';
+
+  const voice = opts.voice
+    || prefs.voice
+    || localStorage.getItem('doach_voice')
+    || (window.DOACH && window.DOACH.voice)
+    || 'alloy';
+
+  try { console.debug('[coach] speak provider', provider); } catch {}
+
+  if (provider === 'server') {
+    try { if (!__coachAudioPrimed) await primeCoachAudio?.(); } catch {}
+    const ok = await playViaServerTTS(text, voice, opts.timeoutMs);
+    if (ok) return true;
+    try { console.warn('[coach] server TTS fallback to web'); } catch {}
+  } else if (provider === 'web-server') {
+    // compatibility alias; treat as server then fallback
+    try { if (!__coachAudioPrimed) await primeCoachAudio?.(); } catch {}
+    const ok = await playViaServerTTS(text, voice, opts.timeoutMs);
+    if (ok) return true;
+  }
+
+  speak(text);
+  return true;
+}
+
+async function playViaServerTTS(text, voice, timeoutOverride) {
+  const timeoutMs = Number.isFinite(Number(timeoutOverride)) ? Number(timeoutOverride) : SERVER_TTS_TIMEOUT_MS;
+  const fetchOpts = {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice })
+  };
+
+  let controller = null;
+  let fetchTimer = null;
+  if (typeof AbortController !== 'undefined') {
+    controller = new AbortController();
+    fetchOpts.signal = controller.signal;
+    fetchTimer = setTimeout(() => {
+      try { controller.abort(); } catch {}
+    }, timeoutMs);
+  }
+
+  let response;
+  try {
+    response = await fetch('/api/tts', fetchOpts);
+  } catch (err) {
+    try { console.warn('[coach] server TTS fetch error', err); } catch {}
+    return false;
+  } finally {
+    if (fetchTimer) clearTimeout(fetchTimer);
+  }
+
+  if (!response?.ok) return false;
+  const blob = await response.blob().catch(() => null);
+  if (!blob) return false;
+
+  const audio = ensureCoachAudioElement();
+  if (!audio) {
+    try { console.warn('[coach] audio element unavailable for TTS'); } catch {}
+    return false;
+  }
+
+  const url = URL.createObjectURL(blob);
+
+  try {
+    try { audio.pause?.(); } catch {}
+    try { audio.currentTime = 0; } catch {}
+    try { audio.muted = false; audio.volume = 1; } catch {}
+    try { audio.setAttribute('playsinline', ''); audio.playsInline = true; } catch {}
+
+    const playbackOk = await new Promise((resolve) => {
+      let started = false;
+      let settled = false;
+      let timerId = null;
+
+      const settle = (ok) => {
+        if (settled) return;
+        settled = true;
+        if (timerId) clearTimeout(timerId);
+        audio.removeEventListener('playing', onPlaying);
+        audio.removeEventListener('ended', onEnded);
+        audio.removeEventListener('error', onError);
+        resolve(ok && started);
+      };
+
+      const onPlaying = () => { started = true; };
+      const onEnded = () => settle(true);
+      const onError = () => settle(false);
+
+      timerId = setTimeout(() => settle(false), Math.max(timeoutMs, 1200) * 2);
+
+      audio.addEventListener('playing', onPlaying);
+      audio.addEventListener('ended', onEnded, { once: true });
+      audio.addEventListener('error', onError, { once: true });
+
+      audio.src = url;
+      try { audio.load?.(); } catch {}
+
+      try {
+        const playPromise = audio.play();
+        if (playPromise && typeof playPromise.then === 'function') {
+          playPromise.catch(() => onError());
+        }
+      } catch (err) {
+        onError(err);
+      }
+    });
+
+    try { audio.pause?.(); } catch {}
+    try { audio.currentTime = 0; } catch {}
+    try { audio.removeAttribute('src'); audio.load?.(); } catch {}
+
+    return playbackOk;
+  } finally {
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+}
 
 const SILENT_PRIME_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
 let __coachAudioPrimed = false;

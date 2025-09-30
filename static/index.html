@@ -4,20 +4,30 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>D🏀ACH</title>
-  <link rel="icon" href="/static/favicon.ico">
+  <link rel="icon" href="/static/favicon.ico">  <script>
+    // Lightweight defaults; enable extras via ?debug=1 or ?releaseTrace=1
+    (function configureDoachFlags(){
+      const search = new URLSearchParams(location.search || '');
+      const flag = (key) => ['1','true','yes','on'].includes((search.get(key) || '').toLowerCase());
+      const enableDebug = flag('debug');
+      const enableTrace = enableDebug || flag('releaseTrace');
 
-  <script>  // debug flags (set before app.js)
-  window.__LOCAL_DETECTOR = false;   // don't spin up detector.worker.js
-  window.__forceServerDetect = true; // route to server
-  window.PD_PREFETCH_FPS = 10;       // throttle pre-detect to ~10 fps
-  window.__forceServerDetect = false; window.__LOCAL_DETECTOR = false;
-  window.DEBUG_FORCE_POSE_ACTIVE = true
-  window.DEBUG_FORCE_HOOP_LOCKED = true
-  window.DEBUG_FORCE_SESSION_ACTIVE = true
-  window.POSE_DEBUG = true; window.DOACH_RELEASE_TRACE = true
-  window.REL_SCORE_THRESH = 0.55
-  PREF_LIVE_TIPS = true
-  </script>  <!-- end debug flags -->
+      window.__LOCAL_DETECTOR = false;
+      window.__forceServerDetect = false;
+      window.PD_PREFETCH_FPS = 10;
+      window.PREF_LIVE_TIPS = true;
+
+      window.DEBUG_FORCE_POSE_ACTIVE = enableDebug;
+      window.DEBUG_FORCE_HOOP_LOCKED = enableDebug;
+      window.DEBUG_FORCE_SESSION_ACTIVE = enableDebug;
+      window.POSE_DEBUG = enableDebug;
+      window.DOACH_RELEASE_TRACE = enableTrace;
+
+      if (enableDebug && !window.REL_SCORE_THRESH) {
+        window.REL_SCORE_THRESH = 0.55;
+      }
+    })();
+  </script>
 
   <!-- Early global guard: swallow pre-hoop or unstable pose releases -->
   <script>

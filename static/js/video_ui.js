@@ -143,7 +143,7 @@ export function mountSessionHUD() {
     });
 
     bar.innerHTML = `
-      <button id="hudVoiceToggle" class="voice-toggle is-on" data-muted="0" aria-pressed="true" aria-label="Toggle voice">
+      <button id="hudVoiceToggle" class="voice-toggle is-on" data-muted="0" aria-pressed="true" aria-label="Enable voice">
         <span class="icon-on" aria-hidden="true">${ICON_AUDIO_ON}</span>
         <span class="icon-off" aria-hidden="true">${ICON_AUDIO_OFF}</span>
       </button>
@@ -153,90 +153,7 @@ export function mountSessionHUD() {
     `;
     root.appendChild(bar);
 
-        // === Voice toggle wiring (drop-in) ===
-    (function wireHudVoiceToggle(){
-      const btn = document.getElementById('hudVoiceToggle');
-      if (!btn || btn.__voiceWired) return;
-      btn.__voiceWired = true;
 
-      // idempotent iOS unlock: WebAudio resume + real <audio>.play() of a silent blip
-      async function unlockIOSAudioOnce(){
-        if (window.__iosAudioUnlocked) return true;
-        window.__iosAudioUnlocked = true;
-
-        try { await window.primeCoachAudio?.(); } catch {}
-
-        // WebAudio path
-        try {
-          const Ctx = window.AudioContext || window.webkitAudioContext;
-          if (Ctx) {
-            const ctx = window.__coachPrimeCtx || (window.__coachPrimeCtx = new Ctx());
-            if (ctx.state === 'suspended' && ctx.resume) await ctx.resume();
-            const src = ctx.createBufferSource();
-            src.buffer = ctx.createBuffer(1, 1, 22050);
-            const gain = ctx.createGain(); gain.gain.value = 0;
-            src.connect(gain); gain.connect(ctx.destination);
-            try { src.start(0); src.stop(0); } catch {}
-          }
-        } catch {}
-
-        // HTMLMediaElement path
-        try {
-          let el = window.__coachAudioEl;
-          if (!el) {
-            el = document.createElement('audio');
-            el.style.display = 'none';
-            el.setAttribute('playsinline',''); el.playsInline = true;
-            document.body.appendChild(el);
-            window.__coachAudioEl = el;
-          }
-          el.muted = false; el.volume = 1;
-          el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
-          try { await (el.play?.() || Promise.resolve()); } catch {}
-          try { el.pause?.(); el.removeAttribute('src'); el.load?.(); } catch {}
-        } catch {}
-
-        return true;
-      }
-
-      function setState(muted){
-        btn.dataset.muted = muted ? '1' : '0';
-        btn.setAttribute('aria-pressed', muted ? 'false' : 'true');
-        btn.classList.toggle('is-muted', !!muted);
-        btn.classList.toggle('is-on', !muted);
-        try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
-        try { window.__coachMuted = muted; } catch {}
-        try { window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted } })); } catch {}
-      }
-
-      // restore saved state
-      let savedMuted = false;
-      try { const raw = localStorage.getItem('doach_muted'); if (raw != null) savedMuted = JSON.parse(raw); } catch {}
-      setState(savedMuted);
-
-      // click -> toggle + announce
-      btn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const nextMuted = btn.dataset.muted !== '1';
-        // If turning ON, unlock iOS audio inside the same gesture
-        if (!nextMuted) {
-          try { await unlockIOSAudioOnce(); } catch {}
-        }
-        setState(nextMuted);
-
-        // announce using your existing speaker
-        try {
-          const speaker = window.doachSpeak || window.coachSpeak || window.speak;
-          if (typeof speaker === 'function') speaker(nextMuted ? 'Voice off.' : 'Voice on.');
-        } catch {}
-      }, { passive: true });
-
-      // safety net: first touch unlocks even before user hits the toggle
-      window.addEventListener('touchstart', () => { try { unlockIOSAudioOnce(); } catch {} }, { once: true, passive: true });
-    })();
-
-
-    const muteBtn = bar.querySelector('#hudMute');
     const camBtn  = bar.querySelector('#hudCamFlip');
 
     // ===== Voice toggle (no innerHTML stomping + iOS-safe) =====
@@ -244,23 +161,41 @@ export function mountSessionHUD() {
   // iOS unlock, idempotent
   async function __unlockIOSAudioOnce() {
     if (window.__iosAudioUnlocked) return true;
-    window.__iosAudioUnlocked = true;
+    let unlocked = false;
 
-    try { await window.primeCoachAudio?.(); } catch {}
+    const markUnlocked = () => { unlocked = true; };
+
+    try {
+      if (typeof window.primeCoachAudio === 'function') {
+        let primeResult = window.primeCoachAudio();
+        if (primeResult && typeof primeResult.then === 'function') {
+          primeResult = await primeResult.catch(() => false);
+        }
+        if (primeResult !== false) markUnlocked();
+      }
+    } catch (err) {
+      try { console.warn('[hud] primeCoachAudio unlock failed', err); } catch {}
+    }
 
     // WebAudio path
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       if (Ctx) {
         const ctx = window.__coachPrimeCtx || (window.__coachPrimeCtx = new Ctx());
-        if (ctx.state === 'suspended' && ctx.resume) await ctx.resume();
+        if (ctx.state === 'suspended' && ctx.resume) {
+          try { await ctx.resume(); markUnlocked(); } catch {}
+        } else if (ctx.state === 'running') {
+          markUnlocked();
+        }
         const src = ctx.createBufferSource();
         src.buffer = ctx.createBuffer(1, 1, 22050);
         const gain = ctx.createGain(); gain.gain.value = 0;
         src.connect(gain); gain.connect(ctx.destination);
-        try { src.start(0); src.stop(0); } catch {}
+        try { src.start(0); src.stop(0); markUnlocked(); } catch {}
       }
-    } catch {}
+    } catch (err) {
+      try { console.warn('[hud] AudioContext unlock failed', err); } catch {}
+    }
 
     // HTMLMediaElement path
     try {
@@ -274,12 +209,26 @@ export function mountSessionHUD() {
       }
       el.muted = false; el.volume = 1;
       el.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
-      try { await (el.play?.() || Promise.resolve()); } catch {}
+      let playResult = el.play?.();
+      if (playResult && typeof playResult.then === 'function') {
+        playResult = await playResult.catch(() => false);
+      }
+      if (playResult !== false) markUnlocked();
       try { el.pause?.(); el.removeAttribute('src'); el.load?.(); } catch {}
-    } catch {}
+    } catch (err) {
+      try { console.warn('[hud] HTMLAudio unlock failed', err); } catch {}
+    }
 
+    if (!unlocked) {
+      try { window.__iosAudioUnlocked = false; } catch {}
+      return false;
+    }
+
+    try { window.__iosAudioUnlocked = true; } catch {}
+    try { console.debug('[hud] iOS audio unlocked'); } catch {}
     return true;
   }
+
 
   function findBtn() {
     return document.getElementById('hudVoiceToggle')
@@ -330,8 +279,15 @@ export function mountSessionHUD() {
 
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
-      const next = btn.dataset.muted !== '1';
-      applyMute(btn, next, true);
+      try {
+        const maybe = __unlockIOSAudioOnce();
+        if (maybe && typeof maybe.then === 'function') {
+          maybe.catch(() => {});
+        }
+      } catch {}
+
+      const wasMuted = btn.dataset.muted === '1';
+      applyMute(btn, false, wasMuted);
     }, { passive: true });
 
     // one-time unlock for early touch
@@ -867,3 +823,4 @@ window.addEventListener('shot:summary', () => {
     updateSessionHUD({ taken, elapsedSec });
   } catch {}
 });
+
