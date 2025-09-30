@@ -4,7 +4,7 @@
 // Emits:  hud:start-session (on explicit start), hud:end-session (on end)
 // Does NOT: generate releases, record clips, enforce UI, open tables automatically.
 
-import { speak, listenForEndSession } from '/static/js/coach_voice.js';
+import { speak, doachSpeak, primeCoachAudio, listenForEndSession } from '/static/js/coach_voice.js';
 
 /* ------------------------ tiny helpers ------------------------ */
 async function postJSON(url, body) {
@@ -122,10 +122,20 @@ async function startSession() {
   // tell everyone
   try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch {}
 
-  // optional voice cue
+  // start session voice cue
   try {
     if (localStorage.getItem('doach_muted') !== 'true') {
-      speak(`Hi ${name}, let's get started. Tap the hoop to lock it, then take your first shot when you're ready.`);
+      const greeting = `Hi ${name}, let's get started. Tap the hoop to lock it, then take your first shot when you're ready.`;
+      try { await primeCoachAudio?.(); } catch {}
+      try {
+        if (typeof doachSpeak === 'function') {
+          await doachSpeak(greeting);
+        } else {
+          speak(greeting);
+        }
+      } catch {
+        speak(greeting);
+      }
     }
   } catch {}
 
@@ -198,7 +208,21 @@ async function endSession(reason = 'normal') {
   try { window.__SESSION_ACTIVE = false; } catch {}
 
   // optional voice cue
-  try { if (localStorage.getItem('doach_muted') !== 'true') speak('Session ended.'); } catch {}
+  try {
+    if (localStorage.getItem('doach_muted') !== 'true') {
+      const line = 'Session ended.';
+      try { await primeCoachAudio?.(); } catch {}
+      try {
+        if (typeof doachSpeak === 'function') {
+          await doachSpeak(line);
+        } else {
+          speak(line);
+        }
+      } catch {
+        speak(line);
+      }
+    }
+  } catch {}
 
   return true;
 }

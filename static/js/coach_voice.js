@@ -9,6 +9,7 @@ export function speak(text) {
   } catch {}
 }
 
+
 export async function doachSpeak(text) {
   try { if (window.__coachMuted) return; } catch {}
   try {
@@ -17,29 +18,51 @@ export async function doachSpeak(text) {
     })();
     const provider = (prefs.provider || localStorage.getItem('doach_voice_provider') || 'server').toLowerCase();
     const voice = prefs.voice || localStorage.getItem('doach_voice') || (window.DOACH && window.DOACH.voice) || 'alloy';
+    try { if (!__coachAudioPrimed) await primeCoachAudio?.(); } catch {}
     if (provider === 'server') {
       const r = await fetch('/api/tts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text, voice }) });
       if (r.ok) {
         const blob = await r.blob();
         const url = URL.createObjectURL(blob);
-        const audio = new Audio(url);
-        audio.preload = 'auto';
+        const audio = ensureCoachAudioElement();
+        if (!audio) {
+          try { URL.revokeObjectURL(url); } catch {}
+          throw new Error('audio element unavailable');
+        }
+
+        try { audio.pause?.(); } catch {}
+        try { audio.currentTime = 0; } catch {}
+        try { audio.muted = false; audio.volume = 1; } catch {}
+        try { audio.setAttribute('playsinline', ''); } catch {}
         try { audio.playsInline = true; } catch {}
-        audio.onended = () => { try { URL.revokeObjectURL(url); } catch {} };
 
         const cleanup = () => {
-          try { audio.pause(); } catch {}
+          try { audio.pause?.(); } catch {}
+          try { audio.currentTime = 0; } catch {}
+          try { audio.src = ''; } catch {}
           try { audio.removeAttribute('src'); audio.load?.(); } catch {}
           try { URL.revokeObjectURL(url); } catch {}
         };
 
         let playbackOk = false;
+        let endedHandler = null;
         const waitForPlayback = new Promise((resolve, reject) => {
+          const timerMs = 2000;
           let done = false;
+
           const finish = (ok, err) => {
             if (done) return;
             done = true;
             clearTimeout(timer);
+            audio.removeEventListener('playing', onPlaying);
+            audio.removeEventListener('error', onError);
+            audio.removeEventListener('stalled', onError);
+            audio.removeEventListener('abort', onError);
+            audio.removeEventListener('suspend', onError);
+            if (!ok && endedHandler) {
+              audio.removeEventListener('ended', endedHandler);
+              endedHandler = null;
+            }
             if (ok) {
               playbackOk = true;
               resolve(true);
@@ -47,12 +70,31 @@ export async function doachSpeak(text) {
               reject(err || new Error('audio playback failed'));
             }
           };
-          const timer = setTimeout(() => finish(false, new Error('audio playback timeout')), 1800);
-          const onSuccess = () => finish(true);
+
+          const onPlaying = () => finish(true);
           const onError = (e) => finish(false, e?.error || e);
-          audio.addEventListener('playing', onSuccess, { once: true });
-          audio.addEventListener('ended', onSuccess, { once: true });
-          audio.addEventListener('error', onError, { once: true });
+          const onEndedDetection = () => {
+            if (endedHandler) {
+              audio.removeEventListener('ended', endedHandler);
+              endedHandler = null;
+            }
+            cleanup();
+            if (!done) finish(true);
+          };
+          endedHandler = onEndedDetection;
+
+          const timer = setTimeout(() => finish(false, new Error('audio playback timeout')), timerMs);
+
+          audio.addEventListener('playing', onPlaying);
+          audio.addEventListener('error', onError);
+          audio.addEventListener('stalled', onError);
+          audio.addEventListener('abort', onError);
+          audio.addEventListener('suspend', onError);
+          audio.addEventListener('ended', onEndedDetection);
+
+          audio.src = url;
+          try { audio.load?.(); } catch {}
+
           try {
             const playPromise = audio.play();
             if (playPromise && typeof playPromise.then === 'function') {
@@ -67,6 +109,10 @@ export async function doachSpeak(text) {
           await waitForPlayback;
           if (playbackOk) return;
         } catch (err) {
+          if (endedHandler) {
+            audio.removeEventListener('ended', endedHandler);
+            endedHandler = null;
+          }
           cleanup();
           try { console.warn('[coach] server TTS playback failed; falling back', err); } catch {}
         }
@@ -77,9 +123,45 @@ export async function doachSpeak(text) {
   speak(text);
 }
 
+
+
 const SILENT_PRIME_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
 let __coachAudioPrimed = false;
 let __coachAudioPriming = null;
+
+let __coachAudioEl = null;
+
+function ensureCoachAudioElement() {
+  if (__coachAudioEl && typeof __coachAudioEl.play === 'function') return __coachAudioEl;
+  let el = null;
+  try { el = new Audio(); }
+  catch {
+    try {
+      if (typeof document !== 'undefined' && document.createElement) {
+        el = document.createElement('audio');
+      }
+    } catch { el = null; }
+  }
+  if (!el) return null;
+  try { el.preload = 'auto'; } catch {}
+  try { el.setAttribute('playsinline', ''); } catch {}
+  try { el.playsInline = true; } catch {}
+  try { el.controls = false; } catch {}
+  try { el.muted = false; el.volume = 1; } catch {}
+  try {
+    if (typeof document !== 'undefined' && document.body && !el.parentElement) {
+      el.style.position = 'absolute';
+      el.style.width = '0';
+      el.style.height = '0';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      document.body.appendChild(el);
+    }
+  } catch {}
+  try { window.__coachAudioEl = el; } catch {}
+  __coachAudioEl = el;
+  return el;
+}
 
 export async function primeCoachAudio() {
   if (__coachAudioPrimed) return true;
@@ -87,25 +169,26 @@ export async function primeCoachAudio() {
 
   __coachAudioPriming = (async () => {
     let unlocked = false;
-    try {
-      const el = new Audio();
-      el.src = SILENT_PRIME_WAV;
-      el.preload = 'auto';
-      el.muted = true;
-      el.volume = 0;
-      try { window.__coachPrimeAudioEl = el; } catch {}
-      const play = el.play && el.play();
-      if (play && typeof play.then === 'function') {
-        await play;
-        unlocked = true;
-      } else if (play === undefined) {
-        // Older iOS returns void but still primes
-        unlocked = true;
-      }
-      if (el.pause) el.pause();
-      el.src = '';
-    } catch {} finally {
-      try { window.__coachPrimeAudioEl = null; } catch {}
+    const el = ensureCoachAudioElement();
+    if (el) {
+      try {
+        el.muted = true;
+        el.volume = 0;
+        el.src = SILENT_PRIME_WAV;
+        try { el.load?.(); } catch {}
+        const play = el.play && el.play();
+        if (play && typeof play.then === 'function') {
+          await play;
+          unlocked = true;
+        } else if (play === undefined) {
+          // Older iOS returns void but still primes
+          unlocked = true;
+        }
+      } catch {}
+      try { el.pause?.(); } catch {}
+      try { el.currentTime = 0; } catch {}
+      try { el.removeAttribute('src'); el.load?.(); } catch {}
+      try { el.muted = false; el.volume = 1; } catch {}
     }
 
     if (!unlocked) {
