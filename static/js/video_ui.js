@@ -1,138 +1,39 @@
-// [video_ui.js] - Enhancements for DOACH Mobile/Full-Screen Integration
+// video_ui.js — UI only. iOS-safe. No cap enforcement, no auto-end, no recording, no server writes.
+// Owns: HUD, prompts, camera switcher, summary table rendering, UI updates from events.
+// Exposes: showPromptMessage, ensureHudRoot, mountSessionHUD, updateSessionHUD, renderFullShotTable,
+//          autoEndSessionAndSummarize (callable, not auto-triggered).
 
-import { setOverlayInteractive } from './fix_overlay_display.js';
+import { setOverlayInteractive, syncOverlayToVideo } from './fix_overlay_display.js';
 import { speak } from './coach_voice.js';
-import { arcHeightLabel } from './shot_utils.js';
 import { enableHoopPickOnce } from './app.js';
-import { stabilizeLockedHoop, getLockedHoopBox, handleHoopSelection, canonHoop } from './hoop_tracker.js';
+import { getLockedHoopBox, handleHoopSelection, canonHoop } from './hoop_tracker.js';
 
-window.DEMO = true;   // demo mode
-window.DEMO_MINIMAL_TABLE = true;   // always show the skinny table
-window.SESSION_MANAGER_OWNS_ENDING = false; // let UI auto-end at cap
+// Soft demo toggles (ignored by logic that could conflict)
+window.DEMO = true;
+window.DEMO_MINIMAL_TABLE = true;
 
-
+// Make these helpers reachable to other modules
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection;
-try { if (typeof window.__sessionContinue === 'undefined') window.__sessionContinue = false; } catch {}
-const shouldEnforceSessionCap = () => window.__sessionContinue !== true;
-const ICON_AUDIO_ON = '\u{1F50A}';      // speaker with sound
-const ICON_AUDIO_OFF = '\u{1F507}';     // muted speaker
-const ICON_CAMERA_FRONT = '\u{1F4F8}';  // front/selfie camera
-const ICON_CAMERA_BACK = '\u{1F4F7}';   // rear camera
-const ICON_CAMERA_SWITCH = '\u{1F503}'; // camera switch arrows
-const SYMBOL_INFINITY = '\u{221E}';     // infinity symbol
 
-const OBSERVER_EVENT_LIMIT = 120;
-
-
-function safeClone(value) {
-  try { return JSON.parse(JSON.stringify(value)); } catch { return value == null ? null : { value }; }
-}
-function ensureObserverLog(){
-  if (!Array.isArray(window.__observerEventLog)) window.__observerEventLog = [];
-  return window.__observerEventLog;
-}
-function logObserverEvent(type, detail) {
-  try {
-    const log = ensureObserverLog();
-    const entry = {
-      type,
-      ts: Date.now(),
-      frame: (detail && Number.isFinite(detail.frame)) ? detail.frame : (Number.isFinite(window.__AN_IDX) ? window.__AN_IDX : null),
-      detail: detail != null ? safeClone(detail) : null
-    };
-    const last = log.at?.(-1) || null;
-    if (last && last.type === entry.type && last.frame === entry.frame) {
-      const lastDetail = JSON.stringify(last.detail);
-      const nextDetail = JSON.stringify(entry.detail);
-      if (lastDetail === nextDetail) return;
-    }
-    log.push(entry);
-    if (log.length > OBSERVER_EVENT_LIMIT) log.splice(0, log.length - OBSERVER_EVENT_LIMIT);
-  } catch {}
-}
-try { if (typeof window.__logObserverEvent !== 'function') window.__logObserverEvent = logObserverEvent; } catch {}
-(function installObserverFrameHooks(){
-  if (window.__observerFrameHooksInstalled) return;
-  window.__observerFrameHooksInstalled = true;
-  let lastTrailLen = -1;
-  let lastArcLen = -1;
-  window.addEventListener('analyzer:frame-done', (e) => {
-    try {
-      const frameIdx = Number(e?.detail?.__frameIdx);
-      const bsTrailLen = Array.isArray(window.ballState?.trail) ? window.ballState.trail.length : 0;
-      if (bsTrailLen !== lastTrailLen) {
-        logObserverEvent('trail', { frame: frameIdx, len: bsTrailLen, state: window.ballState?.state || null });
-        lastTrailLen = bsTrailLen;
-      }
-      const arcLen = Array.isArray(window.ballArc?.trail) ? window.ballArc.trail.length : 0;
-      if (arcLen !== lastArcLen) {
-        logObserverEvent('arc', { frame: frameIdx, len: arcLen });
-        lastArcLen = arcLen;
-      }
-    } catch {}
-  }, { passive: true });
-})();
-(function installObserverEventHooks(){
-  if (window.__observerEventHooksInstalled) return;
-  window.__observerEventHooksInstalled = true;
-  window.addEventListener('shot:release', (e) => {
-    try {
-      const detail = e?.detail || {};
-      logObserverEvent('shot:release', {
-        frame: Number(detail.frame) || null,
-        via: detail.via || null,
-        gate: safeClone(window.__releaseGateLast || null),
-        pending: Array.isArray(window.__shotList) ? window.__shotList.filter(s => s && s.pending).length : 0
-      });
-    } catch {}
-  }, { passive: true });
-  window.addEventListener('shot:summary', (e) => {
-    try {
-      const detail = e?.detail || {};
-      logObserverEvent('shot:summary', {
-        frame: Number(detail.frameExit ?? detail.frameEnd) || null,
-        made: detail.made ?? null,
-        arcHeight: detail.arcHeight ?? null,
-        entryAngle: detail.entryAngle ?? null,
-        releaseAngle: detail.releaseAngle ?? null
-      });
-    } catch {}
-  }, { passive: true });
-  window.addEventListener('shot:end', (e) => {
-    try { logObserverEvent('shot:end', { reason: e?.detail?.reason || null }); } catch {}
-  }, { passive: true });
-  window.addEventListener('hud:start-session', () => {
-    try { logObserverEvent('hud:start-session', { shots: Array.isArray(window.__shotList) ? window.__shotList.length : 0 }); } catch {}
-  }, { passive: true });
-})();
-
-const formatCameraFacing = (label) => ((label === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + label;
-const formatHudCameraLabel = (label) => formatCameraFacing(label) + ' Camera';
-const formatCapDisplay = (cap) => (Number.isFinite(cap) && cap > 0) ? String(cap) : SYMBOL_INFINITY;
-
-// --- Mobile viewport and video tag fixes - keep HUD on page
+/* ----------------------- iOS viewport + basics ----------------------- */
 (function installMobileViewportFixes(){
-  // ensure a sane viewport on iOS
-  const id = 'doach-viewport';
-  let tag = document.querySelector(`meta[name="viewport"]`);
-  if (!tag) { tag = document.createElement('meta'); tag.name = 'viewport'; document.head.appendChild(tag); tag.id = id; }
+  let tag = document.querySelector('meta[name="viewport"]');
+  if (!tag) { tag = document.createElement('meta'); tag.name = 'viewport'; document.head.appendChild(tag); }
   tag.setAttribute('content', [
     'width=device-width',
     'initial-scale=1',
     'maximum-scale=1',
-    'viewport-fit=cover',      // use the whole screen on notch phones
-    'user-scalable=no'         // prevent accidental pinch zoom breaking layout
-  ].join(', '));
+    'viewport-fit=cover',
+    'user-scalable=no'
+  ].join(','));
 
-  // lock body to the visual viewport height (svh works on modern Safari)
-  const cssId = 'doach-mobile-css';
-  if (!document.getElementById(cssId)) {
+  if (!document.getElementById('doach-mobile-css')) {
     const css = document.createElement('style');
-    css.id = cssId;
+    css.id = 'doach-mobile-css';
     css.textContent = `
-      html, body { margin:0; padding:0; height:100%; background:#000; overscroll-behavior: none; }
-      .session-container, #videoPlayer { width:100%; height:100svh; object-fit: cover; }
+      html, body { margin:0; padding:0; height:100%; background:#000; overscroll-behavior:none; }
+      .session-container, #videoPlayer { width:100%; height:100svh; object-fit:cover; }
       #hudRoot { inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
       .hud-card, .hud-pill { -webkit-tap-highlight-color: transparent; }
       button.vc-btn { font: 600 12px system-ui; border-radius: 10px; padding: 6px 10px; }
@@ -140,615 +41,30 @@ const formatCapDisplay = (cap) => (Number.isFinite(cap) && cap > 0) ? String(cap
     document.head.appendChild(css);
   }
 
-  // make sure the video tag cooperates with iOS autoplay
   window.addEventListener('load', () => {
     const v = document.getElementById('videoPlayer');
     if (v) { v.setAttribute('playsinline',''); v.muted = true; }
   });
 })();
 
-(function installHudAutoscale(){
-  function scaleHUD(){
-    const bar = document.getElementById('sessionHUD');
-    if (!bar) return;
-    const maxW = window.innerWidth - 24; // margins
-    // measure natural width
-    bar.style.transformOrigin = 'bottom center';
-    bar.style.transform = 'translateX(-50%) scale(1)';
-    const w = bar.getBoundingClientRect().width;
-    if (w > maxW) {
-      const s = Math.max(0.72, maxW / w);
-      bar.style.transform = `translateX(-50%) scale(${s})`;
-    }
+/* ---------------------------- HUD root ----------------------------- */
+export function ensureHudRoot() {
+  const video = document.getElementById('videoPlayer');
+  const host  = video?.parentElement || document.body;
+  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
+
+  let root = document.getElementById('hudRoot');
+  if (!root) {
+    root = document.createElement('div');
+    root.id = 'hudRoot';
+    host.appendChild(root);
   }
-  window.addEventListener('resize', scaleHUD);
-  window.addEventListener('orientationchange', () => setTimeout(scaleHUD, 250));
-  const ro = new ResizeObserver(scaleHUD);
-  ro.observe(document.documentElement);
-  window.__hudScaleRO = ro;
-  setTimeout(scaleHUD, 50);
-})();
-
-
-
-// --- Minimal demo helpers ---
-function getClipHrefForShot(idx1Based, shot) {
-  if (shot?.clip?.path) return shot.clip.path;
-
-  try {
-    const recs = (typeof window.getShotRecords === 'function') ? (window.getShotRecords() || []) : [];
-    const rec  = recs.find(r => r.idx === idx1Based || r.id === idx1Based);
-    if (rec?.clip?.path) return rec.clip.path;
-  } catch {}
-
-  try {
-    const sid = window.__SESSION_ID;
-    if (sid != null) return `/api/sessions/${sid}/shot_video?index=${idx1Based - 1}`;
-  } catch {}
-
-  return null;
+  Object.assign(root.style, { position:'absolute', inset:'0', pointerEvents:'none', zIndex:10000 });
+  return root;
 }
+window.ensureHudRoot = ensureHudRoot;
 
-async function requestCoachSessionSummary() {
-  const line = document.getElementById('sessReviewLine');
-  if (line) {
-    line.style.display = 'block';
-    line.textContent = 'Preparing session summary…';
-  }
-
-  let sid = window.__SESSION_ID || null;
-  try { if (!sid) sid = await ensureSessionId(); } catch {}
-
-  try {
-    if (sid) {
-      const r = await fetch(`/api/sessions/${sid}/coach_summary`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ compare: true }),
-        credentials: 'include'
-      });
-      if (r.ok) {
-        const j = await r.json().catch(()=>null);
-        const txt = (j?.text || j?.summary || 'Summary prepared.');
-        if (line) line.textContent = txt;
-        return;
-      }
-    }
-  } catch {}
-
-  try {
-    window.dispatchEvent(new CustomEvent('doach:session-summary-request', { detail: { sid, compare: true } }));
-    if (line) line.textContent = 'Working on your session summary…';
-  } catch {}
-}
-
-// Connection banner: show backend origin and active session id
-// ---------------------------------------------------------------
-function mountConnectionBanner() {
-  try {
-    const root = ensureHudRoot?.() || document.body;
-    let box = document.getElementById('connBanner');
-    const hidden = (localStorage.getItem('doach_hide_conn_banner') === '1') && (window.SHOW_CONN_BANNER !== true);
-    if (!box) {
-      box = document.createElement('div');
-      box.id = 'connBanner';
-      box.className = 'hud-card';
-      Object.assign(box.style, {
-        position: 'absolute', top: '8px', left: '10px',
-        padding: '6px 8px', font: '600 11px system-ui',
-        zIndex: 10080, pointerEvents: 'auto',
-        opacity: 0.95
-      });
-      root.appendChild(box);
-    }
-
-    const origin = (location && location.origin) ? location.origin : (location.protocol + '//' + location.host);
-    const sid = (window.__SESSION_ID || '-');
-    const debugHref = (sid && sid !== '-') ? `/admin/session/${sid}/debug` : null;
-    const healthHref = '/healthz';
-    const html = [
-      `<span style="opacity:.9">Connected:</span> <span style="font-weight:700">${origin}</span>`,
-      `&nbsp;&nbsp;<span style="opacity:.9">sid:</span> <span id="connSidVal" style="font-weight:700">${sid}</span>`,
-      debugHref ? `&nbsp;<a id="connDbg" href="${debugHref}" target="_blank" style="text-decoration:none">debug</a>` : '',
-      `&nbsp;<a id="connHealth" href="${healthHref}" target="_blank" style="text-decoration:none">health</a>`,
-      `&nbsp;<button id="connHide" class="vc-btn" title="Hide" style="padding:0 6px">Ã—</button>`
-    ].join('');
-    box.innerHTML = html;
-    box.style.display = hidden ? 'none' : 'block';
-
-    // Wire hide
-    try {
-      box.querySelector('#connHide')?.addEventListener('click', () => {
-        localStorage.setItem('doach_hide_conn_banner', '1');
-        box.style.display = 'none';
-      }, { once: true });
-    } catch {}
-
-    // Live update when SID changes
-    clearInterval(box.__upd);
-    box.__lastSid = sid;
-    box.__upd = setInterval(() => {
-      try {
-        const curSid = (window.__SESSION_ID || '-');
-        if (curSid !== box.__lastSid) {
-          box.__lastSid = curSid;
-          const val = box.querySelector('#connSidVal');
-          if (val) val.textContent = curSid;
-          const a = box.querySelector('#connDbg');
-          if (a) a.setAttribute('href', `/admin/session/${curSid}/debug`);
-          box.style.display = ((localStorage.getItem('doach_hide_conn_banner') === '1') && (window.SHOW_CONN_BANNER !== true)) ? 'none' : 'block';
-        }
-      } catch {}
-    }, 800);
-
-  } catch {}
-}
-window.mountConnectionBanner = mountConnectionBanner;
-
-// === Camera facing control (Front/Back) — robust, with logs ===
-(function installCameraSwitcher(){
-  if (window.__cameraSwitcherInstalled) return; window.__cameraSwitcherInstalled = true;
-
-  const log = (...a)=>{ try{ console.log('[camera]', ...a); }catch{} };
-  const warn = (...a)=>{ try{ console.warn('[camera]', ...a); }catch{} };
-
-  // Persisted pref
-  function readPref(){ try { return localStorage.getItem('cam_facing') || 'Back'; } catch { return 'Back'; } }
-  function writePref(v){
-    try { localStorage.setItem('cam_facing', v); } catch {}
-    try { localStorage.setItem('doach_camera_facing', v === 'Back' ? 'environment' : 'user'); } catch {}
-  }
-
-  // Stop current stream cleanly
-  function stopStream(){
-    const v = document.getElementById('videoPlayer');
-    const s = v && v.srcObject;
-    if (s?.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch{} });
-    if (v) v.srcObject = null;
-  }
-
-  // Ensure labels are available, then map likely front/back deviceIds
-  async function primeCatalog(){
-    const haveMedia = !!(document.getElementById('videoPlayer')?.srcObject);
-    let devs = await navigator.mediaDevices.enumerateDevices();
-    let vids = devs.filter(d=>d.kind==='videoinput');
-
-    if (!vids.some(v=>v.label)) {
-      // iOS/Safari often hides labels until we’ve granted camera once
-      if (!haveMedia) {
-        try {
-          const tmp = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-          tmp.getTracks().forEach(t=>t.stop());
-        } catch(e){ warn('permission probe failed', e); }
-        devs = await navigator.mediaDevices.enumerateDevices();
-        vids = devs.filter(d=>d.kind==='videoinput');
-      }
-    }
-    // Heuristics for front/back
-    const isFront = d => /front|user/i.test(d.label);
-    const isBack  = d => /back|rear|environment|world/i.test(d.label);
-
-    let front = vids.find(isFront) || vids[0] || null;
-    let back  = vids.find(isBack)  || vids.find(d=>front && d.deviceId!==front.deviceId) || vids[1] || null;
-
-    window.__CAMERA_CATALOG = {
-      front: front?.deviceId || null,
-      back:  back?.deviceId  || null,
-      count: vids.length,
-      raw: vids.map(v=>({label:v.label, id:v.deviceId}))
-    };
-    log('catalog', window.__CAMERA_CATALOG);
-    return window.__CAMERA_CATALOG;
-  }
-
-  // Convert label -> constraint
-  function labelToFacing(label){ return (String(label).toLowerCase().startsWith('b')) ? 'environment' : 'user'; }
-
-  async function startWithConstraints(cons){
-    const v = document.getElementById('videoPlayer');
-    if (!v) return false;
-
-    // mobile autoplay sanity
-    try { v.setAttribute('playsinline',''); v.muted = true; } catch {}
-    const stream = await navigator.mediaDevices.getUserMedia({ video: cons, audio: false });
-    v.srcObject = stream;
-    try { await v.play?.(); } catch {}
-    try { syncOverlayToVideo?.(); } catch {}
-    return true;
-  }
-
-  async function restartCamera(label){
-    if (!navigator.mediaDevices?.getUserMedia) { warn('mediaDevices not available'); return false; }
-    const wantBack = (label === 'Back');
-
-    // 1) Prefer exact deviceId once we know it
-    try {
-      const cat = window.__CAMERA_CATALOG || await primeCatalog();
-      const id  = wantBack ? cat.back : cat.front;
-      if (id) {
-        stopStream();
-        log('switching via deviceId', label, id);
-        const ok = await startWithConstraints({ deviceId: { exact: id } });
-        if (ok) return true;
-        warn('deviceId path failed, falling back to facingMode');
-      }
-    } catch(e){ warn('deviceId switch error', e); }
-
-    // 2) Fallback to facingMode exact (works on iOS Safari most of the time)
-    try {
-      stopStream();
-      const facing = labelToFacing(label);
-      log('switching via facingMode', label, facing);
-      const ok = await startWithConstraints({ facingMode: { exact: facing } });
-      if (ok) return true;
-    } catch(e){ warn('facingMode exact failed', e); }
-
-    // 3) Last resort loose facing
-    try {
-      const facing = labelToFacing(label);
-      log('switching via loose facingMode', label, facing);
-      stopStream();
-      const ok = await startWithConstraints({ facingMode: facing });
-      if (ok) return true;
-    } catch(e){ warn('facingMode loose failed', e); }
-
-    warn('all switch attempts failed');
-    return false;
-  }
-
-  // Public API
-  window.getCameraFacing = () => window.__CAM_FACING || readPref();
-  window.setCameraFacing = async function(label){
-    const current = window.getCameraFacing();
-    const target  = (label === 'Front' || label === 'Back') ? label : (current === 'Back' ? 'Front' : 'Back');
-    const ok = await restartCamera(target);
-    if (ok) {
-      window.__CAM_FACING = target;
-      writePref(target);
-      try {
-        const hud = document.getElementById('hudCameraToggle') || document.getElementById('hud-camera-toggle') || document.getElementById('cameraToggle');
-        if (hud) hud.textContent = formatHudCameraLabel(target);
-      } catch {}
-      try { window.dispatchEvent(new Event('camera:facing-changed')); } catch {}
-      try { window.dispatchEvent(new CustomEvent('camera:changed', { detail:{ label: target }})); } catch {}
-    }
-    return ok;
-  };
-
-  // Wrap startCamera so initial start honors preference
-  (function wrapStartCamera(){
-    const orig = window.startCamera;
-    window.startCamera = async function(){
-      const label = window.getCameraFacing();
-      const ok = await restartCamera(label);
-      if (!ok && typeof orig === 'function') return orig();
-      return ok;
-    };
-  })();
-
-  // Click binding: tolerate multiple ids and data attributes
-  function bind(el){
-    if (!el || el.__camBound) return;
-    el.__camBound = true;
-    el.addEventListener('click', async (ev) => {
-      ev.preventDefault?.();
-      const next = (window.getCameraFacing() === 'Back') ? 'Front' : 'Back';
-      log('toggle clicked; switching to', next);
-      await window.setCameraFacing(next);
-    });
-  }
-  bind(document.getElementById('hudCameraToggle'));
-  bind(document.getElementById('hud-camera-toggle'));
-  bind(document.getElementById('cameraToggle'));
-
-  // Delegation fallback if your HUD recreates the button each shot
-  document.addEventListener('click', (ev) => {
-    const t = ev.target?.closest?.('#hudCameraToggle, #hud-camera-toggle, #cameraToggle, [data-action="camera-toggle"]');
-    if (!t) return;
-    ev.preventDefault?.();
-    const next = (window.getCameraFacing() === 'Back') ? 'Front' : 'Back';
-    log('delegated toggle; switching to', next);
-    window.setCameraFacing(next);
-  }, { capture: true });
-
-  // Initialize label display
-  (function init(){
-    window.__CAM_FACING = window.__CAM_FACING || readPref();
-    try {
-      const hud = document.getElementById('hudCameraToggle') || document.getElementById('hud-camera-toggle') || document.getElementById('cameraToggle');
-      if (hud) hud.textContent = formatHudCameraLabel(window.__CAM_FACING);
-    } catch {}
-  })();
-})();
-
-// --- Compatibility shims so legacy HUD code works with the new switcher ---
-(function installCameraFacingShims(){
-  // Map 'environment'/'user' to 'Back'/'Front'
-  function envToLabel(facing){
-    const f = String(facing||'').toLowerCase();
-    return (f === 'environment' || f === 'back' || f === 'rear') ? 'Back' : 'Front';
-  }
-
-  // Legacy: setPreferredFacing('environment'|'user')
-  if (typeof window.setPreferredFacing !== 'function') {
-    window.setPreferredFacing = async (facing) => {
-      return window.setCameraFacing?.(envToLabel(facing));
-    };
-  }
-
-  // Legacy: flipCamera()
-  if (typeof window.flipCamera !== 'function') {
-    window.flipCamera = async () => {
-      return window.setCameraFacing?.(); // toggles current
-    };
-  }
-
-  // Legacy: setPreferredCamera(deviceId) -> try device first, then facing fallback
-  if (typeof window.setPreferredCamera !== 'function') {
-    window.setPreferredCamera = async (deviceId) => {
-      try {
-        const v = document.getElementById('videoPlayer');
-        // Stop any existing stream
-        const s = v?.srcObject;
-        if (s?.getTracks) s.getTracks().forEach(t => { try { t.stop(); } catch {} });
-        if (v) v.srcObject = null;
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { deviceId: { exact: deviceId } },
-          audio: false
-        });
-        if (v) {
-          v.setAttribute?.('playsinline','');
-          v.muted = true;
-          v.srcObject = stream;
-          await v.play?.();
-        }
-        // Best guess on label sync
-        const devs = await navigator.mediaDevices.enumerateDevices();
-        const d = devs.find(d => d.deviceId === deviceId);
-        const lab = (d?.label || '').toLowerCase();
-        const label = /back|rear|environment/.test(lab) ? 'Back' : 'Front';
-        window.__CAM_FACING = label;
-        try { localStorage.setItem('cam_facing', label); } catch {}
-        try { localStorage.setItem('doach_camera_facing', label === 'Back' ? 'environment' : 'user'); } catch {}
-        window.dispatchEvent?.(new CustomEvent('camera:changed', { detail:{ label } }));
-        window.dispatchEvent?.(new Event('camera:facing-changed'));
-        return true;
-      } catch (e) {
-        console.warn('[camera] setPreferredCamera failed', e);
-        return false;
-      }
-    };
-  }
-})();
-
-
-
-// --- Minimal HUD wires (always-on) -------------------------------------------
-(function installMinimalHudWires(){
-  try {
-    if (window.__hudReleaseWired) return;
-    window.__hudReleaseWired = true;
-
-    // Helper: current session cap with overrides
-    function getSessionCap() {
-      if (window.__sessionContinue === true) return Infinity;
-
-      // 1) ?cap=3
-      try {
-        const q = new URLSearchParams(location.search || '');
-        const qp = q.get('cap');
-        const parsed = Number(qp);
-        if (qp != null && qp !== '' && Number.isFinite(parsed) && parsed > 0) return parsed;
-      } catch {}
-
-      // 2) Globals (allow any of these to drive the cap)
-      const env = Number(
-        window.__SESSION_CAP ??
-        window.SESSION_CAP ??
-        window.SESSION_SIZE ??
-        window.TEST_SESSION_SIZE
-      );
-      if (Number.isFinite(env) && env > 0) return env;
-
-      // 3) LocalStorage
-      try {
-        const ls = Number(localStorage.getItem('doach.sessionCap'));
-        if (Number.isFinite(ls) && ls > 0) return ls;
-      } catch {}
-
-      // 4) Default (fallback to constant or 10)
-      const def = Number(window.SESSION_SIZE_DEFAULT);
-      return (Number.isFinite(def) && def > 0) ? def : 10;
-    }
-    try { window.getSessionCap = getSessionCap; } catch {}
-
-    const shouldEnforceSessionCap = () => window.__sessionContinue !== true;
-
-    window.addEventListener('shot:release', (e) => {
-      try {
-        // Only count releases after a confirmed hoop and armed tracking
-        if (window.__hoopConfirmed !== true) return;
-        if (!window.getLockedHoopBox?.()) return;
-
-        // Create a pending row immediately so HUD reflects progress
-        const list = (window.__shotList ||= []);
-        const rf = Number(e?.detail?.frame || 0);
-        const last = list.at?.(-1) || null;
-        const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
-        if (!same) {
-          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-            : null;
-          list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
-          try { window.__SHOT_IDX = (list.length - 1); } catch {}
-        }
-
-        // HUD numbers
-        const taken = list.length;
-        const made = (window.shotLog?.filter?.(s => s.made).length || 0);
-        const acc  = taken ? Math.round((made / taken) * 100) : 0;
-        window.mountSessionHUD?.();
-        window.updateSessionHUD?.({
-          taken,
-          made,
-          accuracy: acc,
-          elapsedSec: Math.floor((Date.now() - (window.__sessionStart || Date.now())) / 1000)
-        });
-        window.setSessionStatus?.('Shot ' + taken + ' in progress');
-
-        // HARD STOP at cap (UI-owned ending only)
-        if (window.SESSION_MANAGER_OWNS_ENDING === true) return;
-        try {
-          const cap = getSessionCap();
-          const count = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-          if (shouldEnforceSessionCap() && Number.isFinite(cap) && count >= cap && window.__summaryShown !== true) {
-            // Lock state and auto open minimal summary
-            try { window.__sessionCapped = true; } catch {}
-            try { window.__sessionEnded = true; } catch {}
-            try { window.__SESSION_ACTIVE = false; } catch {}
-            try { window.__shotTrackingArmed = false; } catch {}
-            try { window.stopPoseReleaseSampler?.(); } catch {}
-            setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 120);
-          }
-        } catch {}
-      } catch {}
-    });
-
-    // Backstop: if the scorer emitted summary without our release path, still end at cap
-    window.addEventListener('shot:summary', () => {
-      if (window.SESSION_MANAGER_OWNS_ENDING === true) return;
-      try {
-        const cap   = getSessionCap();
-        const taken = Math.max((window.__shotList||[]).length, Number(window.__SCORE_SHOT_COUNT || 0));
-        if (shouldEnforceSessionCap() && Number.isFinite(cap) && taken >= cap && window.__summaryShown !== true) {
-          try { window.__sessionCapped = true; } catch {}
-          try { window.__sessionEnded = true; } catch {}
-          try { window.__SESSION_ACTIVE = false; } catch {}
-          try { window.__shotTrackingArmed = false; } catch {}
-          try { window.stopPoseReleaseSampler?.(); } catch {}
-          setTimeout(() => { try { window.autoEndSessionAndSummarize?.(); } catch {} }, 60);
-        }
-      } catch {}
-    }, { passive:true });
-
-  } catch {}
-})();
-
-
-
-
-
-// UI toggle for scorer mode (Weighted / Hybrid)
-export function mountScorerToggle(container) {
-  const root = container || document.getElementById('promptBar') || document.body;
-  if (!root || root.__scorerToggleMounted) return;
-  root.__scorerToggleMounted = true;
-
-  const wrap = document.createElement('div');
-  wrap.className = 'scorer-toggle';
-  Object.assign(wrap.style, {
-    display: 'inline-flex',
-    gap: '10px',
-    alignItems: 'center',
-    marginLeft: '12px',
-    padding: '4px 6px',
-    background: 'rgba(0,0,0,.35)',
-    borderRadius: '8px'
-  });
-  wrap.innerHTML = `
-    <span style="opacity:.85">Scorer:</span>
-    <label><input type="radio" name="scorerMode" value="weighted"> Weighted</label>
-    <label><input type="radio" name="scorerMode" value="hybrid"> Hybrid</label>
-  `;
-  root.appendChild(wrap);
-
-  const apply = (m) => {
-    window.setScorerMode?.(m);
-    wrap.querySelectorAll('input[name="scorerMode"]').forEach(inp => {
-      inp.checked = (inp.value === m);
-    });
-  };
-
-  const saved = (window.SHOT_SCORER_MODE || localStorage.getItem('doach_scorer_mode') || 'weighted').toLowerCase();
-  apply(saved);
-
-  wrap.addEventListener('change', (e) => {
-    if (e.target?.name === 'scorerMode') apply(e.target.value);
-  });
-}
-window.mountScorerToggle = mountScorerToggle;
-
-
-// where are we in the session
-export function setSessionStatus(text = '') {
-  const root = ensureHudRoot();
-  let badge = document.getElementById('sessionStatusBadge');
-  if (!badge) {
-    badge = document.createElement('div');
-    badge.id = 'sessionStatusBadge';
-    badge.className = 'hud-card';
-    Object.assign(badge.style, {
-      position:'absolute', bottom:'90px', left:'50%', transform:'translateX(-50%)',
-      padding:'6px 10px', font:'600 12px system-ui', letterSpacing:'0.04em',
-      pointerEvents:'none'
-    });
-    root.appendChild(badge);
-  }
-  badge.textContent = text || 'SESSION IN PROGRESSâ€¦';
-  badge.style.display = text === null ? 'none' : 'block';
-}
-
-
-// Helper - hoop selection, user must confirm hoop on startup
-window.__hoopConfirmed = false;
-
-// starts off hoop selection prompt process  (required to trigger session flow start)
-export function requireHoopOrPrompt() {
-  if (isHoopReady()) return true;
-  if (!window.__hoopPickArmed) {
-    window.__hoopPickArmed = true;
-    window.enableHoopPickOnce?.();   // arm picker again if needed
-  }
-  return false;
-}
-
-window.isHoopReady = isHoopReady;
-window.requireHoopOrPrompt = requireHoopOrPrompt;
-
-// Unified prompt system (uses #overlayPrompt if present, else #promptBar) â”-€
-
-function hasCenter(h) {
-  return Number.isFinite(h?.cx ?? h?.x) && Number.isFinite(h?.cy ?? h?.y);
-}
-function hasSize(h) {
-  const w = h?.w ?? h?.width, hh = h?.h ?? h?.height;
-  return Number.isFinite(w) && Number.isFinite(hh) && w >= 10 && hh >= 6;
-}
-
-// accept center-only OR sized boxes
-function isValidHoopBox(h) {
-  return !!h && (hasCenter(h) || hasSize(h));
-}
-
-function isHoopReady() {
-  const h = window.getLockedHoopBox?.();  // ðŸ‘ˆ use window.*
-  const ready = !!window.__hoopConfirmed && isValidHoopBox(h);
-  try {
-    if (window.DOACH_HOOP_GATE_LOG === true) {
-      console.log('[gate:isHoopReady]', {
-        confirmed: window.__hoopConfirmed,
-        hasCenter: hasCenter(h),
-        hasSize: hasSize(h),
-        ready
-      });
-    }
-  } catch {}
-  return ready;
-}
-
-
-// Prompt element for user instructions
+/* ----------------------------- Prompts ----------------------------- */
 function getPromptEl() {
   const root = ensureHudRoot();
   let el = document.getElementById('overlayPrompt') || document.getElementById('promptBar');
@@ -775,350 +91,33 @@ export function showPromptMessage(text, duration = 3000) {
   el.textContent = text;
   el.style.display = 'block';
   el.style.opacity = '1';
-  if (el.__t) clearTimeout(el.__t);
+  clearTimeout(el.__t);
   el.__t = setTimeout(() => {
     el.style.opacity = '0';
     setTimeout(() => (el.style.display = 'none'), 300);
   }, duration);
 }
+window.showPromptMessage = showPromptMessage;
 
 function hidePromptMessage() {
   const el = document.getElementById('overlayPrompt') || document.getElementById('promptBar');
   if (!el) return;
-  if (el.__t) clearTimeout(el.__t);
+  clearTimeout(el.__t);
   el.style.display = 'none';
 }
 
-let __hoopCountdownTimer = null;
-function startHoopCountdown(sec = 5) {
-  clearTimeout(__hoopCountdownTimer);
-  const name = window.__USER_NAME || localStorage.getItem('firstname') || 'Player';
-  const total = Math.max(1, Number(sec) || 5);
+/* ----------------------------- HUD bar ----------------------------- */
+const ICON_AUDIO_ON = '\u{1F50A}';
+const ICON_AUDIO_OFF = '\u{1F507}';
+const ICON_CAMERA_FRONT = '\u{1F4F8}';
+const ICON_CAMERA_BACK = '\u{1F4F7}';
+const ICON_CAMERA_SWITCH = '\u{1F503}';
+const SYMBOL_INFINITY = '\u{221E}';
 
-  if (window.__armCountdownActive) return;
-  window.__armCountdownActive = true;
-  try { window.__shotTrackingArmed = false; } catch {}
-  try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec: total } })); } catch {}
-
-  const root = ensureHudRoot();
-  let box = document.getElementById('countdownOverlay');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'countdownOverlay';
-    Object.assign(box.style, {
-      position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
-      background:'rgba(0,0,0,0.45)', color:'#fff', padding:'24px 32px', borderRadius:'16px',
-      font:'900 120px/1 system-ui, -apple-system, Segoe UI, Arial',
-      textShadow: '0 6px 18px rgba(0,0,0,.55)', zIndex:10040,
-      pointerEvents:'none', display:'none'
-    });
-    root.appendChild(box);
-  }
-
-  try { speak(`Locked, ${name}. Starting in ${total} seconds.`); } catch {}
-
-  let remaining = total;
-  const showValue = (value, size = '120px') => {
-    box.style.display = 'block';
-    box.style.fontSize = size;
-    box.textContent = value;
-  };
-  const finish = () => {
-    box.style.display = 'none';
-    window.__armCountdownActive = false;
-    try { window.__shotTrackingArmed = true; } catch {}
-    try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
-    try { speak('Shoot when ready.'); } catch {}
-    try { window.__releaseEventSent = false; } catch {}
-    window.scheduleArmWhenReady?.(0);
-  };
-
-  showValue(remaining);
-  remaining -= 1;
-
-  const tick = () => {
-    if (remaining > 0) {
-      showValue(remaining);
-      remaining -= 1;
-      __hoopCountdownTimer = setTimeout(tick, 1000);
-      return;
-    }
-    showValue('GO', '120px');
-    __hoopCountdownTimer = setTimeout(finish, 700);
-  };
-
-  __hoopCountdownTimer = setTimeout(tick, 1000);
+function formatCapDisplay(cap) {
+  const n = Number(cap);
+  return (Number.isFinite(n) && n > 0) ? String(n) : SYMBOL_INFINITY;
 }
-
-window.startHoopCountdown = startHoopCountdown;
-
-// Poll until hoop is *stably* locked (2 consecutive checks)
-function startHoopPromptLoop() {
-  clearInterval(window.__hoopPromptTimer);
-
-  const tick = () => {
-    if (!isHoopReady()) {
-      showPromptMessage('Tap the hoop to begin setup', 3000);
-      if (!window.__hoopPickArmed) {
-        window.__hoopPickArmed = true;
-        window.enableHoopPickOnce?.();
-      }
-    }
-  };
-
-  tick();
-  window.__hoopPromptTimer = setInterval(tick, 1500); // keep "pulsing" until confirmed
-}
-
-window.enableHoopPickOnce = enableHoopPickOnce;
-
-
-// --------------------------------------------------------------
-// Video UI / HUD utilities
-// --------------------------------------------------------------
-
-/** Ensure an absolute overlay root that sits on top of the video */
-export function ensureHudRoot() {
-  const video = document.getElementById('videoPlayer');
-  const host  = video?.parentElement || document.body;
-  if (getComputedStyle(host).position === 'static') host.style.position = 'relative';
-
-  let root = document.getElementById('hudRoot');
-  if (!root) {
-    root = document.createElement('div');
-    root.id = 'hudRoot';
-    host.appendChild(root);
-  }
-  Object.assign(root.style, { position:'absolute', inset:'0', pointerEvents:'none', zIndex:10000 });
-  return root;
-}
-
-// ------------------ Admin Observer (optional) ------------------
-// Stream low-FPS overlay snapshots to the server for remote viewing.
-// Enable from console: startObserverStreaming(); stopObserverStreaming();
-let __observerTimer = null;
-
-function pruneObserverPoints(arr, limit) {
-  if (!Array.isArray(arr) || !arr.length) return [];
-  const slice = arr.slice(-Math.max(0, limit || 0));
-  return slice.map((p) => ({
-    x: Math.round(Number(p?.x) || 0),
-    y: Math.round(Number(p?.y) || 0),
-    frame: Number.isFinite(p?.frame) ? p.frame : null
-  }));
-}
-
-function safeHoopBox(hoop) {
-  if (!hoop) return null;
-  const out = {};
-  ['x','y','w','h','x1','y1','x2','y2','width','height','cx','cy','anchor'].forEach((k) => {
-    if (hoop[k] != null) out[k] = hoop[k];
-  });
-  return out;
-}
-
-// Summarize backend state for the admin observer UI without bloating payloads.
-function observerStateSnapshot() {
-  try {
-    const state = {};
-    const view = window.__VIEW || null;
-    if (view) state.view = { vw: view.vw, vh: view.vh };
-
-    const last = window.lastDetectedFrame || null;
-    state.frame = (last && Number.isFinite(last.__frameIdx)) ? last.__frameIdx : null;
-    if (last && Array.isArray(last.objects)) {
-      state.objects = last.objects.slice(0, 8).map((o) => ({
-        label: o?.label || o?.name || null,
-        conf: Number.isFinite(o?.conf) ? o.conf : (Number.isFinite(o?.score) ? o.score : null),
-        box: Array.isArray(o?.box) ? o.box.map((v) => Math.round(Number(v) || 0)) : null
-      }));
-    }
-
-    const bs = window.ballState || {};
-    const prunedTrail = pruneObserverPoints(bs.trail, 160);
-    state.ballState = {
-      state: bs.state || null,
-      releaseFrame: Number.isFinite(bs.releaseFrame) ? bs.releaseFrame : null,
-      proxEnterFrame: Number.isFinite(bs.proxEnterFrame) ? bs.proxEnterFrame : null,
-      proxExitFrame: Number.isFinite(bs.proxExitFrame) ? bs.proxExitFrame : null,
-      trail: prunedTrail,
-      shots: Array.isArray(bs.shots) ? bs.shots.length : 0
-    };
-    state.ballStateTrailLen = prunedTrail.length;
-    if (Array.isArray(bs.frozenShots)) {
-      state.ballState.frozenShots = bs.frozenShots.slice(-3).map((shot) => ({ trail: pruneObserverPoints(shot?.trail, 200) }));
-    }
-    state.pendingShots = Array.isArray(window.__shotList) ? window.__shotList.filter((shot) => shot && shot.pending).length : 0;
-
-    if (Array.isArray(window.__shotList)) {
-      state.shots = window.__shotList.slice(-5).map((shot) => ({
-        idx: Number.isFinite(shot?.idx) ? shot.idx : null,
-        made: (shot?.made === true) ? true : (shot?.made === false ? false : null),
-        arcHeight: Number.isFinite(shot?.arcHeight) ? shot.arcHeight : null,
-        entryAngle: Number.isFinite(shot?.entryAngle) ? shot.entryAngle : null,
-        releaseAngle: Number.isFinite(shot?.releaseAngle) ? shot.releaseAngle : null,
-        trail: pruneObserverPoints(shot?.trail, 200)
-      }));
-      state.shotCount = window.__shotList.length;
-    }
-
-    const lastSummary = window.__lastSummary || null;
-    if (lastSummary && typeof lastSummary === 'object') {
-      state.lastSummary = {
-        idx: Number.isFinite(lastSummary.idx) ? lastSummary.idx : null,
-        made: (lastSummary.made === true) ? true : (lastSummary.made === false ? false : null),
-        arcHeight: Number.isFinite(lastSummary.arcHeight) ? lastSummary.arcHeight : null,
-        entryAngle: Number.isFinite(lastSummary.entryAngle) ? lastSummary.entryAngle : null,
-        releaseAngle: Number.isFinite(lastSummary.releaseAngle) ? lastSummary.releaseAngle : null,
-        trail: pruneObserverPoints(lastSummary.trail, 200)
-      };
-    }
-
-    const arc = window.ballArc || {};
-    const arcTrail = pruneObserverPoints(arc.trail, 200);
-    const arcRef = pruneObserverPoints(arc.refinedTrail, 200);
-    state.ballArc = { trail: arcTrail, refinedTrail: arcRef };
-    state.ballArcTrailLen = arcTrail.length;
-    state.ballArcRefLen = arcRef.length;
-
-    const lastGate = window.__releaseGateLast || null;
-    if (lastGate) {
-      const bestTests = lastGate.best?.tests || null;
-      state.gate = {
-        ts: lastGate.ts || null,
-        frame: lastGate.frame ?? null,
-        released: !!(lastGate.best && lastGate.best.released),
-        reason: lastGate.best?.reason || null,
-        score: bestTests?.score ?? null,
-        tot: bestTests?.tot ?? null,
-        side: bestTests?.side || null,
-        poseStreak: lastGate.poseStreak ?? null
-      };
-    }
-
-    state.pose = {
-      streak: Number(window.__poseGateStreak || 0),
-      warm: window.__POSE_WARMUP_OK === true,
-      armed: window.__shotTrackingArmed === true,
-      hoopLocked: window.__hoopConfirmed === true,
-      picking: window.__pickingHoop === true
-    };
-
-    state.analyzer = {
-      frame: Number.isFinite(window.__AN_IDX) ? window.__AN_IDX : null,
-      fps: Number(window.__videoFPS) || null
-    };
-
-    state.events = Array.isArray(window.__observerEventLog) ? window.__observerEventLog.slice(-50) : [];
-    state.seq = Number(window.__observerFrameSeq || 0);
-
-    state.detectSource = window.__detCache?._source || null;
-    state.overlayMode = window.__overlayMode || null;
-    state.bg = window.__fbf || null;
-
-    const hoop = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
-    if (hoop) {
-      state.hoop = safeHoopBox(hoop);
-      try {
-        const canon = (typeof canonHoop === 'function') ? canonHoop(hoop) : null;
-        if (canon) {
-          state.hoopCanon = { cx: canon.cx, cy: canon.cy, w: canon.w, h: canon.h, rimTop: canon.rimTop };
-          if (window.shotArc && typeof window.shotArc.proxFromHoop === 'function') {
-            const prox = window.shotArc.proxFromHoop(canon);
-            if (prox) state.proxRect = { x: prox.x, y: prox.y, w: prox.w, h: prox.h, yBot: (prox.yBot ?? (prox.y + prox.h)) };
-          }
-        }
-      } catch {}
-    }
-
-    return state;
-  } catch (err) {
-    try { console.warn('[observer] state snapshot failed', err); } catch {}
-    return null;
-  }
-}
-
-
-
-
-window.startObserverStreaming = function startObserverStreaming(fps = 2){
-  try {
-    const sid = (window.__SESSION_ID || null);
-    if (!sid) { console.warn('[observer] missing __SESSION_ID'); return; }
-    const overlay = document.getElementById('overlay') || document.getElementById('hudRoot');
-    const video = document.getElementById('videoPlayer');
-    if (!overlay) { console.warn('[observer] overlay not found'); return; }
-    const period = Math.max(200, Math.round(1000/Math.max(0.5, fps)));
-    if (__observerTimer) clearInterval(__observerTimer);
-    window.__observerFrameSeq = 0;
-    const off = document.createElement('canvas');
-    __observerTimer = setInterval(async () => {
-      try {
-        const oc = overlay.tagName === 'CANVAS' ? overlay : null;
-        const vw = (video?.videoWidth || oc?.width || 0);
-        const vh = (video?.videoHeight || oc?.height || 0);
-        if (!vw || !vh) return;
-        off.width = vw; off.height = vh;
-        const ctx = off.getContext('2d');
-        if (!ctx) return;
-        // Draw camera frame first (if accessible)
-        if (video && video.readyState >= 2) {
-          try { ctx.drawImage(video, 0, 0, vw, vh); } catch {}
-        }
-        // Draw overlay on top
-        if (oc) { try { ctx.drawImage(oc, 0, 0, vw, vh); } catch {} }
-        off.toBlob(async (blob) => {
-          if (!blob) return;
-          window.__observerFrameSeq = (window.__observerFrameSeq || 0) + 1;
-          const fd = new FormData();
-          fd.append('image', blob, 'frame.jpg');
-          const snap = observerStateSnapshot();
-          if (snap) {
-            try { fd.append('state', JSON.stringify(snap)); } catch (e) { console.warn('[observer] state serialize failed', e); }
-          }
-          await fetch(`/api/sessions/${sid}/observer_frame`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
-        }, 'image/jpeg', 0.65);
-      } catch {}
-    }, period);
-    console.log('[observer] streaming at', fps, 'fps');
-  } catch (e) { console.warn('[observer] failed', e); }
-};
-window.stopObserverStreaming = function stopObserverStreaming(){ if (__observerTimer) { clearInterval(__observerTimer); __observerTimer = null; console.log('[observer] stopped'); } };
-
-// Ensure a backend session exists when first needed
-async function ensureSessionId(){
-  try {
-    if (window.__SESSION_ID) return window.__SESSION_ID;
-    const r = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ device: navigator.userAgent }), credentials:'include' });
-    if (!r.ok) return null;
-    const j = await r.json();
-    window.__SESSION_ID = j?.id || null; window.__SHOT_IDX = 0;
-    return window.__SESSION_ID;
-  } catch { return null; }
-}
-
-// Idempotent shot upsert to backend session.json (and DB if configured)
-const __postedShots = new Set();
-async function postShotUpsert(idx, patch, opts){
-  try {
-    const sid = await ensureSessionId();
-    if (!sid) return;
-    const key = `${sid}|${idx}|${patch && patch.made != null ? +!!patch.made : 'na'}`;
-    const force = !!(opts && opts.force);
-    if (!force && __postedShots.has(key)) return;
-    __postedShots.add(key);
-    try { if (window.SESS_FINAL_TRACE === true) console.log('[postShotUpsert]', { sid, idx, patch, force }); } catch {}
-    await fetch(`/api/sessions/${sid}/shot`, {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify(Object.assign({ idx, t: Date.now() }, patch||{})),
-      credentials:'include'
-    }).catch(()=>{});
-  } catch {}
-}
-
-// -----------------------------------------------------------------//
-// Camera switcher (front/back toggle + device picker)
-// -----------------------------------------------------------------//
 function currentFacingLabel() {
   try {
     const f = (localStorage.getItem('doach_camera_facing') || '').toLowerCase();
@@ -1127,97 +126,10 @@ function currentFacingLabel() {
   } catch {}
   return 'Back';
 }
-
-export async function mountCameraSwitcher() {
-  const root = ensureHudRoot();
-  let btn = document.getElementById('camToggleBtn');
-  if (!btn) {
-    btn = document.createElement('button');
-    btn.id = 'camToggleBtn';
-    btn.className = 'hud-card';
-    Object.assign(btn.style, {
-      position: 'absolute', top: '80px', right: '10px',
-      padding: '8px 10px', font: '600 12px system-ui',
-      pointerEvents: 'auto', zIndex: 10005, cursor: 'pointer'
-    });
-    btn.textContent = formatCameraFacing(currentFacingLabel());
-    root.appendChild(btn);
-  }
-
-  const refresh = () => {
-    try {
-      const lab = currentFacingLabel();
-      btn.textContent = formatCameraFacing(lab) + ' ' + ICON_CAMERA_SWITCH;
-    } catch {}
-  };
-  refresh();
-  try { window.addEventListener('camera:facing-changed', refresh); } catch {}
-
-  let pressTimer = null, pop = null;
-
-  async function flip() {
-    try {
-      await (window.flipCamera?.() || Promise.resolve());
-      refresh();
-      try { (window.showPromptMessage||window.showPrompt)?.('Switched camera'); } catch {}
-    } catch (e) { console.warn('[cam] flip failed', e); }
-  }
-
-  async function showPicker() {
-    try {
-      if (pop) { try { pop.remove(); } catch {}; pop = null; }
-      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
-      pop = document.createElement('div');
-      pop.id = 'camDevicePopover';
-      Object.assign(pop.style, {
-        position:'absolute', top: '46px', right: '10px',
-        background:'rgba(0,0,0,0.85)', color:'#fff', padding:'8px',
-        borderRadius:'8px', zIndex:10025, pointerEvents:'auto', minWidth:'180px',
-        border:'1px solid rgba(255,255,255,.15)'
-      });
-      const makeItem = (label, on) => {
-        const a = document.createElement('div');
-        a.textContent = label;
-        Object.assign(a.style, { padding:'6px 8px', cursor:'pointer', font:'600 12px system-ui', borderRadius:'6px' });
-        a.onmouseenter = () => a.style.background = 'rgba(255,255,255,.08)';
-        a.onmouseleave = () => a.style.background = 'transparent';
-        a.onclick = async () => { try { await on?.(); } finally { try { pop.remove(); } catch {}; pop = null; } };
-        return a;
-      };
-      if (!devs.length) pop.appendChild(makeItem('No cameras found', null));
-      devs.forEach((d,i) => pop.appendChild(makeItem(d.label || `Camera ${i+1}`, async () => {
-        try {
-          localStorage.setItem('doach_camera_id', String(d.deviceId||''));
-          // Infer facing from label when possible to improve mobile reliability
-          const lab = (d.label||'').toLowerCase();
-          if (/front|user/.test(lab)) {
-            localStorage.setItem('doach_camera_facing', 'user');
-          } else if (/back|rear|environment/.test(lab)) {
-            localStorage.setItem('doach_camera_facing', 'environment');
-          }
-        } catch {}
-        try { await window.setPreferredCamera?.(d.deviceId); } catch {}
-        refresh();
-      })));
-      // quick front/back preset
-      pop.appendChild(makeItem('Use Back Camera', async () => { try { await window.setPreferredFacing?.('environment'); } catch {} refresh(); }));
-      pop.appendChild(makeItem('Use Front Camera', async () => { try { await window.setPreferredFacing?.('user'); } catch {} refresh(); }));
-      root.appendChild(pop);
-      // auto-hide after 5s
-      setTimeout(() => { try { pop.remove(); } catch {}; pop = null; }, 5000);
-    } catch (e) { console.warn('[cam] picker failed', e); }
-  }
-
-  const clearTimer = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
-  btn.onmousedown = () => { clearTimer(); pressTimer = setTimeout(showPicker, 550); };
-  btn.onmouseup = () => { if (pressTimer) { clearTimer(); flip(); } };
-  btn.ontouchstart = () => { clearTimer(); pressTimer = setTimeout(showPicker, 550); };
-  btn.ontouchend = () => { if (pressTimer) { clearTimer(); flip(); } };
+function formatHudCameraLabel(lab) {
+  return ((lab === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + lab + ' Camera';
 }
-try { if (!window.mountCameraSwitcher) window.mountCameraSwitcher = mountCameraSwitcher; } catch {}
 
-/** Top-center session status line (â€œSESSION IN PROGRESSâ€¦â€) */
-/** Bottom HUD bar (metrics + End Session) */
 export function mountSessionHUD() {
   const root = ensureHudRoot();
   let bar = document.getElementById('sessionHUD');
@@ -1233,81 +145,35 @@ export function mountSessionHUD() {
     bar.innerHTML = `
       <button id="hudMute" class="vc-btn" title="Mute/Unmute"></button>
       <button id="hudCamFlip" class="vc-btn" title="Flip Camera"></button>
-
-      <div class="hud-metric" id="mShots"><div class="num">0/10</div><div class="label">Shots Taken</div></div>
+      <div class="hud-metric" id="mShots"><div class="num">0/${formatCapDisplay(window.SESSION_SIZE)}</div><div class="label">Shots Taken</div></div>
       <div class="hud-metric" id="mTime"><div class="num">0:00</div><div class="label">Time Elapsed</div></div>
     `;
     root.appendChild(bar);
 
-    // Do not auto-enable live tips by default; respect HUD mute and explicit user toggle elsewhere
-    try { if (typeof window.PREF_LIVE_TIPS === 'undefined') window.PREF_LIVE_TIPS = false; } catch {}
-
     const muteBtn = bar.querySelector('#hudMute');
     const camBtn  = bar.querySelector('#hudCamFlip');
 
-    const updateHudCamButton = () => {
-      if (!camBtn) return;
-      try {
-        camBtn.textContent = formatHudCameraLabel(currentFacingLabel());
-      } catch {
-        camBtn.textContent = 'Camera';
-      }
-    };
-    updateHudCamButton();
-    try { window.addEventListener('camera:facing-changed', updateHudCamButton); } catch {}
-
-    try {
-      const shotsNum = bar.querySelector('#mShots .num');
-      if (shotsNum) {
-        const capText = formatCapDisplay(getSessionCap());
-        shotsNum.textContent = `0/${capText}`;
-      }
-    } catch {}
-
-    // --- unified apply function: UI, storage, prefs, event
+    // Voice toggle
     const applyMute = (muted) => {
-      // button reflects CURRENT state
       muteBtn.setAttribute('data-muted', muted ? '1' : '0');
       muteBtn.textContent = muted ? ICON_AUDIO_OFF + ' Voice Off' : ICON_AUDIO_ON + ' Voice On';
-      // keep any legacy floating cam toggle hidden; HUD contains the control now
-      try { const legacy = document.getElementById('camToggleBtn'); if (legacy) legacy.style.display = 'none'; } catch {}
-
-      // persist & sync with doachPrefs so doachSpeak() logic matches HUD
       try { localStorage.setItem('doach_muted', JSON.stringify(muted)); } catch {}
-      try {
-        const prefs = window.doachGetPrefs?.() || {};
-        // audioOn === !muted
-        window.doachSetPrefs?.({ ...prefs, audioOn: !muted });
-      } catch {}
-
-      // notify coachAssistant.js (it listens for this)
-      window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted } }));
+      const ev = new CustomEvent('hud:mute-toggle', { detail: { muted } });
+      try { window.dispatchEvent(ev); } catch {}
     };
-
-    // --- initialize from saved state (prefer HUD key, then doachPrefs)
     let savedMuted = false;
-    try {
-      if (localStorage.getItem('doach_muted') != null) {
-        savedMuted = JSON.parse(localStorage.getItem('doach_muted'));
-      } else {
-        const p = window.doachGetPrefs?.() || {};
-        if (typeof p.audioOn !== 'undefined') savedMuted = !p.audioOn;
-      }
-    } catch {}
+    try { if (localStorage.getItem('doach_muted') != null) savedMuted = JSON.parse(localStorage.getItem('doach_muted')); } catch {}
     applyMute(savedMuted);
+    muteBtn.addEventListener('click', (e) => { e.stopPropagation(); applyMute(muteBtn.getAttribute('data-muted') !== '1'); });
 
-    // --- click to toggle
-    muteBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const muted = muteBtn.getAttribute('data-muted') === '1';
-      applyMute(!muted);
-    });
+    // Camera flip
+    const updateHudCamButton = () => { camBtn.textContent = formatHudCameraLabel(currentFacingLabel()); };
+    updateHudCamButton();
+    window.addEventListener('camera:facing-changed', updateHudCamButton);
 
-    // --- camera flip button (short press: toggle front/back)
     camBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
-        // Toggle facing preference and restart camera
         const cur = (localStorage.getItem('doach_camera_facing') || 'environment').toLowerCase();
         const next = (cur === 'user' || cur === 'front') ? 'environment' : 'user';
         localStorage.setItem('doach_camera_facing', next);
@@ -1319,492 +185,236 @@ export function mountSessionHUD() {
         updateHudCamButton();
       }
     });
-
-    // other HUD buttons (unchanged)
-    const endBtn = bar.querySelector('#endSessionBtn');
-    endBtn && endBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      window.dispatchEvent(new CustomEvent('hud:end-session'));
-    });
-
-    const startBtn = bar.querySelector('#startSessionHUD');
-    startBtn && startBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      try { if (!window.__sessionStart) window.__sessionStart = Date.now(); } catch {}
-      window.dispatchEvent(new CustomEvent('hud:start-session'));
-    });
-
-    // removed My Sessions from HUD (available in main menu)
-
-    const summaryBtn = bar.querySelector('#openSummaryBtn');
-    if (summaryBtn && !summaryBtn.__wired) {
-      summaryBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        renderFullShotTable();
-        wireFullShotModalActions();
-      });
-      summaryBtn.__wired = true;
-    }
   }
   return bar;
 }
+window.mountSessionHUD = mountSessionHUD;
 
-function resetSessionClockAndCount(){
-  try { window.__sessionStart = Date.now(); } catch {}
-  try { window.__HUD_SHOT_COUNT = 0; window.shotTaken = 0; } catch {}
-  try { window.__shotList = []; } catch {}
-  try { if (Array.isArray(window.shotLog)) window.shotLog.length = 0; } catch {}
-  try { updateSessionHUD({ taken: 0, elapsedSec: 0 }); } catch {}
-}
-
-
-/** Update numbers in the bottom HUD bar */
 export function updateSessionHUD({ taken=0, made=0, accuracy=0, elapsedSec=0 } = {}) {
-  const bar = mountSessionHUD();                              // ensure it exists and scope queries to it
-try { if (typeof window.setSessionStatus !== "function") window.setSessionStatus = setSessionStatus; } catch {}
-try { if (typeof window.mountSessionHUD !== "function") window.mountSessionHUD = mountSessionHUD; } catch {}
-try { if (typeof window.updateSessionHUD !== "function") window.updateSessionHUD = updateSessionHUD; } catch {}
-  const $ = (id) => bar.querySelector(`#${id} .num`);        // query inside the HUD we created
+  const bar = mountSessionHUD();
+  const $ = (id) => bar.querySelector(`#${id} .num`);
   const mm = Math.floor(elapsedSec / 60);
   const ss = Math.floor(elapsedSec % 60).toString().padStart(2,'0');
 
-  const elShots = $('mShots');
-  const elMakes = $('mMakes');
-  const elAcc   = $('mAcc');
-  const elTime  = $('mTime');
-
-  // Prefer the maximum of: explicit param, canonical counter, pending list, legacy HUD
+  // Use FINALIZED rows only, never overlay pulses
   try {
-    const canonTaken = Math.max(
-      Number(window.__SCORE_SHOT_COUNT || 0),
-      Array.isArray(window.__shotList) ? window.__shotList.length : 0,
-      Array.isArray(window.shotLog) ? window.shotLog.length : 0
-    );
-    const hudTaken = Number(window.shotTaken || window.__HUD_SHOT_COUNT || 0);
-    const cur = Number(taken || 0);
-    taken = Math.max(cur, canonTaken, hudTaken);
+    const list = Array.isArray(window.__shotList) ? window.__shotList : [];
+    const finalized = list.filter(s => s && s.pending === false).length;
+    taken = Math.max(Number(taken||0), finalized);
   } catch {}
-  if (elShots) {
-    const capDisplay = formatCapDisplay(getSessionCap());
-    elShots.textContent = `${taken}/${capDisplay}`;
-  }
-  // Makes/Accuracy hidden in simplified HUD; keep code paths no-op for future use
-  if (elMakes) elMakes.textContent = `${made}`;
-  if (elAcc)   elAcc.textContent   = `${Math.round(accuracy)}%`;
+
+  const elShots = $('mShots');
+  const elTime  = $('mTime');
+  if (elShots) elShots.textContent = `${taken}/${(Number(window.SESSION_SIZE)||'∞')}`;
   if (elTime)  elTime.textContent  = `${mm}:${ss}`;
 }
+window.updateSessionHUD = updateSessionHUD;
 
-// -------- Global voice cue helpers ---------
-try {
-  if (!window.speakShotNumber) {
-    window.speakShotNumber = function speakShotNumber(){
-      try {
-        const cap = getSessionCap();
-        const cnt = Number(window.__HUD_SHOT_COUNT || window.shotTaken || 0);
-        speak(`You are on shot ${Math.max(0,cnt)} of ${cap}.`);
-      } catch {}
-    };
+/* ------------------------ Camera switcher UI ------------------------ */
+(function installCameraSwitcher(){
+  if (window.__cameraSwitcherInstalled) return; window.__cameraSwitcherInstalled = true;
+
+  function formatCameraFacing(label) {
+    return ((label === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT) + ' ' + label;
   }
-  window.addEventListener('hud:start-session', () => {
-    try { window.__SESSION_ACTIVE = true; } catch {}
-    try { if (window.__sessionEnded) { location.reload(); return; } } catch {}
-    try { window.__summaryShown = false; window.__SESSION_REVIEW_SPOKEN = false; } catch {}
-    try { resetSessionClockAndCount(); window.__sessionCapPrompted = false; } catch {}
-    try { if (typeof window.PREF_VOICE_INTRO === 'undefined') window.PREF_VOICE_INTRO = false; } catch {}
-    try { if (window.PREF_VOICE_INTRO === true) speak('Start session. Shoot when ready.'); } catch {}
-    // If hoop is already locked, run 5s countdown and arm; otherwise wait for hoop:locked
+  function readPref(){ try { return localStorage.getItem('cam_facing') || 'Back'; } catch { return 'Back'; } }
+  function writePref(v){
+    try { localStorage.setItem('cam_facing', v); } catch {}
+    try { localStorage.setItem('doach_camera_facing', v === 'Back' ? 'environment' : 'user'); } catch {}
+  }
+
+  function stopStream(){
+    const v = document.getElementById('videoPlayer');
+    const s = v && v.srcObject;
+    if (s?.getTracks) s.getTracks().forEach(t=>{ try{ t.stop(); }catch{} });
+    if (v) v.srcObject = null;
+  }
+  function labelToFacing(label){ return (String(label).toLowerCase().startsWith('b')) ? 'environment' : 'user'; }
+
+  async function startWithConstraints(cons){
+    const v = document.getElementById('videoPlayer');
+    if (!v) return false;
+    try { v.setAttribute('playsinline',''); v.muted = true; } catch {}
+    const stream = await navigator.mediaDevices.getUserMedia({ video: cons, audio: false });
+    v.srcObject = stream;
+    try { await v.play?.(); } catch {}
+    try { syncOverlayToVideo?.(); } catch {}
+    return true;
+  }
+
+  async function restartCamera(label){
+    if (!navigator.mediaDevices?.getUserMedia) return false;
+    // prefer facingMode path on iOS; deviceId after we learned labels
     try {
-      const h = window.getLockedHoopBox?.();
-      if (window.__hoopConfirmed === true && h && !window.__armCountdownActive && window.__shotTrackingArmed !== true) {
-        try { window.__shotTrackingArmed = false; } catch {}
-        startShotTrackingCountdown?.(5);
-      }
+      stopStream();
+      const facing = labelToFacing(label);
+      const ok = await startWithConstraints({ facingMode: { exact: facing } });
+      if (ok) return true;
     } catch {}
-  });
-  window.addEventListener('hud:end-session', () => {
-    try { window.__sessionCapPrompted = false; } catch {}
-    try { speak('Session ended.'); } catch {}
-    try { window.__SESSION_ACTIVE = false; } catch {}
-  });
-  window.addEventListener('hud:pause-session', () => { try { speak('Session paused.'); } catch {} });
-  window.addEventListener('hud:continue-session', () => { try { speak('Continuing session.'); } catch {} });
-  window.addEventListener('hud:what-shot', () => { try { window.speakShotNumber?.(); } catch {} });
-} catch {}
-
-// Debug helper: inspect HUD + list quickly from console
-try {
-  if (typeof window.printHUDState !== 'function') {
-    window.printHUDState = function printHUDState(){
-      try {
-        const list = window.__shotList || [];
-        const last = list.at?.(-1) || null;
-        const el = document.querySelector('#sessionHUD #mShots .num');
-        console.log('[HUD]', { shotsInList: list.length, last, mShotsText: el?.textContent || null });
-        return { len: list.length, last, text: el?.textContent || null };
-      } catch (e) { console.warn('printHUDState failed', e); return null; }
-    };
+    try {
+      stopStream();
+      const ok = await startWithConstraints({ facingMode: labelToFacing(label) });
+      if (ok) return true;
+    } catch {}
+    return false;
   }
-} catch {}
 
-// end session shot summary table
+  window.getCameraFacing = () => window.__CAM_FACING || readPref();
+  window.setCameraFacing = async function(label){
+    const current = window.getCameraFacing();
+    const target  = (label === 'Front' || label === 'Back') ? label : (current === 'Back' ? 'Front' : 'Back');
+    const ok = await restartCamera(target);
+    if (ok) {
+      window.__CAM_FACING = target;
+      writePref(target);
+      try {
+        const hud = document.getElementById('hudCamFlip');
+        if (hud) hud.textContent = formatHudCameraLabel(target);
+      } catch {}
+      try { window.dispatchEvent(new Event('camera:facing-changed')); } catch {}
+      try { window.dispatchEvent(new CustomEvent('camera:changed', { detail:{ label: target }})); } catch {}
+    }
+    return ok;
+  };
+
+  // Wrap startCamera so initial start honors preference
+  (function wrapStartCamera(){
+    const orig = window.startCamera;
+    window.startCamera = async function(){
+      const label = window.getCameraFacing();
+      const ok = await restartCamera(label);
+      if (!ok && typeof orig === 'function') return orig();
+      return ok;
+    };
+  })();
+})();
+
+/* ------------------------ Session status badge ------------------------ */
+export function setSessionStatus(text = '') {
+  const root = ensureHudRoot();
+  let badge = document.getElementById('sessionStatusBadge');
+  if (!badge) {
+    badge = document.createElement('div');
+    badge.id = 'sessionStatusBadge';
+    badge.className = 'hud-card';
+    Object.assign(badge.style, {
+      position:'absolute', bottom:'90px', left:'50%', transform:'translateX(-50%)',
+      padding:'6px 10px', font:'600 12px system-ui', letterSpacing:'0.04em', pointerEvents:'none'
+    });
+    root.appendChild(badge);
+  }
+  badge.textContent = text || 'SESSION IN PROGRESS…';
+  badge.style.display = text === null ? 'none' : 'block';
+}
+window.setSessionStatus = setSessionStatus;
+
+/* ------------------------ Summary table (UI) ------------------------ */
 const SHOT_SUMMARY_TEXT = {
   modalTitle: 'Shot Summary',
   finalizing: 'Finalizing...',
   exportCsv: 'Export CSV',
   close: 'Close',
-  headerEntry: 'Entry (\u00b0)',
-  headerRelease: 'Release (\u00b0)',
   pending: 'Pending',
   noValue: '--',
-  make: 'Make',
-  makeBest: 'Make*',
-  miss: 'Miss',
   buttons: { make: 'Make', miss: 'Miss', replay: 'Replay', ai: 'AI Review' }
 };
 
-function getShotList(){ return (window.__shotList ||= []); }
-
-
-function formatShotResult(shot, isBest) {
-  if (!shot || shot.pending) return SHOT_SUMMARY_TEXT.pending;
-  if (shot.made === true) return isBest ? SHOT_SUMMARY_TEXT.makeBest : SHOT_SUMMARY_TEXT.make;
-  if (shot.made === false) return SHOT_SUMMARY_TEXT.miss;
-  return SHOT_SUMMARY_TEXT.pending;
+function ensureShotTableStyles(){
+  if (document.getElementById('shotTableStyles')) return;
+  const css = document.createElement('style');
+  css.id = 'shotTableStyles';
+  css.textContent = `
+    #fullShotModal .hud-table{ width:100%; border-collapse:collapse; table-layout:fixed; }
+    #fullShotModal .hud-table col#cNum{ width:42px; } #fullShotModal .hud-table col#cCoach{ width:auto; }
+    #fullShotModal .hud-table col#cClip{ width:90px; text-align:center; }
+    #fullShotModal .hud-table thead th{ position:sticky; top:0; background:rgba(0,0,0,0.85); z-index:2; backdrop-filter:blur(2px); }
+    #fullShotModal .hud-table th, #fullShotModal .hud-table td{ padding:8px 10px; vertical-align:top; text-align:left; border-bottom:1px solid rgba(255,255,255,.12); }
+    #fullShotModal .hud-table tbody tr:nth-child(even) td{ background:rgba(255,255,255,.03); }
+    #fullShotModal td.num, #fullShotModal td.clip { text-align:center; }
+    #fullShotModal td.coach{ white-space:normal; word-break:break-word; line-height:1.25; }
+  `;
+  document.head.appendChild(css);
 }
 
-function formatArcValue(value) {
-  const num = Number(value);
-  if (Number.isFinite(num)) {
-    const rounded = Math.round(num);
-    if (rounded !== 0) return String(rounded);
-  }
-  return SHOT_SUMMARY_TEXT.noValue;
+function getClipHrefForShot(idx1Based, shot) {
+ if (shot?.clip?.path) return shot.clip.path;
+ try {
+   const sid = window.__SESSION_ID;
+   if (sid != null) return `/sessions/${sid}/clips/shot-${idx1Based}.webm`;
+ } catch {}
+ return null;
 }
 
-function formatAngleValue(value) {
-  if (value == null || value === '') return SHOT_SUMMARY_TEXT.noValue;
-  return String(value);
-}
-
-function buildSummaryActionBar(idx) {
-  const wrap = document.createElement('div');
-  wrap.style.display = 'flex';
-  wrap.style.gap = '6px';
-  const buttons = [
-    { cls: 'btn-make',   text: SHOT_SUMMARY_TEXT.buttons.make,   title: 'Mark Make' },
-    { cls: 'btn-miss',   text: SHOT_SUMMARY_TEXT.buttons.miss,   title: 'Mark Miss' },
-    { cls: 'btn-replay', text: SHOT_SUMMARY_TEXT.buttons.replay, title: 'Replay' },
-    { cls: 'btn-ai',     text: SHOT_SUMMARY_TEXT.buttons.ai,     title: 'AI Review' }
-  ];
-  buttons.forEach((cfg) => {
-    const btn = document.createElement('button');
-    btn.className = `vc-btn ${cfg.cls}`;
-    btn.title = cfg.title;
-    btn.dataset.id = String(idx + 1);
-    btn.textContent = cfg.text;
-    wrap.appendChild(btn);
-  });
-  return wrap;
-}
-
-function buildSummaryRow(idx, shot, isBest) {
-  const allowCorrections = window.DEMO_SCORER_OFF !== true;
-  const tr = document.createElement('tr');
-  tr.setAttribute('data-shot-idx', idx + 1);
-  if (isBest) tr.setAttribute('data-best', '1');
-
-  const resultCell = formatShotResult(shot, isBest);
-  const arcCell = formatArcValue(shot?.arcHeight);
-  const entryCell = formatAngleValue(shot?.entryAngle);
-  const releaseCell = formatAngleValue(shot?.releaseAngle);
-  const coachSource = shot && !shot.pending
-    ? (shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || '')
-    : '';
-  const coachText = coachSource ? coachSource : SHOT_SUMMARY_TEXT.pending;
-
-  // tr.innerHTML = `
-  //   <td class="num">${idx + 1}</td>
-  //   <td class="result" title="${isBest ? 'Best shot' : ''}">${resultCell}</td>
-  //   <td class="arc">${arcCell}</td>
-  //   <td class="entry">${entryCell}</td>
-  //   <td class="release">${releaseCell}</td>
-  //   <td class="coach"></td>
-  //   <td class="fix"></td>`;
-
-
-  tr.innerHTML = `
-    <td class="num">${idx + 1}</td>
-    <td class="result" title="${isBest ? 'Best shot' : ''}">${resultCell}</td>
-    <td class="coach"></td>
-    <td class="fix"></td>`;
-
-  const coachCell = tr.querySelector('.coach');
-  if (coachCell) {
-    coachCell.textContent = coachText;
-    coachCell.title = coachSource || '';
-  }
-
-  const fixCell = tr.querySelector('.fix');
-  if (fixCell) {
-      fixCell.appendChild(buildSummaryActionBar(idx));
-  }
-
-  if (shot && shot.pending) {
-    //tr.querySelectorAll('.result, .arc, .entry, .release, .coach').forEach((cell) => {
-    tr.querySelectorAll('.coach').forEach((cell) => {
-      cell.textContent = SHOT_SUMMARY_TEXT.pending;
-    });
-  }
-
-  return tr;
-}
-
-function renderFullShotTable() {
-  const list = getShotList();
+export function renderFullShotTable() {
+  const list = (window.__shotList ||= []);
   const root = ensureHudRoot();
-  const minimal = window.DEMO_MINIMAL_TABLE === true;
+  const minimal = true; // skinny table only
 
-  let bestIdx = -1;
-  let bestScore = -1;
-  if (!minimal) {
-    try {
-      const golden = window.DOACH_MEM?.get?.()?.golden || null;
-      for (let i = 0; i < list.length; i++) {
-        const shot = list[i];
-        if (!shot || !shot.made) continue;
-        const rating = (typeof window.computeShotRating === 'function')
-          ? Number(window.computeShotRating(shot.poseSnapshot || null, golden))
-          : -1;
-        if (Number.isFinite(rating) && rating > bestScore) { bestScore = rating; bestIdx = i; }
-      }
-    } catch {}
-  }
-
-  try { window.__bestIdx = minimal ? -1 : bestIdx; } catch {}
   ensureShotTableStyles();
-
   let modal = document.getElementById('fullShotModal');
   if (!modal) {
     modal = document.createElement('div');
     modal.id = 'fullShotModal';
     modal.className = 'hud-card';
     Object.assign(modal.style, {
-      position: 'absolute',
-      left: '50%',
-      transform: 'translateX(-50%)',
-      top: '12%',
-      maxWidth: '74%',
-      minWidth: '640px',
-      zIndex: 10020,
-      pointerEvents: 'auto',
-      maxHeight: '78vh',
-      overflowY: 'auto',
-      WebkitOverflowScrolling: 'touch'
+      position:'absolute', left:'50%', transform:'translateX(-50%)', top:'12%',
+      maxWidth:'74%', minWidth:'640px', zIndex:10020, pointerEvents:'auto',
+      maxHeight:'78vh', overflowY:'auto', WebkitOverflowScrolling:'touch'
     });
     root.appendChild(modal);
-  }
-
-  if (minimal) {
-    modal.innerHTML = `
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-        <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
-          <span>Shot Summary (${list.length}/${formatCapDisplay(getSessionCap())})</span>
-          <span id="sessFinalBadge" style="display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;">Finalizing…</span>
-        </div>
-        <div>
-          <button id="coachSummaryBtn" class="vc-btn" title="Coach Session Summary">Coach Session Summary</button>
-          <button id="closeFull" class="vc-btn">Close</button>
-        </div>
-      </div>
-      <div id="sessReviewLine" style="display:none;opacity:.95;margin:4px 0 10px;line-height:1.35"></div>
-      <table class="hud-table">
-        <colgroup><col id="cNum"><col id="cCoach"><col id="cClip"></colgroup>
-        <thead>
-          <tr><th>#</th><th>Coach Pose Assessment</th><th>Clip</th></tr>
-        </thead>
-        <tbody></tbody>
-      </table>
-    `;
-
-    const tbody = modal.querySelector('tbody');
-    if (tbody) {
-      tbody.textContent = '';
-      list.forEach((shot, idx) => {
-        const coachSource = shot && !shot.pending
-          ? (shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || '')
-          : '';
-        const coachText = coachSource ? coachSource : SHOT_SUMMARY_TEXT.pending;
-
-        const tr = document.createElement('tr');
-        tr.setAttribute('data-shot-idx', idx + 1);
-        tr.innerHTML = `
-          <td class="num">${idx + 1}</td>
-          <td class="coach"></td>
-          <td class="clip"></td>`;
-        const coachCell = tr.querySelector('.coach');
-        if (coachCell) {
-          coachCell.textContent = coachText;
-          coachCell.title = coachSource || '';
-        }
-
-        const tdClip = tr.querySelector('.clip');
-        const href = getClipHrefForShot(idx + 1, shot);
-        if (tdClip) {
-          if (href) {
-            const a = document.createElement('a');
-            a.href = href; a.target = '_blank'; a.rel = 'noopener';
-            a.textContent = 'clip';
-            tdClip.appendChild(a);
-          } else {
-            const status = shot?.clip?.status;
-            tdClip.textContent = status === 'recording' ? 'recording…' : 'processing…';
-          }
-        }
-        tbody.appendChild(tr);
-      });
-    }
-
-    const closeBtn = modal.querySelector('#closeFull');
-    if (closeBtn) closeBtn.onclick = () => { modal.style.display = 'none'; };
-
-    const coachBtn = modal.querySelector('#coachSummaryBtn');
-    if (coachBtn && !coachBtn.__wired) {
-      coachBtn.addEventListener('click', (e) => { e.stopPropagation(); requestCoachSessionSummary(); });
-      coachBtn.__wired = true;
-    }
-
-    modal.style.display = 'block';
-    try { modal.style.zIndex = '10060'; } catch {}
-    return modal;
   }
 
   modal.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
       <div style="font-weight:600; display:flex; align-items:center; gap:10px;">
-        <span>${SHOT_SUMMARY_TEXT.modalTitle} (${list.length}/${formatCapDisplay(getSessionCap())})</span>
-        <span id="sessFinalBadge" style="display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;">${SHOT_SUMMARY_TEXT.finalizing}</span>
+        <span>Shot Summary (${list.length}/${formatCapDisplay(window.SESSION_SIZE)})</span>
+        <span id="sessFinalBadge" style="display:none; padding:3px 8px; border-radius:10px; font:600 11px system-ui; background:#f59e0b; color:#111;">Finalizing…</span>
       </div>
       <div>
-        <button id="exportCSV" class="vc-btn" title="Export CSV">${SHOT_SUMMARY_TEXT.exportCsv}</button>
-        <button id="closeFull" class="vc-btn">${SHOT_SUMMARY_TEXT.close}</button>
+        <button id="closeFull" class="vc-btn">Close</button>
       </div>
     </div>
     <div id="sessReviewLine" style="display:none;opacity:.95;margin:4px 0 10px;line-height:1.35"></div>
     <table class="hud-table">
-      <colgroup>
-        <col id="cNum"><col id="cRes"><col id="cArc"><col id="cEntry"><col id="cRel"><col><col id="cFix">
-      </colgroup>
-      <thead>
-        <tr>
-          <th>#</th><th>Result</th><th>Arc</th><th>${SHOT_SUMMARY_TEXT.headerEntry}</th><th>${SHOT_SUMMARY_TEXT.headerRelease}</th><th>Doach Summary</th><th>Correct</th>
-        </tr>
-      </thead>
+      <colgroup><col id="cNum"><col id="cCoach"><col id="cClip"></colgroup>
+      <thead><tr><th>#</th><th>Coach Pose Assessment</th><th>Clip</th></tr></thead>
       <tbody></tbody>
     </table>
   `;
 
   const tbody = modal.querySelector('tbody');
-  if (tbody) {
-    tbody.textContent = '';
-    list.forEach((shot, idx) => {
-      const row = buildSummaryRow(idx, shot, idx === bestIdx);
-      tbody.appendChild(row);
-    });
-  }
+  tbody.textContent = '';
+  list.forEach((shot, idx) => {
+    const coachSource = shot && !shot.pending
+      ? (shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || '')
+      : '';
+    const coachText = coachSource ? coachSource : SHOT_SUMMARY_TEXT.pending;
 
-  const closeBtn = modal.querySelector('#closeFull');
-  if (closeBtn) closeBtn.onclick = () => { modal.style.display = 'none'; };
-  const exportBtn = modal.querySelector('#exportCSV');
-  if (exportBtn) exportBtn.onclick = () => exportSessionCSV(list);
+    const tr = document.createElement('tr');
+    tr.setAttribute('data-shot-idx', idx + 1);
+    tr.innerHTML = `<td class="num">${idx + 1}</td><td class="coach"></td><td class="clip"></td>`;
+    tr.querySelector('.coach').textContent = coachText;
 
+    const tdClip = tr.querySelector('.clip');
+    const href = getClipHrefForShot(idx + 1, shot);
+    if (href) {
+      const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'clip';
+      tdClip.appendChild(a);
+    } else {
+      const status = shot?.clip?.status;
+      tdClip.textContent = status === 'recording' ? 'recording…' : 'processing…';
+    }
+    tbody.appendChild(tr);
+  });
+
+  modal.querySelector('#closeFull').onclick = () => { modal.style.display = 'none'; };
   modal.style.display = 'block';
   try { modal.style.zIndex = '10060'; } catch {}
   return modal;
 }
+window.renderFullShotTable = renderFullShotTable;
 
-
-// Make renderFullShotTable() globally callable
-try {
-  if (typeof window.renderFullShotTable !== 'function') {
-    window.renderFullShotTable = renderFullShotTable;
-  }
-  // Let app.js (or anyone) ask for the table by event
-  window.addEventListener('doach:open-summary-table', () => {
-    try { renderFullShotTable(); } catch {}
-  });
-} catch {}
-
-
-//  --- Clean up lingering "waiting for coach" status on session end or cap reached ---
-(function installCoachStatusCleaner(){
-  if (window.__CoachStatusCleaner) return; window.__CoachStatusCleaner = true;
-
-  function clearWaiting() {
-    try { window.setCoachStatus?.('done'); } catch {}
-    try {
-      const badge = document.getElementById('coachStatusBadge') || document.querySelector('.hud-status');
-      if (badge) badge.style.display = 'none';
-    } catch {}
-  }
-
-  window.addEventListener('hud:end-session', clearWaiting);
-  window.addEventListener('shots:update', () => {
-    // If cap reached, don’t keep showing “waiting…”
-    try {
-      const taken = (window.getShotRecords?.() || []).length;
-      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 10));
-      const cap   = Number(capFn());
-      if (Number.isFinite(cap) && taken >= cap) clearWaiting();
-    } catch {}
-  });
-})();
-
-// --- Auto-open the full shot table when session cap is reached ---
-(function installCapOpenTable(){
-  if (window.__CapOpenTable) return; window.__CapOpenTable = true;
-
-  function maybeOpenTable() {
-    try {
-      const taken = (window.getShotRecords?.() || []).length;
-      const capFn = (typeof getSessionCap === 'function') ? getSessionCap : (() => Number(window.SESSION_SIZE || 10));
-      const cap   = Number(capFn());
-      if (!Number.isFinite(cap) || taken < cap) return;
-
-      // If a table is already present, do nothing
-      if (document.getElementById('fullShotModal')) return;
-
-      // Open the skinny table; small delay so the last row/clip path land
-      setTimeout(() => { try { window.renderFullShotTable?.(); } catch {} }, 120);
-    } catch {}
-  }
-
-  window.addEventListener('hud:end-session', maybeOpenTable);
-  window.addEventListener('shot:summary',   maybeOpenTable);
-})();
-
-
-
-function exportSessionCSV(list){
-  const pickCoach = (s) => s.doach || s.coach || s.coachText || s.feedback || s.summary || s.text || '';
-  const rows = [['#','result','arc','entry','release','doach_summary']];
-  list.forEach((s,i)=> rows.push([
-    i+1, s.made?'made':'miss',
-    Math.round(s.arcHeight ?? 0),
-    s.entryAngle ?? '',
-    s.releaseAngle ?? '',
-    `"${pickCoach(s).replace(/"/g,'""')}"`
-  ]));
-  const csv = rows.map(r => r.join(',')).join('\n');
-  const blob = new Blob([csv], {type:'text/csv'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'doach_session.csv';
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
-
-
-// --- Central sink for every finalized shot ---
+/* ------------------- UI sink for finalized shots ------------------- */
 function computeTotals(list){
   const taken = list.length;
   const made  = list.filter(s => s.made).length;
@@ -1812,821 +422,101 @@ function computeTotals(list){
   return { taken, made, acc };
 }
 
-// --- Central sink for every finalized shot (index by shotId) ---
+// Count finalized shots only
+window.__finalizedShotIds ||= new Set();
+
+
+// Record a finalized shot summary (UI only, no server)
 window.recordShotSummary = function recordShotSummary(summary) {
-  // de-dupe small repeats
-  const key = `${summary.shotId||'?' }|${+summary.made}|${Math.round(summary.arcHeight||0)}|${summary.entryAngle}|${summary.releaseAngle}`;
+  // de-dupe by shotId first
+  const sid = Number(summary.shotId || 0);
+  if (sid > 0) {
+    if (window.__finalizedShotIds.has(sid)) return;
+    window.__finalizedShotIds.add(sid);
+  }
+
+  // de-dupe minor repeats by value signature
+  const key = `${sid||'?'}|${+!!summary.made}|${Math.round(summary.arcHeight||0)}|${summary.entryAngle}|${summary.releaseAngle}`;
   if (window.__lastShotKey === key) return;
   window.__lastShotKey = key;
 
-  // carry most recent coaching line if present
+  // carry coach and via
   if (!summary.doach && window.__lastCoachText) summary.doach = window.__lastCoachText;
+  if (!summary.via) summary.via = window.__lastReleaseVia || summary.via || '';
 
   const list = (window.__shotList ||= []);
-
-  // Prefer explicit shotId → 1-based row index
-  let idx = Number(summary.shotId);
+  let idx = sid;
   if (Number.isFinite(idx) && idx > 0) {
     while (list.length < idx) list.push({ pending: true });
     Object.assign(list[idx - 1], summary, { pending: false });
   } else {
-    // Fallback: earliest pending
     const p = list.findIndex(s => s?.pending === true);
-    if (p !== -1) Object.assign(list[p], summary, { pending: false });
-    else list.push(Object.assign({ pending: false }, summary));
-    idx = (p !== -1 ? p + 1 : list.length);
+    if (p !== -1) Object.assign(list[p], summary, { pending: false }), idx = p + 1;
+    else list.push(Object.assign({ pending: false }, summary)), idx = list.length;
   }
   summary.__idx = idx;
 
-  // If the minimal table is open, refresh that row (coach + clip only for demo)
+  // If the skinny table is open, refresh the row
   const modal = document.getElementById('fullShotModal');
   if (modal) {
     const tbody = modal.querySelector('tbody');
-    if (tbody) {
-      let tr = tbody.querySelector(`tr[data-shot-idx="${idx}"]`);
-      if (!tr) {
-        tr = document.createElement('tr');
-        tr.setAttribute('data-shot-idx', idx);
-        tr.innerHTML = `<td class="num">${idx}</td><td class="coach"></td><td class="clip"></td>`;
-        tbody.appendChild(tr);
-      }
-      const coach = String(summary.doach || '—');
-      const tdCoach = tr.querySelector('.coach');
-      if (tdCoach) { tdCoach.textContent = coach; tdCoach.title = coach; }
+    let tr = tbody.querySelector(`tr[data-shot-idx="${idx}"]`);
+    if (!tr) {
+      tr = document.createElement('tr');
+      tr.setAttribute('data-shot-idx', idx);
+      tr.innerHTML = `<td class="num">${idx}</td><td class="coach"></td><td class="clip"></td>`;
+      tbody.appendChild(tr);
+    }
+    const coach = String(summary.doach || '—');
+    const tdCoach = tr.querySelector('.coach');
+    if (tdCoach) { tdCoach.textContent = coach; tdCoach.title = coach; }
 
-      const tdClip = tr.querySelector('.clip');
-      if (tdClip) {
-        tdClip.textContent = '';
-        const href =
-          (summary.clip?.path) ||
-          (function () {
-            try {
-              const sid = window.__SESSION_ID;
-              return sid != null ? `/api/sessions/${sid}/shot_video?index=${idx-1}` : null;
-            } catch { return null; }
-          })();
-        if (href) {
-          const a = document.createElement('a');
-          a.href = href; a.target = '_blank'; a.rel = 'noopener';
-          a.textContent = 'clip';
-          tdClip.appendChild(a);
-        } else {
-          tdClip.textContent = summary.clip?.status === 'recording' ? 'recording…' : 'processing…';
-        }
+    const tdClip = tr.querySelector('.clip');
+    if (tdClip) {
+      tdClip.textContent = '';
+      const href = summary.clip?.path || (function(){
+        try { const sid = window.__SESSION_ID; return sid != null ? `/api/sessions/${sid}/shot_video?index=${idx-1}` : null; } catch { return null; }
+      })();
+      if (href) {
+        const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'clip';
+        tdClip.appendChild(a);
+      } else {
+        tdClip.textContent = summary.clip?.status === 'recording' ? 'recording…' : 'processing…';
       }
     }
   }
 
-  // HUD counters unchanged (optional)
+  // HUD counters — FINALIZED only
   try {
-    const taken = list.length;
+    const finalized = list.filter(s => s && s.pending === false).length;
     const start = (window.__sessionStart ||= Date.now());
     const elapsedSec = Math.floor((Date.now() - start) / 1000);
-    updateSessionHUD?.({ taken, elapsedSec });
+    updateSessionHUD?.({ taken: finalized, elapsedSec, ...computeTotals(list) });
   } catch {}
 };
 
+// capture the last release source for carry-forward
+window.addEventListener('shot:release', (e)=>{ window.__lastReleaseVia = e?.detail?.via || ''; });
 
 
-// Wire correction buttons for the full-session modal (id: fullShotModal)
-function wireFullShotModalActions() {
-  const modal = document.getElementById('fullShotModal');
-  if (!modal || modal.__wiredCorrections) return;
-  modal.__wiredCorrections = true;
 
-  const tbody = modal.querySelector('tbody');
-  if (!tbody) return;
+// Always reset playbackRate to 1× on summary (safari sanity)
+window.addEventListener('shot:summary', () => {
+  const v = document.getElementById('videoPlayer') || document.querySelector('video');
+  if (v) { try { v.playbackRate = 1; } catch {} }
+});
 
-  // Update one table row's UI after a correction
-  function refreshRowUI(idx) {
-    const list = window.__shotList || [];
-    const shot = list[idx - 1];
-    const tr = modal.querySelector(`tr[data-shot-idx="${idx}"]`);
-    if (!shot || !tr) return;
-
-    const isBest = tr.getAttribute('data-best') === '1';
-    const setCell = (selector, value) => {
-      const cell = tr.querySelector(selector);
-      if (cell) cell.textContent = value;
-    };
-
-    if (shot.pending) {
-      [
-        // '.result', 
-        // '.arc', 
-        // '.entry', 
-        // '.release', 
-        '.coach'].forEach((selector) => setCell(selector, SHOT_SUMMARY_TEXT.pending));
-    } else {
-      // setCell('.result', formatShotResult(shot, isBest));
-      // setCell('.arc', formatArcValue(shot.arcHeight));
-      // setCell('.entry', formatAngleValue(shot.entryAngle));
-      // setCell('.release', formatAngleValue(shot.releaseAngle));
-      const coachCell = tr.querySelector('.coach');
-      if (coachCell) {
-        const coachCopy = shot.doach || shot.coach || shot.coachText || shot.feedback || shot.summary || shot.text || SHOT_SUMMARY_TEXT.pending;
-        coachCell.textContent = coachCopy || SHOT_SUMMARY_TEXT.pending;
-        coachCell.title = coachCopy ? String(coachCopy) : '';
-      }
-    }
-
-    const { taken, made, acc } = computeTotals(list);
-    try {
-      updateSessionHUD({ taken, made, accuracy: acc, elapsedSec: Math.floor((Date.now() - (window.__sessionStart || Date.now())) / 1000) });
-    } catch {}
-  }
-
-  // Delegated button handlers (Replay / Make / Miss / AI)
-  tbody.addEventListener('click', async (e) => {
-    const b  = e.target.closest('button'); if (!b) return;
-    const id = Number(b.dataset.id || 0);  if (!id) return;
-
-    try {
-      if (b.classList.contains('btn-replay')) {
-        try { window.playShotReplay?.({ id }); } catch {}
-        return;
-      }
-      if (b.classList.contains('btn-make')) {
-        await window.applyShotCorrection?.({ id, made: true,  reason: 'Table' });
-      } else if (b.classList.contains('btn-miss')) {
-        await window.applyShotCorrection?.({ id, made: false, reason: 'Table' });
-      } else if (b.classList.contains('btn-ai')) {
-        await window.reviewShotWithAI?.({ id }); // applies suggestion via applyShotCorrection
-      }
-    } finally {
-      refreshRowUI(id);
-    }
-  });
-
-  // Live refresh if corrections happen elsewhere (voice, banner, etc)
-  window.addEventListener('shot:corrected', (ev) => {
-    const id = Number(ev?.detail?.id || 0);
-    if (!id || modal.style.display !== 'block') return;
-    refreshRowUI(id);
-  }, { passive: true });
-
-  // Allow clean re-open wiring
-  modal.querySelector('#closeFull')?.addEventListener('click', () => {
-    modal.style.display = 'none';
-    modal.__wiredCorrections = false;
-  }, { once: true });
-}
-
-
-// display the shot status banner for the session
-function ensureShotBanner() {
-  const root = ensureHudRoot();
-  let el = document.getElementById('shotBanner');
+/* -------------------- Center prompt + countdown -------------------- */
+function showCenterPrompt(msg) {
+  let el = document.getElementById('overlayPrompt');
   if (!el) {
     el = document.createElement('div');
-    el.id = 'shotBanner';
-    el.className = 'hud-card';
-    Object.assign(el.style, {
-      position:'absolute', right:'18px', bottom:'96px',
-      padding:'10px 12px', display:'none', pointerEvents:'none'
-    });
-    root.appendChild(el);
-  }
-  return el;
-}
-
-export function showShotBanner(summary, ms = 2500) {
-  const el = ensureShotBanner();
-  const list = window.__shotList || [];
-  const made = list.filter(s => s.made).length;
-  const acc  = list.length ? Math.round((made / list.length) * 100) : 0;
-
-  el.innerHTML = `
-    <strong>${summary.made ? 'Made' : 'Missed'} Shot</strong><br>
-    Arc Height: ${Math.round(summary.arcHeight || 0)}px<br>
-    Entry Angle: ${summary.entryAngle ?? SHOT_SUMMARY_TEXT.noValue}&#176;<br>
-    Release Angle: ${summary.releaseAngle ?? SHOT_SUMMARY_TEXT.noValue}&#176;<br>
-    Accuracy: ${acc}% (${made}/${list.length})`;
-  el.style.display = 'block';
-  clearTimeout(el.__t);
-  el.__t = setTimeout(() => { el.style.display = 'none'; }, ms);
-}
-window.showShotBanner = showShotBanner;  // keep global for shot_logger
-
-window.addEventListener('shot:summary', (e) => {
-  const summary = e?.detail || (window.shotLog?.at ? window.shotLog.at(-1) : null);
-  if (!summary) return;
-  try { window.recordShotSummary?.(summary); } catch {}
-});
-
-
-
-// Initialize HUD for video element
-export function initHUDForVideo(videoEl) {
-  window.__videoEl = videoEl;
-  ensureHudRoot();
-  // Cleanup any legacy tables that might still be in the DOM
-  document.querySelectorAll('#shotTable, #shotTableHUD, #miniShotTray').forEach(el => el.remove());
-
-
-  const anchor = document.querySelector('.session-container') || document.body;
-  if (!window.__hudMo) {
-    window.__hudMo = new MutationObserver(() => ensureHudRoot());
-    window.__hudMo.observe(anchor, { childList: true, subtree: true });
-  }
-
-  videoEl?.addEventListener('loadeddata', () => {
-    ensureHudRoot();
-    try { mountConnectionBanner(); } catch {}
-    startHoopPromptLoop();
-    showCenterCountdownAndPrompt();
-    setOverlayInteractive(true);
-  });
-
-  // if video was already loaded (fast cache), still start the loop
-  if (videoEl?.readyState >= 2) {
-    ensureHudRoot();
-    try { mountConnectionBanner(); } catch {}
-    startHoopPromptLoop();
-    showCenterCountdownAndPrompt();
-    setOverlayInteractive(true);
-  }
-
-  // keep HUD on top when playback state toggles
-  videoEl?.addEventListener('play',  ensureHudRoot);
-  videoEl?.addEventListener('pause', ensureHudRoot);
-  try { mountConnectionBanner(); } catch {}
-  // Always ensure the bottom HUD is present for both uploads and live camera
-  try { mountSessionHUD(); } catch {}
-  try { setSessionStatus('SESSION IN PROGRESSâ€¦'); } catch {}
-
-  // Keep elapsed time ticking during session while HUD is mounted
-  try {
-    if (window.__hudTimeTimer) clearInterval(window.__hudTimeTimer);
-    window.__hudTimeTimer = setInterval(() => {
-      try {
-        const start = window.__sessionStart;
-        if (!start) return; // session not started yet
-        const list = (window.__shotList || window.shotLog || []);
-        const taken = Array.isArray(list) ? list.length : 0;
-        const elapsedSec = Math.floor((Date.now() - start) / 1000);
-        updateSessionHUD({ taken, elapsedSec });
-      } catch {}
-    }, 1000);
-  } catch {}
-
-  // Clear HUD time ticker when session ends
-  try {
-    window.addEventListener('hud:end-session', () => {
-      try { if (window.__hudTimeTimer) { clearInterval(window.__hudTimeTimer); window.__hudTimeTimer = null; } } catch {}
-      try { window.stopObserverStreaming?.(); } catch {}
-    }, { once: false });
-  } catch {}
-
-  // Optional: capture live clips around release and upload per shot (overlay-only)
-  // Enable via: window.CAPTURE_LIVE_CLIPS = true
-  (function wireLiveClipCapture(){
-    if (window.__liveClipWired) return; window.__liveClipWired = true;
-    function startLiveClip(){
-      try {
-        if (!window.CAPTURE_LIVE_CLIPS) return;
-        if (window.__liveRec?.rec) return;
-        const ov = document.getElementById('overlay');
-        if (!ov || !ov.captureStream) return;
-        const stream = ov.captureStream(30);
-        const chunks = [];
-        let rec;
-        try { rec = new MediaRecorder(stream, { mimeType: 'video/webm' }); } catch { return; }
-        rec.ondataavailable = (e)=>{ try { if (e.data && e.data.size) chunks.push(e.data); } catch {} };
-        rec.start();
-        window.__liveRec = { rec, chunks, idxHint: Number(window.__SHOT_IDX || (window.__shotList||[]).length || 0) };
-      } catch {}
-    }
-    async function stopAndUpload(){
-      try {
-        const pack = window.__liveRec; if (!pack || !pack.rec) return;
-        const { rec, chunks, idxHint } = pack;
-        await new Promise((resolve)=>{
-          try {
-            rec.onstop = async () => {
-              try {
-                const blob = new Blob(chunks, { type:'video/webm' });
-                const sid = await ensureSessionId();
-                if (sid && blob && blob.size) {
-                  const fd = new FormData();
-                  fd.append('file', blob, `shot_${idxHint}.webm`);
-                  await fetch(`/api/sessions/${sid}/shot_video?index=${idxHint}`, { method:'POST', body: fd, credentials:'include' }).catch(()=>{});
-                }
-              } catch {}
-              finally { try { window.__liveRec = null; } catch {} resolve(); }
-            };
-            rec.stop();
-          } catch { try { window.__liveRec = null; } catch {} resolve(); }
-        });
-      } catch {}
-    }
-    window.addEventListener('shot:release', startLiveClip);
-    window.addEventListener('hud:score-trip', startLiveClip);
-    window.addEventListener('shot:summary', () => { stopAndUpload(); });
-  })();
-
-  // Auto end helper (DEMO): dim + open minimal table, nothing extra
-  async function autoEndSessionAndSummarize() {
-    // Respect “continue” sessions
-    if (window.__sessionContinue === true) {
-      try { window.__sessionCapped = false; window.__sessionEnded = false; } catch {}
-      return;
-    }
-    // One-and-done
-    if (window.__summaryShown === true) return;
-    window.__summaryShown = true;
-
-    // Lock session state
-    try {
-      window.__sessionCapped = true;
-      window.__sessionEnded = true;
-      window.__SESSION_ACTIVE = false;
-      window.__shotTrackingArmed = false;
-      window.stopPoseReleaseSampler?.();
-    } catch {}
-
-    // Dim the camera background (keep table readable)
-    try {
-      const root = ensureHudRoot?.() || document.body;
-      let blk = document.getElementById('endBlackout');
-      if (!blk) {
-        blk = document.createElement('div'); blk.id = 'endBlackout';
-        Object.assign(blk.style, {
-          position:'absolute', inset:'0', background:'#000', opacity:'0.65',
-          zIndex:10040, pointerEvents:'none'
-        });
-        root.appendChild(blk);
-      } else {
-        blk.style.display='block'; blk.style.opacity='0.65'; blk.style.zIndex='10040'; blk.style.pointerEvents='none';
-      }
-    } catch {}
-
-    // Kill any “Waiting…” badge
-    try { window.setCoachStatus?.('done'); } catch {}
-    try {
-      const badge = document.getElementById('coachStatusBadge') || document.querySelector('.hud-status');
-      if (badge) badge.style.display = 'none';
-    } catch {}
-
-    // Open the skinny table (Shot # / Coach Pose Assessment / Clip)
-    try {
-      // Ensure the minimal renderer is used
-      window.DEMO_MINIMAL_TABLE = true;
-      const modal = renderFullShotTable?.();
-      if (modal?.style) modal.style.zIndex = '10060';
-      if (typeof wireFullShotModalActions === 'function') wireFullShotModalActions();
-    } catch {}
-
-    // Announce end to HUD listeners but DO NOT trigger long coach summary
-    try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
-  }
-
-
-  // Expose end-session routine globally for guards and other modules
-  try { if (typeof window.autoEndSessionAndSummarize !== 'function') window.autoEndSessionAndSummarize = autoEndSessionAndSummarize; } catch {}
-
-  // confirm hoop locker fires
-window.addEventListener('hoop:locked', () => {
-  window.__hoopConfirmed = true;      // <-- user has confirmed
-  try { window.__SESSION_ACTIVE = true; } catch {}
-  hidePromptMessage();
-  clearInterval(window.__hoopPromptTimer);
-  try { const v = document.getElementById('videoPlayer') || document.querySelector('video'); if (v) v.playbackRate = 1; } catch {}
-  // Only start countdown if not already armed and no countdown is active
-  try {
-    if (window.__shotTrackingArmed === true) return;
-    if (window.__armCountdownActive) return;
-    // Reset armed and announce countdown
-    window.__shotTrackingArmed = false;
-    try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec: 5 } })); } catch {}
-    try { if (typeof window.PREF_VOICE_INTRO === 'undefined') window.PREF_VOICE_INTRO = false; } catch {}
-    try { if (window.PREF_VOICE_INTRO === true) speak(`Let's get started, select hoop, get into position, and shoot when ready.`); } catch {}
-    startShotTrackingCountdown?.(5);
-  } catch {}
-});
-}
-
-
-// ---- Server AI feedback + metrics hydrator ----
-// Returns status { present, haveMade, need, done }
-async function hydrateAiFeedbackFromServer() {
-  // Helper: merge from local memory only (no server)
-  function hydrateFromLocalOnly() {
-    try {
-      const modal = document.getElementById('fullShotModal');
-      const badge = modal?.querySelector('#sessFinalBadge') || null;
-      // Inform the user in the review line
-      try {
-        const line = modal?.querySelector('#sessReviewLine') || null;
-        if (line) { line.style.display = 'block'; line.textContent = 'Server offline - showing local summaries only.'; }
-      } catch {}
-      const list = (window.__shotList || window.shotLog || []);
-      const need = Math.min(list.length, getSessionCap());
-      let present = 0, haveMade = 0;
-      for (let i = 0; i < list.length && i < need; i++) {
-        const idx = i + 1;
-        const s = list[i] || {};
-        if (s && typeof s === 'object') {
-          present++;
-          if (typeof s.made === 'boolean') haveMade++;
-          updateShotCells(idx, s);
-          if (s.doach) updateCoachCell(idx, String(s.doach));
-        }
-      }
-      if (badge) {
-        badge.style.display = 'inline-block';
-        const done = present >= (need || list.length || 0);
-        if (done) {
-          badge.textContent = 'Finalized';
-          badge.style.background = '#22c55e';
-          badge.style.color = '#071607';
-        } else {
-          badge.textContent = `Server offlineâ€¦ ${present}/${need || list.length || 0}`;
-          badge.style.background = '#ef4444';
-          badge.style.color = '#0b0b0b';
-        }
-      }
-      const status = { present, haveMade, need, done: present >= (need || list.length || 0) };
-      try { if (window.SESS_FINAL_TRACE === true) console.warn('[finalize:offline]', status); } catch {}
-      return status;
-    } catch {
-      return { present:0, haveMade:0, need:0, done:false };
-    }
-  }
-
-  try {
-    // Ensure we have (or try to create) a session id
-    let sid = window.__SESSION_ID || null;
-    if (!sid) {
-      try { sid = await ensureSessionId(); } catch {}
-    }
-    if (!sid) {
-      // No server available to mint a session; hydrate from local memory only
-      return hydrateFromLocalOnly();
-    }
-
-    const list = (window.__shotList ||= []);
-    // Use admin joined view which includes ai_feedback rows and shotsDB metrics
-    let j = null;
-    try {
-      const r = await fetch(`/admin/session/${sid}/debug`, { credentials:'include' });
-      if (!r || !r.ok) {
-        try { if (window.SESS_FINAL_TRACE === true) console.warn('[finalize] debug fetch not ok', r && r.status); } catch {}
-        return hydrateFromLocalOnly();
-      }
-      j = await r.json();
-    } catch (e) {
-      // Network error (backend down); fill from local
-      try { if (window.SESS_FINAL_TRACE === true) console.warn('[finalize] debug fetch error', e); } catch {}
-      return hydrateFromLocalOnly();
-    }
-
-    try {
-      if (window.UI_TRACE_HYDRATE === true || window.SESS_FINAL_TRACE === true) {
-        const sdbN = Array.isArray(j?.shotsDB) ? j.shotsDB.length : 0;
-        const sjN  = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots.length : 0;
-        console.log('[hydrate:debug]', { sid, sdbN, sjN, fbN: Array.isArray(j?.feedback)? j.feedback.length : 0 });
-      }
-    } catch {}
-
-    // 1) Update finalization badge based on shotsDB rows
-    const status = updateFinalizationBadgeFromDebug(j);
-
-    // 2) Merge server shot metrics (made, arc, entry, release) into UI rows
-    try {
-      const sdb = Array.isArray(j?.shotsDB) ? j.shotsDB : [];
-      const sjson = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots : [];
-      // Union by idx: start with session.json (filesystem), overlay DB (authoritative)
-      const byIdx = new Map();
-      for (const src of [sjson, sdb]) {
-        for (const row of src) {
-          const i0 = Number(row?.idx);
-          if (!Number.isFinite(i0)) continue;
-          const cur = byIdx.get(i0) || {};
-          const merged = {
-            idx: i0,
-            made: (typeof row.made === 'boolean') ? row.made : (typeof cur.made === 'boolean' ? cur.made : null),
-            arcHeight: (row.arcHeight != null) ? row.arcHeight : (cur.arcHeight != null ? cur.arcHeight : null),
-            entryAngle: (row.entryAngle != null) ? row.entryAngle : (cur.entryAngle != null ? cur.entryAngle : null),
-            releaseAngle: (row.releaseAngle != null) ? row.releaseAngle : (cur.releaseAngle != null ? cur.releaseAngle : null)
-          };
-          byIdx.set(i0, merged);
-        }
-      }
-      const mergedIdxs = [];
-      for (const [i0, row] of byIdx) {
-        const idx = Math.min(list.length, Math.max(1, i0 + 1)); // DB is 0-based; UI is 1-based
-        const shot = list[idx-1] || (list[idx-1] = {});
-        if (typeof row.made === 'boolean') shot.made = row.made;
-        if (row.arcHeight != null) shot.arcHeight = row.arcHeight;
-        if (row.entryAngle != null) shot.entryAngle = row.entryAngle;
-        if (row.releaseAngle != null) shot.releaseAngle = row.releaseAngle;
-        updateShotCells(idx, shot);
-        mergedIdxs.push(idx);
-      }
-      try { if (window.UI_TRACE_HYDRATE === true) console.log('[hydrate:merge]', { mergedIdxs: mergedIdxs.sort((a,b)=>a-b) }); } catch {}
-    } catch {}
-
-    // 3) Merge AI feedback text (if present). Do this last so text is fresh.
-    try {
-      const fbs = Array.isArray(j?.feedback) ? j.feedback.slice() : [];
-      if (fbs.length) {
-        try { fbs.sort((a,b)=> (new Date(a.created_at||0)) - (new Date(b.created_at||0))); } catch {}
-        // Accept either 0-based or 1-based shot_idx. If indexes look unreliable
-        // (e.g., all 0), fall back to sequential mapping by arrival order.
-        const nums = fbs.map(x => Number(x.shot_idx)).filter(n => Number.isFinite(n));
-        const uniq = new Set(nums);
-        const idxLookReliable = (nums.length === fbs.length) && uniq.size > Math.max(1, Math.floor(fbs.length/3));
-        if (idxLookReliable) {
-          for (const fb of fbs) {
-            const n = Number(fb.shot_idx);
-            const idx = Math.min(list.length, Math.max(1, (n >= 1 ? n : (n + 1))));
-            const text = String(fb.text||'').trim();
-            if (text) { list[idx-1].doach = text; updateCoachCell(idx, text); }
-          }
-          try { if (window.UI_TRACE_HYDRATE === true) console.log('[hydrate:fb]', { mode:'index', count:fbs.length }); } catch {}
-        } else {
-          // Sequential mapping: spread feedback across rows 1..N
-          for (let i = 0; i < list.length && i < fbs.length; i++) {
-            const text = String(fbs[i].text||'').trim();
-            if (text) { list[i].doach = text; updateCoachCell(i+1, text); }
-          }
-          try { if (window.UI_TRACE_HYDRATE === true) console.log('[hydrate:fb]', { mode:'sequential', count:fbs.length }); } catch {}
-        }
-      }
-    } catch {}
-
-    // Optional debug trace
-    try { if (window.SESS_FINAL_TRACE === true) console.log('[finalize]', status); } catch {}
-    return status;
-  } catch {
-    return { present:0, haveMade:0, need:0, done:false };
-  }
-}
-
-function updateCoachCell(idx, text) {
-  try {
-    const modal = document.getElementById('fullShotModal');
-    if (!modal) return;
-    const cell = modal.querySelector(`tbody tr[data-shot-idx="${idx}"] td.coach`);
-    if (cell) { cell.textContent = text; cell.title = text; }
-  } catch {}
-}
-
-function updateShotCells(idx, shot) {
-  try {
-    const modal = document.getElementById('fullShotModal');
-    if (!modal) return;
-    const tr = modal.querySelector(`tbody tr[data-shot-idx="${idx}"]`);
-    if (!tr) return;
-    const set = (sel, val) => { const el = tr.querySelector(sel); if (el) el.textContent = val; };
-    // Result
-    if (typeof shot.made === 'boolean') set('.result', shot.made ? 'âœ…' : 'âŒ');
-    // Arc / Entry / Release
-    if (shot.arcHeight != null) set('.arc', `${Math.round(shot.arcHeight)||0}`);
-    if (shot.entryAngle != null) set('.entry', `${shot.entryAngle}`);
-    if (shot.releaseAngle != null) set('.release', `${shot.releaseAngle}`);
-  } catch {}
-}
-
-function updateFinalizationBadgeFromDebug(j) {
-  try {
-    const modal = document.getElementById('fullShotModal');
-    if (!modal) return { present:0, haveMade:0, need:0, done:false };
-    const badge = modal.querySelector('#sessFinalBadge');
-    if (!badge) return { present:0, haveMade:0, need:0, done:false };
-    const list = window.__shotList || [];
-    const need = Math.min(list.length, getSessionCap());
-    const sdb = Array.isArray(j?.shotsDB) ? j.shotsDB : [];
-    const sj  = (j?.sessionFile && Array.isArray(j.sessionFile.shots)) ? j.sessionFile.shots : [];
-    const presentIdx = new Set();
-    const madeIdx = new Set();
-    // Count union of DB and session.json so late DB rows don't hide file rows
-    for (const row of sdb) {
-      const i0 = Number(row.idx);
-      if (!Number.isFinite(i0)) continue;
-      if (i0 >= 0 && i0 < need) presentIdx.add(i0);
-      if (row.made === true || row.made === false) madeIdx.add(i0);
-    }
-    for (const row of sj) {
-      const i0 = Number(row.idx);
-      if (!Number.isFinite(i0)) continue;
-      if (i0 >= 0 && i0 < need) presentIdx.add(i0);
-      if (row.made === true || row.made === false) madeIdx.add(i0);
-    }
-    const present = presentIdx.size;
-    const haveMade = madeIdx.size;
-    if (!need) return { present:0, haveMade:0, need:0, done:false };
-    badge.style.display = 'inline-block';
-    // Flip to green as soon as all rows are present (do not wait for DB 'made')
-    const done = present >= need;
-    if (done) {
-      badge.textContent = 'Finalized';
-      badge.style.background = '#22c55e';
-      badge.style.color = '#071607';
-    } else {
-      badge.textContent = `Finalizingâ€¦ ${present}/${need}`;
-      badge.style.background = '#f59e0b';
-      badge.style.color = '#111';
-    }
-    return { present, haveMade, need, done };
-  } catch { return { present:0, haveMade:0, need:0, done:false }; }
-}
-
-window.ensureHudRoot = ensureHudRoot;
-
-// clean up the summary table UI
-function ensureShotTableStyles(){
-  if (document.getElementById('shotTableStyles')) return;
-  const css = document.createElement('style');
-  css.id = 'shotTableStyles';
-  css.textContent = `
-    #fullShotModal .hud-table{ width:100%; border-collapse:collapse; table-layout:fixed; }
-    #fullShotModal .hud-table col#cNum   { width:42px; }
-    #fullShotModal .hud-table col#cRes   { width:60px; }
-    #fullShotModal .hud-table col#cArc   { width:64px; }
-    #fullShotModal .hud-table col#cEntry { width:72px; }
-    #fullShotModal .hud-table col#cRel   { width:72px; }
-    #fullShotModal .hud-table col#cCoach { width:auto; }
-    #fullShotModal .hud-table col#cClip  { width:90px; text-align:center; }
-    #fullShotModal .hud-table thead th{ position: sticky; top: 0; background: rgba(0,0,0,0.85); z-index: 2; backdrop-filter: blur(2px); }
-    #fullShotModal .hud-table th,
-    #fullShotModal .hud-table td{ padding:8px 10px; vertical-align:top; text-align:left;
-      border-bottom:1px solid rgba(255,255,255,.12); }
-    #fullShotModal .hud-table tbody tr:nth-child(even) td{ background:rgba(255,255,255,.03); }
-    #fullShotModal td.num, #fullShotModal td.arc, #fullShotModal td.entry, #fullShotModal td.release { text-align:center; }
-    #fullShotModal td.result{ text-align:center; }
-    #fullShotModal td.clip { text-align:center; }
-    #fullShotModal td.coach{ white-space:normal; word-break:break-word; line-height:1.25; }
-    #fullShotModal tbody tr[data-best="1"] td { background: rgba(255,215,0,0.10) !important; }
-    #fullShotModal tbody tr[data-best="1"] td.result { font-weight: 800; }
-  `;
-
-  // Insert a "Replay Best" button if we found a best shot
-  try {
-    if (__bestIdx >= 0) {
-      const actions = modal.querySelector('div > div:last-child');
-      if (actions) {
-        const btn = document.createElement('button');
-        btn.id = 'replayBest';
-        btn.className = 'vc-btn';
-        btn.title = 'Replay Best Shot';
-        btn.textContent = 'Best ?';
-        btn.addEventListener('click', () => { try { window.playShotReplay?.({ id: (__bestIdx + 1) }); } catch {} });
-        actions.insertBefore(btn, actions.querySelector('#exportCSV'));
-      }
-    }
-  } catch {}
-
-  // Post best-shot mark to backend once per session (optional; ignored if server doesn't use it)
-  try {
-    const sid = window.__SESSION_ID || null;
-    if (sid && __bestIdx >= 0) {
-      const key = `${sid}|best|${__bestIdx}`;
-      window.__bestShotMarkSent ||= new Set();
-      if (!window.__bestShotMarkSent.has(key)) {
-        window.__bestShotMarkSent.add(key);
-        fetch(`/api/sessions/${sid}/shot`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idx: __bestIdx, best: true, t: Date.now() }),
-          credentials: 'include'
-        }).catch(()=>{});
-      }
-    }
-  } catch {}
-  document.head.appendChild(css);
-}
-
-// --- Lightweight overlay replay of a shot trail (no video seek required) ---
-function makeReplayCanvasSize() {
-  const ov = document.getElementById('overlay');
-  const v  = document.getElementById('videoPlayer') || document.querySelector('video');
-  const w = ov?.width || v?.videoWidth || 640;
-  const h = ov?.height || v?.videoHeight || 360;
-  return { w: Math.max(320, w), h: Math.max(180, h) };
-}
-
-function drawHoopSimple(ctx) {
-  try {
-    const hoop = (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null;
-    if (!hoop) return;
-    const cx = Number.isFinite(hoop.cx) ? hoop.cx : (hoop.x + (hoop.w||0)/2);
-    const cy = Number.isFinite(hoop.cy) ? hoop.cy : (hoop.y + (hoop.h||0)/2);
-    const r  = Math.max(28, Math.min(72, (hoop.w||hoop.width||60)/2));
-    ctx.save();
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2);
-    ctx.strokeStyle = 'rgba(255,165,0,0.9)'; ctx.lineWidth = 3; ctx.stroke();
-    ctx.restore();
-  } catch {}
-}
-
-function openShotReplay(shot) {
-  const root = ensureHudRoot();
-  let box = document.getElementById('shotReplayModal');
-  if (!box) {
-    box = document.createElement('div');
-    box.id = 'shotReplayModal';
-    Object.assign(box.style, {
-      position:'absolute', left:'50%', top:'12%', transform:'translateX(-50%)', zIndex:10040,
-      background:'rgba(0,0,0,0.88)', color:'#fff', border:'1px solid rgba(255,255,255,0.18)', borderRadius:'14px',
-      boxShadow:'0 20px 50px rgba(0,0,0,0.45)', padding:'10px 10px', pointerEvents:'auto'
-    });
-    root.appendChild(box);
-  }
-  const { w, h } = makeReplayCanvasSize();
-  const cw = Math.min(w, Math.round(window.innerWidth * 0.9));
-  const ch = Math.round(cw * (h / w));
-
-  box.innerHTML = '';
-  const header = document.createElement('div');
-  header.style.display = 'flex'; header.style.alignItems = 'center'; header.style.justifyContent='space-between'; header.style.margin='4px 6px 6px';
-  header.innerHTML = `<div style="font-weight:700">Replay - Shot ${shot.__idx || '?'} ${shot.made ? 'âœ…' : 'âŒ'}</div>
-    <div>
-      <button id="replayToggle" class="vc-btn" style="margin-right:6px">â¯</button>
-      <button id="replayClose" class="vc-btn">âœ–</button>
-    </div>`;
-  box.appendChild(header);
-
-  const info = document.createElement('div');
-  info.style.font = '600 12px system-ui'; info.style.opacity = '0.85'; info.style.margin = '0 8px 6px';
-  info.textContent = `Arc ${Math.round(shot.arcHeight||0)}px Â· Entry ${shot.entryAngle??'â€“'}Â° Â· Release ${shot.releaseAngle??'â€“'}Â°`;
-  box.appendChild(info);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = w; canvas.height = h; canvas.style.width = `${cw}px`; canvas.style.height = `${ch}px`;
-  canvas.style.display='block'; canvas.style.background='rgba(0,0,0,0.6)'; canvas.style.borderRadius='10px';
-  box.appendChild(canvas);
-
-  const ctx = canvas.getContext('2d');
-  const trail = Array.isArray(shot.trail) ? shot.trail.slice() : [];
-  let i = 0; let raf = 0; let playing = true;
-  function drawFrame() {
-    try {
-      ctx.clearRect(0,0,canvas.width,canvas.height);
-      // hoop
-      drawHoopSimple(ctx);
-      // path
-      if (trail.length >= 2) {
-        ctx.save();
-        ctx.lineWidth = 3; ctx.strokeStyle = 'lime'; ctx.beginPath();
-        const upto = Math.max(1, Math.min(i, trail.length-1));
-        for (let k=0; k<=upto; k++) {
-          const p = trail[k]; if (!p) continue;
-          if (k===0) ctx.moveTo(p.x, p.y); else ctx.lineTo(p.x, p.y);
-        }
-        ctx.stroke();
-        // head dot
-        const P = trail[upto];
-        if (P) { ctx.beginPath(); ctx.arc(P.x, P.y, 6, 0, Math.PI*2); ctx.fillStyle = '#22c55e'; ctx.fill(); }
-        ctx.restore();
-      } else {
-        ctx.save();
-        ctx.fillStyle='rgba(255,255,255,0.85)'; ctx.font='600 14px system-ui';
-        ctx.fillText('No trail available for this shot.', 16, 26);
-        ctx.restore();
-      }
-    } catch {}
-  }
-  function step() {
-    drawFrame();
-    if (playing && trail.length) {
-      i = Math.min(trail.length, i + 2);
-      if (i < trail.length) raf = requestAnimationFrame(step);
-    }
-  }
-  // wire controls
-  const close = () => { try { cancelAnimationFrame(raf); } catch {} try { box.remove(); } catch {} };
-  box.querySelector('#replayClose')?.addEventListener('click', close, { once:true });
-  box.querySelector('#replayToggle')?.addEventListener('click', () => {
-    playing = !playing;
-    if (playing) { if (i >= trail.length) i = 0; raf = requestAnimationFrame(step); }
-  });
-
-  // start
-  i = 0; playing = true; cancelAnimationFrame(raf); raf = requestAnimationFrame(step);
-}
-
-if (!window.playShotReplay) {
-  window.playShotReplay = function playShotReplay({ id } = {}){
-    try {
-      const list = window.__shotList || [];
-      const shot = list[id - 1];
-      if (!shot) return;
-      openShotReplay(shot);
-    } catch {}
-  };
-}
-
-// ---- Center prompt + countdown (on load/connect) ----
-function showCenterPrompt(msg) {
-  let el = document.getElementById('overlayPrompt'); if (el) { try { el.dataset.center = '1'; } catch {} }
-  if (!el) { el = document.createElement('div'); el.id = 'overlayPrompt'; el.dataset.center = '1';
+    el.id = 'overlayPrompt';
     Object.assign(el.style, {
       position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)',
       background: 'rgba(0,0,0,0.72)', color: '#fff', padding: '20px 28px',
       borderRadius: '12px', font: '700 32px/1.15 system-ui, -apple-system, Segoe UI, Arial', zIndex: 10020,
-      textShadow: '0 2px 8px rgba(0,0,0,0.45)',
-      pointerEvents: 'none', display: 'none'
+      textShadow: '0 2px 8px rgba(0,0,0,0.45)', pointerEvents: 'none', display: 'none'
     });
     ensureHudRoot().appendChild(el);
   }
@@ -2634,460 +524,132 @@ function showCenterPrompt(msg) {
   el.style.display = 'block';
   return el;
 }
-
-function hideCenterPrompt() {
-  const el = document.getElementById('overlayPrompt');
-  if (el) el.style.display = 'none';
-}
-
-async function showCenterCountdownAndPrompt(sec = 5) {
-  try {
-    const v = document.getElementById('videoPlayer'); if (!v) return;
-    // Do not disrupt background diagnostic mode
-    if (window.__BG_ONLY) return;
-    // One-time per source change
-    if (v.__countdownShown) return; v.__countdownShown = true;
-
-    // Optional once-per-device name preference (Dave vs David)
-    let name = (localStorage.getItem('firstname') || 'player');
-    if (!localStorage.getItem('firstname_confirmed')) {
-      await new Promise((resolve) => {
-        const root = ensureHudRoot();
-        const box = document.createElement('div');
-        box.id = 'namePrefOverlay';
-        Object.assign(box.style, {
-          position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
-          background:'rgba(0,0,0,0.78)', color:'#fff', padding:'18px 20px', borderRadius:'12px',
-          font:'600 18px system-ui, -apple-system, Segoe UI, Arial', zIndex:10030, pointerEvents:'auto', textAlign:'center'
-        });
-        box.innerHTML = `
-          <div style="font-size:20px; font-weight:700; margin-bottom:10px;">What should I call you?</div>
-          <div style="display:flex; gap:12px; justify-content:center;">
-            <button id="npDave"   style="font-weight:700; font-size:18px; padding:10px 14px; border-radius:10px; border:none; cursor:pointer;">Dave</button>
-            <button id="npDavid"  style="font-weight:700; font-size:18px; padding:10px 14px; border-radius:10px; border:none; cursor:pointer;">David</button>
-            <button id="npSkip"   style="font-weight:600; font-size:16px; padding:10px 14px; border-radius:10px; border:none; cursor:pointer; background:#333; color:#fff;">Skip</button>
-          </div>`;
-        root.appendChild(box);
-        const pick = (v) => { try { localStorage.setItem('firstname', v); localStorage.setItem('firstname_confirmed','1'); name = v; } catch{}; try { box.remove(); } catch{}; resolve(); };
-        box.querySelector('#npDave') .addEventListener('click', ()=> pick('Dave'));
-        box.querySelector('#npDavid').addEventListener('click', ()=> pick('David'));
-        box.querySelector('#npSkip') .addEventListener('click', ()=> pick(name));
-      });
-    }
-    
-    try { window.enableHoopPickOnce?.(); } catch {}
-  } catch {}
-}
-
-// After hoop lock: 5s countdown to arm shot tracking
-function startShotTrackingCountdown(sec = 5) {
-  try {
-    // Avoid double countdowns
-    if (window.__armCountdownActive) return; window.__armCountdownActive = true;
-    // Block releases while counting down
-    try { window.__shotTrackingArmed = false; } catch {}
-    try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec } })); } catch {}
-
-    // Build large centered number overlay
-    const root = ensureHudRoot();
-    let box = document.getElementById('countdownOverlay');
-    if (!box) {
-      box = document.createElement('div');
-      box.id = 'countdownOverlay';
-      Object.assign(box.style, {
-        position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
-        background:'rgba(0,0,0,0.45)', color:'#fff', padding:'24px 32px', borderRadius:'16px',
-        font:'900 120px/1 system-ui, -apple-system, Segoe UI, Arial',
-        textShadow: '0 6px 18px rgba(0,0,0,.55)', zIndex:10040,
-        pointerEvents:'none', display:'none'
-      });
-      root.appendChild(box);
-    }
-    const showNum = (t) => { box.style.display = 'block'; box.textContent = String(t); };
-    const showGo  = () => { box.style.display = 'block'; box.textContent = 'GO'; };
-    const hide    = () => { box.style.display = 'none'; };
-
-    (async () => {
-      try {
-        for (let i = sec; i >= 1; i--) {
-          showNum(i);
-          await new Promise(r => setTimeout(r, 1000));
-        }
-        showGo();
-        setTimeout(hide, 700);
-        // Arm and announce
-        window.__shotTrackingArmed = true;
-        try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
-        try { speak('Shoot when ready.'); } catch {}
-        try { window.__releaseEventSent = false; } catch {}
-      } finally {
-        window.__armCountdownActive = false;
-      }
-    })();
-  } catch {}
-}
-try { if (typeof window.startShotTrackingCountdown !== 'function') window.startShotTrackingCountdown = startShotTrackingCountdown; } catch {}
-
-(function installSlowFailsafe(){
-  const v = document.querySelector('#videoPlayer') || document.querySelector('video');
-  if (!v) return;
-
-  let lastRateSetAt = 0;
-
-  function setRate(r){
-    if (v.playbackRate !== r) {
-      v.playbackRate = r;
-      lastRateSetAt = performance.now();
-    }
-  }
-
-  // Baseline: never start in slow-mo
-  v.addEventListener('loadedmetadata', () => { setRate(1); }, { once:true });
-  v.addEventListener('ended',          () => { setRate(1); });
-
-  // Optional hooks, if your code toggles slow-mo deliberately:
-  window.addEventListener('video:Slow:on',  () => setRate(0.25));
-  window.addEventListener('video:Slow:off', () => setRate(1));
-
-  // Hard guard: donâ€™t allow slow-mo to linger
-  (function tick(){
-    // if rate < 0.9 longer than configured slow-mo, bail out to 1Ã—
-    const maxMs = Math.max(2000, (Number(window.Slow_MS) || 1200) + 600);
-    if (v.playbackRate < 0.9 && performance.now() - lastRateSetAt > maxMs) {
-      setRate(1);
-    }
-    requestAnimationFrame(tick);
-  })();
-})();
-
-
-// Hard exit to 1Ã— as soon as summary is received
-window.addEventListener('shot:summary', () => {
-  const v = document.getElementById('videoPlayer') || document.querySelector('video');
-  if (v) { try { v.playbackRate = 1; } catch {} }
-});
-
-
-// --- Global HUD wiring for shot counters (independent of slow-mo arbiter) ---
-(function wireHudShotCounters(){
-  if (window.__HudShotCountersWired) return; window.__HudShotCountersWired = true;
-
-  const onRelease = (e) => {
-    if (window.DEMO_SHOTSTORE_OWNS_ROWS === true) return;
-    try {
-      // Require hoop locked/confirmed and armed (post-countdown)
-      if (window.__hoopConfirmed !== true) return;
-      if (!window.getLockedHoopBox?.()) return;
-      if (window.__shotTrackingArmed !== true) return;
-
-      // UI cooldown to avoid duplicate counts from multiple emitters
-      const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
-      const now = performance.now();
-      const lastUiMs = Number(window.__UI_LAST_RELEASE_MS || 0);
-      if (now - lastUiMs < unlockMs) return;
-
-      // Trust upstream latch; UI enforces only armed + hoop + cooldown
-
-          const list = (window.__shotList ||= []);
-          const rf = Number(e?.detail?.frame || 0);
-      const last = list.at?.(-1) || null;
-      const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
-      if (!same) {
-        const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-          ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-          : null;
-        list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap });
-        // If snapshot was not yet ready at the exact release tick, grab one immediately
-        try {
-          queueMicrotask(async () => {
-            try {
-              const lastRow = list.at?.(-1) || null;
-              if (lastRow && !lastRow.poseSnapshot && typeof window.__samplePoseSnapshotNow === 'function') {
-                const s2 = await window.__samplePoseSnapshotNow();
-                if (s2) lastRow.poseSnapshot = s2;
-              }
-            } catch {}
-          });
-        } catch {}
-        try { window.__SHOT_IDX = (list.length - 1); } catch {}
-        // also upsert a placeholder shot row to backend so admin shows attempts
-        try { postShotUpsert((list.length - 1), { made: null }); } catch {}
-      }
-      window.__UI_LAST_RELEASE_MS = now;
-      const taken = list.length;
-      const start = (window.__sessionStart ||= Date.now());
-      const elapsedSec = Math.floor((Date.now() - start) / 1000);
-      window.mountSessionHUD?.();
-      window.updateSessionHUD?.({ taken, elapsedSec });
-      window.setSessionStatus?.('Shot ' + taken + ' in progress');
-    } catch {}
-  };
-  window.addEventListener('shot:release', onRelease);
-
-  // Also increment HUD on gate score trips (from overlay/app sampler),
-  // so Shots Taken reflects pose releases even if a release event was swallowed.
-  // This is visual/log-only; summaries still come from the scorer.
-  window.addEventListener('hud:score-trip', (e) => {
-    if (window.DEMO_SHOTSTORE_OWNS_ROWS) return;  // demo: HUD is visual-only
-    try {
-      // Cap session at cap_DEFAULT
-      try { const cap = getSessionCap(); const cur = (window.__shotList||[]).length; if (shouldEnforceSessionCap() && cur >= cap) return; } catch {}
-      const list = (window.__shotList ||= []);
-      // Prefer frame from event; fallback to latest sampler index or RELEASE_SCORE
-      let rf = Number(e?.detail?.frame);
-      if (!Number.isFinite(rf)) rf = Number(window.__AN_IDX);
-      if (!Number.isFinite(rf)) rf = Number(window.RELEASE_SCORE?.frame);
-      if (!Number.isFinite(rf)) rf = 0;
-
-      const last = list.at?.(-1) || null;
-      const same = last && Number.isFinite(last.frameRelease) && last.frameRelease === rf;
-      if (same) return;
-
-      // Require pose present
-      try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
-      const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-        ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-        : null;
-      list.push({ pending: true, frameRelease: rf, tMs: Date.now(), poseSnapshot: snap, via: 'score-trip' });
-      // Freshen snapshot immediately if we didn't have one yet
-      try {
-        queueMicrotask(async () => {
-          try {
-            const lastRow = list.at?.(-1) || null;
-            if (lastRow && !lastRow.poseSnapshot && typeof window.__samplePoseSnapshotNow === 'function') {
-              const s2 = await window.__samplePoseSnapshotNow();
-              if (s2) lastRow.poseSnapshot = s2;
-            }
-          } catch {}
-        });
-      } catch {}
-      try { window.__SHOT_IDX = (list.length - 1); } catch {}
-
-      const taken = list.length;
-      const start = (window.__sessionStart ||= Date.now());
-      const elapsedSec = Math.floor((Date.now() - start) / 1000);
-      window.mountSessionHUD?.();
-      window.updateSessionHUD?.({ taken, elapsedSec });
-      window.setSessionStatus?.('Shot ' + taken + ' in progress');
-      if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:add-pending:score-trip]', { frame: rf, len: taken });
-
-      // Fallback: persist a release mark to the backend even if no strict release event fired
-      (async () => {
-        try {
-          let sid = (window.__SESSION_ID || null);
-          if (!sid) { try { sid = await ensureSessionId(); } catch {} }
-          if (!sid) return;
-          const payload = {
-            sessionId: sid,
-            shotId: (window.__SHOT_IDX || (list.length - 1) || 0),
-            frame: rf,
-            tMs: Date.now(),
-            via: 'hud:score-trip',
-            poseSnapshot: snap,
-            hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
-            gate: (window.__LAST_GATE || null)
-          };
-          await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
-        } catch {}
-      })();
-
-      // Auto end at cap
-      try { const cap = getSessionCap(); if (shouldEnforceSessionCap() && taken >= cap) autoEndSessionAndSummarize(); } catch {}
-
-      // If the full table is open, refresh so the new row appears as "pending"
-      try {
-        const modal = document.getElementById('fullShotModal');
-        if (modal && modal.style.display === 'block') { renderFullShotTable(); wireFullShotModalActions(); }
-      } catch {}
-    }  
-    catch (err) { if (window.DOACH_RELEASE_TRACE === true) console.warn('[HUD:score-trip:error]', err); }
-  });
-
-  // Live update the bottom HUD when HUD shot counter changes
-  window.addEventListener('hud:shot-taken', (e) => {
-    if (window.DEMO_SHOTSTORE_OWNS_ROWS) return;  // demo: HUD is visual-only
-    try {
-      const cnt = Number(e?.detail?.count || window.shotTaken || window.__HUD_SHOT_COUNT || 0);
-      const start = (window.__sessionStart ||= Date.now());
-      const elapsedSec = Math.floor((Date.now() - start) / 1000);
-      window.updateSessionHUD?.({ taken: cnt, elapsedSec });
-      if (window.DOACH_RELEASE_TRACE === true) console.log('[HUD:update:mShots]', { taken: cnt });
-      // Auto-end as soon as HUD count reaches cap
-      if (window.SESSION_MANAGER_OWNS_ENDING !== true) {
-        try {
-          const cap = getSessionCap();
-          if (shouldEnforceSessionCap() && cnt >= cap && !window.__sessionCapped) {
-            window.__sessionCapped = true;
-            autoEndSessionAndSummarize();
-            return;
-          }
-        } catch {}
-      }
-      // Ensure local list has a pending record for this HUD shot index
-      try {
-        // Require pose present
-        try { const k = (window.playerState?.keypoints||[]).length; if (k < 33) return; } catch {}
-        const list = (window.__shotList ||= []);
-        const targetIdx = Math.max(0, cnt - 1); // 0-based index from HUD count
-        // Grow list with pending placeholders up to targetIdx
-        while (list.length <= targetIdx) {
-          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-            : null;
-          list.push({ pending: true, frameRelease: null, tMs: Date.now(), poseSnapshot: snap, via: 'hud:shot-taken' });
-          // If just-added row has no snapshot, try sampling once immediately
-          try {
-            queueMicrotask(async () => {
-              try {
-                const lastRow = list.at?.(-1) || null;
-                if (lastRow && !lastRow.poseSnapshot && typeof window.__samplePoseSnapshotNow === 'function') {
-                  const s2 = await window.__samplePoseSnapshotNow();
-                  if (s2) lastRow.poseSnapshot = s2;
-                }
-              } catch {}
-            });
-          } catch {}
-        }
-        try { window.__SHOT_IDX = targetIdx; } catch {}
-        // Ensure a placeholder row exists in backend for this attempt
-        postShotUpsert(targetIdx, { made: null });
-      } catch {}
-      // Also persist a release snapshot for admin even if strict release event didn't fire
-      (async () => {
-        try {
-          let sid = (window.__SESSION_ID || null);
-          if (!sid) { try { sid = await ensureSessionId(); } catch {} }
-          if (!sid) return;
-          // Pick a reasonable frame index approximation
-          let rf = Number(window.__AN_IDX);
-          if (!Number.isFinite(rf)) rf = Number(window.RELEASE_SCORE?.frame);
-          if (!Number.isFinite(rf)) rf = 0;
-          const snap = (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints)
-            ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.())
-            : null;
-          const payload = {
-            sessionId: sid,
-            shotId: (window.__SHOT_IDX || Math.max(0, cnt - 1) || 0),
-            frame: rf,
-            tMs: Date.now(),
-            via: 'hud:shot-taken',
-            poseSnapshot: snap,
-            hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
-            gate: (window.__LAST_GATE || null)
-          };
-          await fetch('/api/release_mark', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload), credentials:'include' }).catch(()=>{});
-        } catch {}
-      })();
-      // Auto end at cap
-      try { const cap = getSessionCap(); if (shouldEnforceSessionCap() && cnt >= cap) autoEndSessionAndSummarize(); } catch {}
-    } catch {}
-  });
-})();
-
-
-
 window.showCenterPrompt = showCenterPrompt;
 
-// --- Live: force a fresh pose step immediately after hoop lock ---
-// Ensures the skeleton updates on the very next paint in case the analyzer
-// is still spinning up and BG pose hasn't sampled yet.
-(function installForcePoseStep(){
-  if (window.__forcePoseStepInstalled) return; window.__forcePoseStepInstalled = true;
+function startShotTrackingCountdown(sec = 5) {
+  if (window.__armCountdownActive) return; window.__armCountdownActive = true;
+  try { window.__shotTrackingArmed = false; } catch {}
+  try { window.dispatchEvent(new CustomEvent('hud:arm-countdown', { detail: { sec } })); } catch {}
 
-  async function forcePoseStepOnce(){
+  const root = ensureHudRoot();
+  let box = document.getElementById('countdownOverlay');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'countdownOverlay';
+    Object.assign(box.style, {
+      position:'absolute', left:'50%', top:'50%', transform:'translate(-50%,-50%)',
+      background:'rgba(0,0,0,0.45)', color:'#fff', padding:'24px 32px', borderRadius:'16px',
+      font:'900 120px/1 system-ui, -apple-system, Segoe UI, Arial',
+      textShadow:'0 6px 18px rgba(0,0,0,.55)', zIndex:10040, pointerEvents:'none', display:'none'
+    });
+    root.appendChild(box);
+  }
+  const showNum = (t) => { box.style.display = 'block'; box.textContent = String(t); };
+  const showGo  = () => { box.style.display = 'block'; box.textContent = 'GO'; };
+  const hide    = () => { box.style.display = 'none'; };
+
+  (async () => {
     try {
-      const v = document.getElementById('videoPlayer');
-      if (!v || !v.videoWidth) return;
-      const ts = performance.now();
-      const res = await (window.poseDetector?.detectForVideo ? window.poseDetector.detectForVideo(v, ts) : (window.poseDetectSerial?.() || Promise.resolve(null)));
-      const people = res?.landmarks || [];
-      const ls = (Array.isArray(people) && Array.isArray(people[0]) && people[0].length >= 33) ? people[0] : null;
-      if (!ls) return;
-      const looksNorm = ls.every(k=>k && k.x <= 1.00 && k.y <= 1.00);
-      const sx = looksNorm ? (v.videoWidth  || 1) : 1;
-      const sy = looksNorm ? (v.videoHeight || 1) : 1;
-      const scaled = ls.map(k=>({ ...k, x: k.x * sx, y: k.y * sy }));
-      try {
-        if (!window.playerState) window.playerState = { keypoints: [] };
-        window.playerState.keypoints = scaled;
-        window.__lastPoseKP = scaled; window.__lastPoseTS = performance.now();
-        window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaled[16] || null;
-      } catch {}
-      try { window.drawLiveOverlay?.(window.lastDetectedFrame?.objects || [], window.playerState); } catch {}
-    } catch {}
+      for (let i = sec; i >= 1; i--) { showNum(i); await new Promise(r => setTimeout(r, 1000)); }
+      showGo(); setTimeout(hide, 700);
+      window.__shotTrackingArmed = true;
+      try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch {}
+      try { speak('Shoot when ready.'); } catch {}
+      try { window.__releaseEventSent = false; } catch {}
+    } finally {
+      window.__armCountdownActive = false;
+    }
+  })();
+}
+if (typeof window.startShotTrackingCountdown !== 'function') window.startShotTrackingCountdown = startShotTrackingCountdown;
+
+/* ----------------------- Callable finalizer only ----------------------- */
+// This DOES NOT trigger automatically. Call from session_manager.js when ending.
+async function autoEndSessionAndSummarize() {
+  // Dim background a bit for readability
+  try {
+    const root = ensureHudRoot?.() || document.body;
+    let blk = document.getElementById('endBlackout');
+    if (!blk) {
+      blk = document.createElement('div'); blk.id = 'endBlackout';
+      Object.assign(blk.style, { position:'absolute', inset:'0', background:'#000', opacity:'0.65', zIndex:10040, pointerEvents:'none' });
+      root.appendChild(blk);
+    } else {
+      blk.style.display='block'; blk.style.opacity='0.65'; blk.style.zIndex='10040'; blk.style.pointerEvents='none';
+    }
+  } catch {}
+
+  try { renderFullShotTable?.(); } catch {}
+  try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
+}
+if (typeof window.autoEndSessionAndSummarize !== 'function') window.autoEndSessionAndSummarize = autoEndSessionAndSummarize;
+
+/* --------------------------- Video HUD init --------------------------- */
+export function initHUDForVideo(videoEl) {
+  window.__videoEl = videoEl;
+  ensureHudRoot();
+
+  const anchor = document.querySelector('.session-container') || document.body;
+  if (!window.__hudMo) {
+    window.__hudMo = new MutationObserver(() => ensureHudRoot());
+    window.__hudMo.observe(anchor, { childList: true, subtree: true });
   }
 
-  window.addEventListener('hoop:locked', () => {
+  const boot = () => {
+    ensureHudRoot();
+    mountSessionHUD();
+    setSessionStatus('SESSION IN PROGRESS…');
+    setOverlayInteractive(true);
+    try { enableHoopPickOnce?.(); } catch {}
+  };
+
+  videoEl?.addEventListener('loadeddata', () => boot(), { once:true });
+  if (videoEl?.readyState >= 2) boot();
+
+  videoEl?.addEventListener('play',  ensureHudRoot);
+  videoEl?.addEventListener('pause', ensureHudRoot);
+
+  // Elapsed time ticker
+  if (window.__hudTimeTimer) clearInterval(window.__hudTimeTimer);
+  window.__hudTimeTimer = setInterval(() => {
     try {
-      const v = document.getElementById('videoPlayer');
-      const live = !!(v && v.srcObject);
-      if (!live) return;
-      // rAF + short timeout to cover layout resync and decoder latency
-      requestAnimationFrame(() => { forcePoseStepOnce(); });
-      setTimeout(forcePoseStepOnce, 140);
-      // Start admin observer streaming automatically for demos
-      try { window.startObserverStreaming?.(2); } catch {}
-
-      // For the next ~2.5s after lock, actively sample pose at ~8â€“10 fps
-      // so playerState keeps moving even if analyzer is spinning up.
-      try { clearInterval(window.__forcePoseInterval); } catch {}
-      const T0 = performance.now();
-      window.__forcePoseInterval = setInterval(async () => {
-        try {
-          if (performance.now() - T0 > 2500) { clearInterval(window.__forcePoseInterval); return; }
-          const ts = performance.now();
-          const res = await (window.poseDetector?.detectForVideo ? window.poseDetector.detectForVideo(v, ts) : (window.poseDetectSerial?.() || Promise.resolve(null)));
-          const people = res?.landmarks || [];
-          const ls = (Array.isArray(people) && Array.isArray(people[0]) && people[0].length >= 33) ? people[0] : null;
-          if (!ls) return;
-          const looksNorm = ls.every(k=>k && k.x <= 1.01 && k.y <= 1.01);
-          const sx = looksNorm ? (v.videoWidth||1)  : 1;
-          const sy = looksNorm ? (v.videoHeight||1) : 1;
-          const scaled = ls.map(k=>({ ...k, x: k.x * sx, y: k.y * sy }));
-          try {
-            if (!window.playerState) window.playerState = { keypoints: [] };
-            window.playerState.keypoints = scaled;
-            window.__lastPoseKP = scaled; window.__lastPoseTS = performance.now();
-            window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaled[16] || null;
-          } catch {}
-          try { window.drawLiveOverlay?.(window.lastDetectedFrame?.objects || [], window.playerState); } catch {}
-        } catch {}
-      }, 120);
+      const start = window.__sessionStart;
+      if (!start) return;
+      const list = (window.__shotList || window.shotLog || []);
+      const taken = Array.isArray(list) ? list.length : 0;
+      const elapsedSec = Math.floor((Date.now() - start) / 1000);
+      updateSessionHUD({ taken, elapsedSec });
     } catch {}
-  }, { passive: true });
-})();
+  }, 1000);
 
-window.addEventListener('session:ended', () => {
+  window.addEventListener('hud:end-session', () => {
+    try { if (window.__hudTimeTimer) { clearInterval(window.__hudTimeTimer); window.__hudTimeTimer = null; } } catch {}
+  });
+}
+window.initHUDForVideo = initHUDForVideo;
+
+/* ------------------------- Hoop lock listeners ------------------------- */
+window.addEventListener('hoop:locked', () => {
+  window.__hoopConfirmed = true;
+  try { window.__SESSION_ACTIVE = true; } catch {}
+  hidePromptMessage();
+  try { const v = document.getElementById('videoPlayer') || document.querySelector('video'); if (v) v.playbackRate = 1; } catch {}
+  // If not armed and no countdown active, start countdown
   try {
-    if (__capEnforceTimer) {
-      clearTimeout(__capEnforceTimer);
-      __capEnforceTimer = null;
+    if (window.__shotTrackingArmed !== true && !window.__armCountdownActive) {
+      window.__shotTrackingArmed = false;
+      startShotTrackingCountdown?.(5);
     }
   } catch {}
 });
 
+/* ------------------- Update UI on every shot summary ------------------- */
 window.addEventListener('shot:summary', () => {
   try {
-    const cap = getSessionCap();
-    if (!Number.isFinite(cap) || cap <= 0) return;
-    const count = Number(window.__SESSION_SHOT_COUNT || 0);
-    if (shouldEnforceSessionCap() && count >= cap) {
-      if (__capEnforceTimer) return;
-      const delay = Math.max(600, Number(window.CAP_SUMMARY_GRACE_MS || 1600));
-      __capEnforceTimer = setTimeout(() => {
-        __capEnforceTimer = null;
-        try {
-          if (window.__sessionEnded === true || window.__sessionCapped === true) return;
-          console.warn('[video_ui] cap fallback auto-end', { cap, count });
-          const maybe = autoEndSessionAndSummarize?.();
-          if (maybe && typeof maybe.catch === 'function') {
-            maybe.catch(() => {});
-          }
-        } catch {}
-      }, delay);
-    }
+    const list = window.__shotList || window.shotLog || [];
+    const taken = Array.isArray(list) ? list.length : 0;
+    const start = (window.__sessionStart ||= Date.now());
+    const elapsedSec = Math.floor((Date.now() - start) / 1000);
+    updateSessionHUD({ taken, elapsedSec });
   } catch {}
 });
-
-
-

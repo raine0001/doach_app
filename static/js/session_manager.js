@@ -1,193 +1,244 @@
-// session_manager.js — Demo Mode FBF sessions (clean arcs + stable accuracy)
+// session_manager.js — single-owner: start/end + cap + server persistence.
+// Owns: session start/stop, cap truth, POST /start and /shot
+// Listens: hud:start-session, hud:end-session, shot:summary
+// Emits:  hud:start-session (on explicit start), hud:end-session (on end)
+// Does NOT: generate releases, record clips, enforce UI, open tables automatically.
 
 import { speak, listenForEndSession } from '/static/js/coach_voice.js';
 
+/* ------------------------ tiny helpers ------------------------ */
 async function postJSON(url, body) {
-  const r = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}), credentials:'include' });
-  if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+    credentials: 'include'
+  });
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return await r.json().catch(() => ({}));
 }
 
-async function uploadBlob(url, blob, filename='clip.webm', field='file') {
-  const fd = new FormData(); fd.append(field, blob, filename);
-  const r = await fetch(url, { method:'POST', body: fd, credentials:'include' }); if (!r.ok) throw new Error('HTTP '+r.status); return await r.json();
+// Unified cap reader/writer (session_manager is the only writer)
+function setSessionCap(n) {
+  const cap = Number(n);
+  const v = Number.isFinite(cap) && cap > 0 ? cap : undefined;
+  try {
+    if (v) {
+      window.__SESSION_CAP = v;
+      window.SESSION_SIZE  = v;               // UI reads this to show N/Cap
+      localStorage.setItem('doach.sessionCap', String(v));
+    } else {
+      window.__SESSION_CAP = undefined;
+      window.SESSION_SIZE  = undefined;
+      localStorage.removeItem('doach.sessionCap');
+    }
+  } catch {}
+}
+function getSessionCap() {
+  try {
+    if (Number.isFinite(window.__SESSION_CAP)) return Number(window.__SESSION_CAP);
+    if (Number.isFinite(window.SESSION_SIZE))  return Number(window.SESSION_SIZE);
+    const ls = Number(localStorage.getItem('doach.sessionCap'));
+    if (Number.isFinite(ls) && ls > 0) return ls;
+  } catch {}
+  return 10;
+}
+window.getSessionCap = getSessionCap; // let others read
+
+/* ------------------------ internal shot accounting ------------------------ */
+/**
+ * Stop depending on UI arrays to count shots. We keep our own counter and
+ * a dedupe set of processed summary keys.
+ */
+let __shotCounter = 0; // monotonic per session
+const __processedSummaries = new Set(); // keys: `${shotId}|${frameEnd||''}|${frame||''}`
+
+// Returns the next 1-based shot index owned by the session manager
+function nextShotIndex() {
+  __shotCounter = Number(__shotCounter || 0) + 1;
+  window.__SESSION_SHOT_COUNT = __shotCounter;
+  return __shotCounter;
 }
 
-(function installDemoSession(){
+// Best-effort finalized count for display; prefer our counter
+function getFinalizedCount() {
+  if (Number.isFinite(__shotCounter) && __shotCounter > 0) return __shotCounter;
+  try {
+    const recs = typeof window.getShotRecords === 'function' ? (window.getShotRecords() || []) : [];
+    if (recs.length) return recs.length;
+  } catch {}
+  try {
+    const list = window.__shotList || [];
+    return list.filter(s => s && s.pending === false).length;
+  } catch {}
+  return Number(window.__SESSION_SHOT_COUNT || 0);
+}
+
+/* ------------------------ state ------------------------ */
+let __wired = false;
+let __sid = null;
+let __ended = false;
+
+// Display name for voice (fallbacks)
+function getDisplayName() {
+  try {
+    return window.__USER_NAME || localStorage.getItem('firstname') || 'Player';
+  } catch {
+    return window.__USER_NAME || 'Player';
+  }
+}
+const name = getDisplayName();
+
+/* ------------------------ core actions ------------------------ */
+async function startSession() {
+  if (__sid) return __sid;      // already started
+  __ended = false;
+  __shotCounter = 0;
+  __processedSummaries.clear();
+
+  // choose cap once per session (URL > env > LS > default)
+  let cap = (() => {
+    try {
+      const q = new URLSearchParams(location.search || '');
+      const qp = Number(q.get('cap'));
+      if (Number.isFinite(qp) && qp > 0) return qp;
+    } catch {}
+    return Number(window.DEMO_SESSION_CAP ?? window.__SESSION_CAP ?? window.SESSION_CAP);
+  })();
+  if (!Number.isFinite(cap) || cap <= 0) cap = 10;
+  setSessionCap(cap);
+
+  // mint session
+  const res = await postJSON('/api/sessions/start', { device: navigator.userAgent });
+  __sid = res?.id || null;
+  window.__SESSION_ID = __sid || null;
+  window.__SESSION_ACTIVE = true;
+  window.__SESSION_SHOT_COUNT = 0;
+  window.__sessionStart = Date.now();
+
+  // nudge HUD
+  try { window.mountSessionHUD?.(); window.setSessionStatus?.('SESSION IN PROGRESS'); } catch {}
+
+  // tell everyone
+  try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch {}
+
+  // optional voice cue
+  try {
+    if (localStorage.getItem('doach_muted') !== 'true') {
+      speak(`Hi ${name}, let's get started. Tap the hoop to lock it, then take your first shot when you're ready.`);
+    }
+  } catch {}
+
+  return __sid;
+}
+
+async function persistShotFromSummary(detail) {
+  // Only persist if we have a session id; otherwise try to start one lazily
+  if (!__sid) {
+    try { await startSession(); } catch {}
+  }
+  if (!__sid) return;
+
+  // Build a stable de-dupe key from what we actually have
+  const sid   = String(__sid || '');
+  const shot  = Number(detail?.shotId);
+  const fEnd  = Number(detail?.frameEnd ?? detail?.endFrame ?? NaN);
+  const fAny  = Number(detail?.frame ?? NaN);
+  const key   = [sid, Number.isFinite(shot) ? shot : '', Number.isFinite(fEnd) ? fEnd : '', Number.isFinite(fAny) ? fAny : ''].join('|');
+
+  if (__processedSummaries.has(key)) {
+    // we've already persisted this summary; ignore
+    return;
+  }
+
+  // Compute idx: prefer provided shotId; else allocate our own
+  let idx = Number(detail?.shotId);
+  if (!Number.isFinite(idx) || idx <= 0) idx = nextShotIndex();
+
+  const payload = {
+    idx,
+    t: Date.now(),
+    made: Number.isFinite(detail?.made) ? Number(detail.made) : null,
+    arcHeight: Number.isFinite(detail?.arcHeight) ? Number(detail.arcHeight) : null,
+    entryAngle: Number.isFinite(detail?.entryAngle) ? Number(detail.entryAngle) : null,
+    releaseAngle: Number.isFinite(detail?.releaseAngle) ? Number(detail.releaseAngle) : null,
+    pose: detail?.poseSnapshot || null   // optional, server can ignore
+  };
+
+  try {
+    await postJSON(`/api/sessions/${__sid}/shot`, payload);
+    __processedSummaries.add(key);
+    // bump our counter to at least idx
+    if (idx > __shotCounter) __shotCounter = idx;
+    window.__SESSION_SHOT_COUNT = __shotCounter;
+    console.debug('[persistShot]', { idx, ok: true });
+  } catch (err) {
+    console.warn('[persistShot] failed', err, { idx, payload });
+  }
+
+  // Cap check owned here only
+  try {
+    const taken = getFinalizedCount();
+    const cap   = getSessionCap();
+    if (Number.isFinite(cap) && taken >= cap) {
+      // tiny grace so the last row/clip paths land before UI opens table
+      setTimeout(() => { endSession('cap').catch(()=>{}); }, Math.max(200, Number(window.CAP_SUMMARY_GRACE_MS || 600)));
+    }
+  } catch {}
+}
+
+async function endSession(reason = 'normal') {
+  if (__ended) return;
+  __ended = true;
+
+  // single finalizer: dim + open table (UI-owned)
+  try { await window.autoEndSessionAndSummarize?.(); } catch {}
+
+  // announce end
+  try { window.dispatchEvent(new CustomEvent('hud:end-session', { detail: { reason } })); } catch {}
+
+  // flip flags
+  try { window.__SESSION_ACTIVE = false; } catch {}
+
+  // optional voice cue
+  try { if (localStorage.getItem('doach_muted') !== 'true') speak('Session ended.'); } catch {}
+
+  return true;
+}
+
+/* ------------------------ wiring ------------------------ */
+(function wireOnce() {
+  if (__wired) return; __wired = true;
+
+  // Buttons are optional
   const btnStart = document.getElementById('btnStartSession');
   const btnEnd   = document.getElementById('btnEndSession');
-  if (!btnStart || !btnEnd) return;
+  if (btnStart) btnStart.addEventListener('click', () => { startSession().catch(()=>{}); });
+  if (btnEnd)   btnEnd.addEventListener('click',   () => { endSession().catch(()=>{}); });
 
-  let sessId = null; let shotIdx = 0; let rec = null; let recChunks = []; let recStream = null; let recCanvas = null;
+  // HUD bridge: treat these as canonical controls
+  window.addEventListener('hud:start-session', () => { startSession().catch(()=>{}); });
+  window.addEventListener('hud:end-session',   () => { endSession().catch(()=>{}); });
 
-  function startRecorder() {
-    try {
-      const ov = document.getElementById('overlay'); if (!ov) return false;
-      recCanvas = ov; recStream = ov.captureStream(30);
-      recChunks = []; rec = new MediaRecorder(recStream, { mimeType: 'video/webm' });
-      rec.ondataavailable = e => { if (e.data && e.data.size) recChunks.push(e.data); };
-      rec.start(); return true;
-    } catch { return false; }
-  }
-  async function stopRecorderAndUpload() {
-    return await new Promise((resolve)=>{
-      try {
-        if (!rec) return resolve(null);
-        rec.onstop = async () => {
-          try {
-            const blob = new Blob(recChunks, { type:'video/webm' });
-            if (sessId != null) {
-              await uploadBlob(`/api/sessions/${sessId}/shot_video?index=${shotIdx}`, blob, `shot_${shotIdx}.webm`);
-            }
-          } catch {}
-          resolve(null);
-        };
-        rec.stop();
-      } catch { resolve(null); }
-    });
-  }
+  // Persist every finalized shot (deduped here), then check cap
+  window.addEventListener('shot:summary', (e) => {
+    const detail = e?.detail || {};
+    // Never gate summaries on "armed"; capture is upstream.
+    persistShotFromSummary(detail).catch(()=>{});
+  }, { passive: true });
 
-  async function startSession() {
-    if (sessId) return; // already
-    try {
-      // Analyzer runs fully in the background; keep user playback at 1x
-      window.USE_FBF_DURING_SHOT = false;   // do not pause/step the visible player
-      // demo defaults  (none of which is used in demo mode, but set for consistency)
-      window.ROI_SUPERSAMPLE = Number(window.ROI_SUPERSAMPLE || 1.6);
-      window.BALL_MAX_STEP   = Number(window.BALL_MAX_STEP || 32);
-      window.EXIT_BELOW_MARGIN = Number(window.EXIT_BELOW_MARGIN || 14);
-      window.__PREROLL_FPS   = Number(window.__PREROLL_FPS || 10);
-      window.DETECT_EVERY    = 1;
-      window.SLOW_RATE       = Number(window.SLOW_RATE || 0.35);
-      try { window.setOverlayMode?.('arc-only'); } catch {}
-
-      window.__SESSION_ACTIVE = true;
-      // Stable detection & presentation
-      window.__forceServerDetect = true; 
-      window.DETECT_ROI_ONLY = true; 
-      window.__ROI_DETECT_ALWAYS = true;
-      window.REL_HAND_DIST_PX = 120; 
-      window.REL_POSE_STREAK = 1; 
-      window.REL_UPWARD_MIN_FRAMES = 1; 
-      window.RELEASE_DELAY_FRAMES = 1;
-      
-      try {
-        speak(`session started.`);
-      } catch {}
-      
-      const demoCap = Number(window.DEMO_SESSION_CAP ?? window.__SESSION_CAP ?? window.SESSION_CAP ?? 3);
-      try {
-        window.__SESSION_CAP = demoCap;
-        window.SESSION_CAP = demoCap;
-        localStorage.setItem('doach.sessionCap', String(demoCap));
-      } catch {}
-      const res = await postJSON('/api/sessions/start', { device: navigator.userAgent });
-      sessId = res.id; shotIdx = 0; try { window.__SESSION_ID = sessId; window.__SHOT_IDX = shotIdx; } catch {}
-      try { document.querySelectorAll('.video-controls').forEach(el => el.remove()); } catch {}
-      try { window.mountSessionHUD?.(); window.setSessionStatus?.('SESSION IN PROGRESS'); } catch {}
-      try { window.__SESSION_SHOT_COUNT = 0; } catch {}
-
-      // Wire shot lifecycle for demo mode
-      // Start recording slightly before release: when prox enter stamps
-      const onFrame = () => {
-        try {
-          const bs = (window.ballState||{});
-          if (Number.isFinite(bs.proxEnterFrame) && !rec) startRecorder();
-        } catch {}
-      };
-      window.addEventListener('analyzer:frame-done', onFrame);
-
-      const onRelease = (e) => {
-        // Live session: keep user playback at 1x; analyze in background (analyzer.js)
-        try { const v = document.getElementById('videoPlayer'); if (v) v.playbackRate = 1; } catch {}
-        if (!rec) startRecorder();
-        // Ignore before hoop lock in demo mode
-        try { if (window.__hoopConfirmed !== true || !window.getLockedHoopBox?.()) return; } catch {}
-        // Gate demo HUD attempt increments to "all four" pose checks + cooldown
-        try {
-          const unlockMs = Number(window.NEXT_SHOT_UNLOCK_MS ?? 2000);
-          const now = performance.now();
-          const last = Number(window.__UI_LAST_RELEASE_MS || 0);
-          if (now - last < unlockMs) return; // cooldown: ignore rapid repeats
-          const hist = (window.playerState?.frameHistory || []).slice(-5);
-          let ok = false;
-          if (typeof window.releaseGate === 'function') {
-            try { ok = !!window.releaseGate(hist)?.released; } catch {}
-          }
-          if (!ok) return; // don't increment HUD attempts unless gate says released
-          window.__UI_LAST_RELEASE_MS = now;
-        } catch {}
-        // Report to backend immediately (authoritative release anchor)
-        try {
-          const d = (e && e.detail) || {};
-          const payload = {
-            sessionId: sessId,
-            shotId: shotIdx,
-            frame: Number(d.frame||0),
-            tMs: Number(d.tMs||Date.now()),
-            via: d.via || 'frontend',
-            poseSnapshot: (typeof window.extractPoseSnapshot === 'function' && window.playerState?.keypoints) ? window.extractPoseSnapshot(window.playerState.keypoints, window.getLockedHoopBox?.()) : null,
-            hoop: (typeof window.getLockedHoopBox === 'function') ? window.getLockedHoopBox() : null,
-          };
-          postJSON('/api/release_mark', payload).catch(()=>{});
-        } catch {}
-        // Increment HUD attempts immediately so UI shows 1/10, 2/10, etc.
-        try {
-          const list = (window.__shotList || []);
-          const made = list.filter(s => s.made).length;
-          const acc  = list.length ? Math.round((made / list.length) * 100) : 0;
-          const start = (window.__sessionStart ||= Date.now());
-          const elapsedSec = Math.floor((Date.now() - start) / 1000);
-          window.updateSessionHUD?.({ taken: list.length + 1, made, accuracy: acc, elapsedSec });
-          try { console.log('[HUD:demo-increment]', { len: list.length + 1 }); } catch {}
-        } catch {}
-        try { window.setSessionStatus?.(`Shot ${shotIdx+1} in progress…`); } catch {}
-      };
-      const onSummary = async (e) => {
-        // In demo uploads we present a frozen clean arc; in live sessions keep coach mode active
-        try {
-          if (!window.__SESSION_ACTIVE) {
-            window.setOverlayMode?.('clean');
-            window.__overlayFreeze = true;
-          }
-        } catch {}
-        const detail = (e && e.detail) || (window.__lastSummary || {});
-        const shot = {
-          idx: shotIdx,
-          t: Date.now(),
-          made: !!detail?.made,
-          arcHeight: detail?.arcHeight ?? null,
-          entryAngle: detail?.entryAngle ?? null,
-          releaseAngle: detail?.releaseAngle ?? null,
-        };
-        try { await postJSON(`/api/sessions/${sessId}/shot`, shot); } catch {}
-        try { await stopRecorderAndUpload(); } catch {}
-        shotIdx++; try { window.__SHOT_IDX = shotIdx; } catch {}
-        try { speak(shot.made ? 'Nice make.' : 'Missed. Adjust and try again.'); } catch {}
-      };
-      window.addEventListener('shot:release', onRelease);
-      window.addEventListener('shot:summary', onSummary);
-
-      // Voice command: end session
-      const stopListen = listenForEndSession('hey doach, end the session', async ()=>{ try { await endSession(); } catch {} });
-      window.__demoStopVoice = stopListen;
-
-      btnStart.disabled = true; btnEnd.disabled = false;
-    } catch (e) {
-      console.warn('startSession failed', e);
-    }
-  }
-
-  async function endSession() {
-    // Delegate: use the canonical UI end routine
-    try { await window.autoEndSessionAndSummarize?.(); } catch {}
-    try { await stopRecorderAndUpload(); } catch {}
-    try { window.__SESSION_ACTIVE = false; } catch {}
-    try { btnStart.disabled = false; btnEnd.disabled = true; } catch {}
-  }
-
-  btnStart.addEventListener('click', startSession);
-  btnEnd.addEventListener('click', endSession);
-  // HUD integration: respond to bottom bar events
-  window.addEventListener('hud:end-session', () => { try { endSession(); } catch {} });
-  window.addEventListener('hud:start-session', () => { try { startSession(); } catch {} });
+  // Voice exit (optional; ignores if voice isn’t available)
+  try {
+    const stopListen = listenForEndSession?.('hey doach, end the session', async () => { await endSession('voice'); });
+    window.__voiceEndHandle = stopListen;
+  } catch {}
 })();
+
+/* ------------------------ exports (optional) ------------------------ */
+window.doachSession = {
+  start: startSession,
+  end: endSession,
+  getCap: getSessionCap,
+  setCap: setSessionCap,
+  get id(){ return __sid; }
+};

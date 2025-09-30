@@ -106,6 +106,23 @@ window.SHOT_SCORER_MODE ??= 'weighted';   // 'weighted' | 'hybrid'
 window.SHOT_SCORER_MODE ??= (localStorage.getItem('doach_scorer_mode') || 'weighted');
 window.WEIGHTED_THRESH  ??= Number(localStorage.getItem('doach_weighted_thresh')) || WEIGHTED_THRESH;
 
+export function getShotScoreForSummary(shot) {
+  try {
+    // Prefer a per-shot score if shot_logger stored it
+    if (Number.isFinite(shot?.weightedScore)) return Math.round(shot.weightedScore);
+    // Or compute if the scorer exposes a function
+    if (typeof window.computeWeightedShotScore === 'function' && shot?.poseSnapshot) {
+      return Math.round(window.computeWeightedShotScore(shot.poseSnapshot));
+    }
+    // Or read the last from shotLog if it writes there
+    const last = window.shotLog?.at?.(-1);
+    if (Number.isFinite(last?.weightedScore)) return Math.round(last.weightedScore);
+  } catch {}
+  return null;
+}
+
+
+
 export function getScorerMode() {
   return String(window.SHOT_SCORER_MODE || 'weighted').toLowerCase();
 }

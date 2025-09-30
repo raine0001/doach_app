@@ -74,5 +74,6 @@ function coachSpeak(text) {
   } catch {}
 }
 
-try { window.coachSpeak = speak; } catch {}
 try { window.doachSpeak = doachSpeak; } catch {}
+try { window.coachSpeak = doachSpeak; } catch {}
+
