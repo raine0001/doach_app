@@ -163,13 +163,17 @@ async function playSpeechJob(text, opts = {}) {
   const forceServer = opts.forceServer === true
     || prefs.forceServer === true
     || localStorage.getItem(FORCE_SERVER_TTS_KEY) === 'true';
-  let provider = rawProvider;
+  let provider = rawProvider || 'server';
 
   if (provider === 'openai' || provider === 'gpt' || provider === 'ai') provider = 'server';
-  if (!forceServer) {
-    provider = 'web';
-    try { localStorage.setItem('doach_tts', JSON.stringify({ ...prefs, provider: 'web' })); } catch {}
-  }
+  if (provider !== 'server' && provider !== 'web') provider = 'server';
+  if (forceServer) provider = 'server';
+
+  try {
+    const nextPrefs = { ...prefs, provider };
+    localStorage.setItem('doach_tts', JSON.stringify(nextPrefs));
+    localStorage.setItem('doach_voice_provider', provider);
+  } catch {}
 
   const voice = opts.voice
     || prefs.voice

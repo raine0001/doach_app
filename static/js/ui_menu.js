@@ -1261,15 +1261,51 @@ async function openMyDoachPanel(){
       } catch {}
     }
 
-    function applyNow(){
+    async function applyNow(){
       const p = readUI();
-      window.doachSetPrefs?.(p);
-      speakWithUnlock("Voice settings applied.");
+      window.doachSetPrefs?.({ ...p, audioOn: true });
+      try {
+        localStorage.setItem('doach_muted','false');
+        window.__coachMuted = false;
+        const prefs = {
+          provider: p.tts || 'server',
+          voice: p.voice || 'alloy',
+          speed: p.speed,
+          pitch: p.pitch,
+          volume: p.volume,
+          bassDb: p.bassDb,
+          trebleDb: p.trebleDb,
+          lang: p.lang
+        };
+        localStorage.setItem('doach_tts', JSON.stringify(prefs));
+        localStorage.setItem('doach_voice_provider', prefs.provider);
+        localStorage.setItem('doach_voice', prefs.voice);
+      } catch {}
+      try { await window.ensureMicPrimed?.(); } catch {}
+      await speakWithUnlock("Voice settings applied.");
     }
-    function testVoice(){
+    async function testVoice(){
       const p = readUI();
-      window.doachSetPrefs?.(p);
-      speakWithUnlock("This is your Doach voice.");
+      window.doachSetPrefs?.({ ...p, audioOn: true });
+      try {
+        localStorage.setItem('doach_muted','false');
+        window.__coachMuted = false;
+        const prefs = {
+          provider: p.tts || 'server',
+          voice: p.voice || 'alloy',
+          speed: p.speed,
+          pitch: p.pitch,
+          volume: p.volume,
+          bassDb: p.bassDb,
+          trebleDb: p.trebleDb,
+          lang: p.lang
+        };
+        localStorage.setItem('doach_tts', JSON.stringify(prefs));
+        localStorage.setItem('doach_voice_provider', prefs.provider);
+        localStorage.setItem('doach_voice', prefs.voice);
+      } catch {}
+      try { await window.ensureMicPrimed?.(); } catch {}
+      await speakWithUnlock("This is your Doach voice.");
     }
     async function savePreset(){
       const name = (nameInp.value||'').trim();

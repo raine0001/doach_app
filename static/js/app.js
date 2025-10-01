@@ -1,4 +1,4 @@
-// app.js — Single-owner: release + microclip. No cap checks. No enders. No UI table.
+﻿// app.js — Single-owner: release + microclip. No cap checks. No enders. No UI table.
 // Emits:  shot:release, shot:summary
 // Reads:  getLockedHoopBox, releaseGate, playerState
 // Calls:  video_ui (for prompts only), microclip upload endpoint
@@ -988,4 +988,10 @@ const bootPipelines = async () => {
     pushEvent(type, detail);
   };
 })();
+window.addEventListener('hud:start-session', () => {
+  try { window.startObserverStreaming?.(2); } catch {}
+}, { passive: true });
 
+window.addEventListener('hud:end-session', () => {
+  try { window.stopObserverStreaming?.(); } catch {}
+}, { passive: true });
