@@ -50,6 +50,7 @@ window.__MICROCLIP_MS   = window.__MICROCLIP_MS ?? 3000;  // 3s clip
 
 window.NEXT_SHOT_UNLOCK_MS = 800;     // UI unlock sooner
 window.DOACH_RELEASE_TRACE = true;    // logs snapshots and forced summaries
+window.ENTRY_ARM_COOLDOWN_MS = window.ENTRY_ARM_COOLDOWN_MS ?? 1500; // ms cooldown after arming before release allowed
 
 // set some sane release gate defaults
 try { setReleaseKnobs({ scoreThresh: 0.7, streakNeed: 1, hudScoreTrip: 0.5 }); } catch {}
@@ -460,6 +461,7 @@ function armAfterArmDown(opts = {}) {
       if (streak >= needDownFrames) {
         clearInterval(window.__armDownTimer);
         window.__shotTrackingArmed = true;
+        try { window.__ENTRY_ARM_BLOCK_UNTIL = Date.now() + Number(window.ENTRY_ARM_COOLDOWN_MS || 1500); } catch {}
         window.dispatchEvent(new CustomEvent('hud:armed'));
       }
     } catch { streak = 0; }
@@ -482,7 +484,10 @@ function scheduleArmWhenReady(delay=200){
       if (Array.isArray(ls) && ls.length >= 33) streak++; else streak=0;
       await new Promise(r=>setTimeout(r,60));
     }
-    if (streak>=need) window.__shotTrackingArmed = true;
+    if (streak>=need) {
+      window.__shotTrackingArmed = true;
+      try { window.__ENTRY_ARM_BLOCK_UNTIL = Date.now() + Number(window.ENTRY_ARM_COOLDOWN_MS || 1500); } catch {}
+    }
   }, Math.max(0,delay));
 }
 window.scheduleArmWhenReady = scheduleArmWhenReady;
@@ -688,6 +693,7 @@ function startPreDetectWarm(videoEl){
 
   function tryRelease() {
     if (window.__shotTrackingArmed !== true) return;
+    if (Date.now() < (window.__ENTRY_ARM_BLOCK_UNTIL || 0)) return;
     const hist = (window.playerState?.frameHistory || []).slice(-8);
     const gate = window.releaseGate ? window.releaseGate(hist) : { released: false };
     if (!gate.released) return;
@@ -987,11 +993,30 @@ const bootPipelines = async () => {
   window.__logObserverEvent = function logObserverEvent(type, detail){
     pushEvent(type, detail);
   };
-})();
-window.addEventListener('hud:start-session', () => {
-  try { window.startObserverStreaming?.(2); } catch {}
-}, { passive: true });
 
-window.addEventListener('hud:end-session', () => {
-  try { window.stopObserverStreaming?.(); } catch {}
-}, { passive: true });
+  window.setObserverAutoStreaming = function(enabled = true, fps = 2){
+    try { localStorage.setItem('doach_observer_auto', enabled ? '1' : '0'); } catch {}
+    try { localStorage.setItem('doach_observer_fps', String(fps)); } catch {}
+    if (enabled) return window.startObserverStreaming(fps);
+    window.stopObserverStreaming();
+    return true;
+  };
+
+  window.getObserverAutoStreaming = function(){
+    try { return localStorage.getItem('doach_observer_auto') === '1'; } catch { return false; }
+  };
+
+  window.addEventListener('hud:start-session', () => {
+    try {
+      if (window.getObserverAutoStreaming?.()) {
+        const fps = Number(localStorage.getItem('doach_observer_fps')) || 2;
+        window.startObserverStreaming?.(fps);
+      }
+    } catch {}
+  }, { passive: true });
+
+  window.addEventListener('hud:end-session', () => {
+    try { window.stopObserverStreaming?.(); } catch {}
+  }, { passive: true });
+
+})();
