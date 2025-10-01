@@ -738,15 +738,41 @@ document.addEventListener('DOMContentLoaded', ()=>{
   initOverlay?.(ov); 
   syncOverlayToVideo();
 
-  const bootPipelines = async () => {
+  window.__IOS_VID_LOCK = window.__IOS_VID_LOCK || {};
+  window.__IOS_VID_LOCK.get = () => window.__IOS_VID_LOCK.state || 'open';
+  window.__IOS_VID_LOCK.set = (s) => { window.__IOS_VID_LOCK.state = s; };
+
+const bootPipelines = async () => {
     try { if (!window.poseDetector) await initPoseDetector?.(); } catch {}
     startPreDetectWarm(v);
     scheduleArmWhenReady(0);
   };
-  v?.addEventListener('loadedmetadata', ()=>bootPipelines(), { once:true });
-  if (v?.readyState >= 1) { bootPipelines(); }
+  v?.addEventListener('loadedmetadata', ()=>{
+    window.__IOS_VID_LOCK.set('open');
+    bootPipelines();
+  }, { once:true });
+  if (v?.readyState >= 1) {
+    window.__IOS_VID_LOCK.set('open');
+    bootPipelines();
+  }
 
-  document.getElementById('useCameraBtn')?.addEventListener('click', ()=>startCamera());
+  document.getElementById('useCameraBtn')?.addEventListener('click', async ()=>{
+    window.__IOS_VID_LOCK.set('opening');
+    try { await startCamera(); } finally { window.__IOS_VID_LOCK.set('open'); }
+  });
+
+  window.addEventListener('orientationchange', async () => {
+    window.__IOS_VID_LOCK.set('rotating');
+    try {
+      const label = window.getCameraFacing ? window.getCameraFacing() : null;
+      const ok = label && window.setCameraFacing ? await window.setCameraFacing(label) : false;
+      if (!ok) {
+        try { await startCamera(); } catch (err) { console.warn('[camera] rehydrate after rotation failed', err); }
+      }
+    } finally {
+      window.__IOS_VID_LOCK.set('open');
+    }
+  });
 
   // Re-arm when hoop is locked/confirmed
   window.addEventListener('hoop:locked',    ()=>{ window.startShotTrackingCountdown?.(5); setTimeout(()=>scheduleArmWhenReady(0), 5050); }, { passive:true });

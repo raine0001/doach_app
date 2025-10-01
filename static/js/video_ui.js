@@ -291,13 +291,26 @@ export function mountSessionHUD() {
       } catch {}
 
       const wasMuted = btn.dataset.muted === '1';
-      applyMute(btn, false, wasMuted);
+      applyMute(btn, !wasMuted, true);
     }, { passive: true });
 
     // one-time unlock for early touch
     window.addEventListener('touchstart', () => {
       try { __unlockIOSAudioOnce(); } catch {}
     }, { once: true, passive: true });
+    window.addEventListener('pointerdown', () => {
+      try { __unlockIOSAudioOnce(); } catch {}
+    }, { once: true, passive: true });
+    window.addEventListener('mousedown', () => {
+      try { __unlockIOSAudioOnce(); } catch {}
+    }, { once: true, passive: true });
+    window.addEventListener('hud:start-session', () => {
+      try {
+        const fn = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : __unlockIOSAudioOnce;
+        const maybe = (typeof fn === 'function') ? fn() : null;
+        if (maybe && typeof maybe.catch === 'function') maybe.catch(() => {});
+      } catch {}
+    }, { once: true });
   }
 
   // Wait for button if HUD mounts late
@@ -392,12 +405,105 @@ window.updateSessionHUD = updateSessionHUD;
   async function startWithConstraints(cons){
     const v = document.getElementById('videoPlayer');
     if (!v) return false;
-    try { v.setAttribute('playsinline',''); v.muted = true; } catch {}
-    const stream = await navigator.mediaDevices.getUserMedia({ video: cons, audio: false });
-    v.srcObject = stream;
-    try { await v.play?.(); } catch {}
-    try { syncOverlayToVideo?.(); } catch {}
-    return true;
+
+    const preferredSizing = {
+      width: { ideal: 1280 },
+      height: { ideal: 720 },
+      frameRate: { ideal: 30 }
+    };
+
+    const normalize = (raw) => {
+      if (!raw) return {};
+      if (typeof raw === 'string') return { facingMode: raw };
+      if (typeof raw === 'object') return { ...raw };
+      return {};
+    };
+
+    const buildAttempts = (raw) => {
+      const base = normalize(raw);
+      const attempts = [];
+      const seen = new Set();
+      const pushUnique = (obj) => {
+        if (!obj) return;
+        const sig = JSON.stringify(obj);
+        if (seen.has(sig)) return;
+        seen.add(sig);
+        attempts.push(obj);
+      };
+      pushUnique({ ...preferredSizing, ...base });
+      pushUnique(base);
+      pushUnique({ ...preferredSizing });
+      return attempts;
+    };
+
+    const attempts = buildAttempts(cons);
+    for (const videoCons of attempts) {
+      let stream = null;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ video: videoCons, audio: false });
+        try {
+          v.setAttribute('playsinline','');
+          v.playsInline = true;
+          v.muted = true;
+          v.autoplay = true;
+        } catch {}
+        v.srcObject = stream;
+
+        if (v.readyState < 1 || !v.videoWidth || !v.videoHeight) {
+          await new Promise((resolve) => {
+            let done = false;
+            let timer = null;
+            const cleanup = () => {
+              if (done) return;
+              done = true;
+              if (timer != null) {
+                try { clearTimeout(timer); } catch {}
+              }
+              try { v.removeEventListener('loadedmetadata', onMeta); } catch {}
+              try { v.removeEventListener('error', onError); } catch {}
+              resolve();
+            };
+            const onMeta = () => cleanup();
+            const onError = () => cleanup();
+            timer = setTimeout(cleanup, 650);
+            v.addEventListener('loadedmetadata', onMeta, { once: true });
+            v.addEventListener('error', onError, { once: true });
+          });
+        }
+
+        try {
+          await v.play();
+        } catch (err) {
+          try { console.warn('[camera] video play blocked', err); } catch {}
+          throw err;
+        }
+
+        try { syncOverlayToVideo?.(); } catch {}
+        try {
+          requestAnimationFrame(() => {
+            try { syncOverlayToVideo?.(); } catch {}
+          });
+        } catch {}
+        try { window.scheduleSyncOverlay?.(); } catch {}
+
+        return true;
+      } catch (err) {
+        const isLastAttempt = (videoCons === attempts[attempts.length - 1]);
+        try {
+          const log = isLastAttempt ? (console.warn || console.log) : (console.debug || console.log);
+          if (typeof log === 'function') {
+            log.call(console, isLastAttempt ? '[camera] getUserMedia failed' : '[camera] getUserMedia retry', err);
+          }
+        } catch {}
+        if (stream?.getTracks) {
+          try { stream.getTracks().forEach((t) => { try { t.stop(); } catch {}; }); } catch {}
+        }
+        if (v.srcObject === stream) {
+          try { v.srcObject = null; } catch {}
+        }
+      }
+    }
+    return false;
   }
 
   async function restartCamera(label){

@@ -36,23 +36,28 @@
   <script>
     // same-origin paths for your 10 clips baked into assets
     const sid = "20250930_204140_927675";
-    const base = `/static/sessions/${sid}/clips`;
+    const base = `/static/arc_mm/sessions/${sid}/clips`;
     window.__DEMO_SHOTS = Array.from({length: 10}, (_,i) => {
       const n = i + 1;
       return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
     });
 
     // worker + fps hints
-    window.DETECTOR_WORKER_PATH = "/static/detector.worker.js";
+    
+    window.DETECTOR_WORKER_PATH = "/static/arc_mm/detector.worker.js";
     window.__videoFPS = 30;
   </script>
 
 
   <script>
     // Make sure the detector worker is resolvable from this page
-    window.DETECTOR_WORKER_PATH = "/static/js/detector.worker.js";
+    window.DETECTOR_WORKER_PATH = "/static/arc_mm/detector.worker.js";
     window.__videoFPS = 30;
   </script>
+  <script src="/static/js/shot_utils.js"></script>
+  <script src="/static/js/ball_tracker.js"></script>
+  <script src="/static/js/shot_logger.js"></script>
+  <script src="/static/js/fix_overlay_display.js"></script>
   <script src="/static/arc_mm/shot_arc.js"></script>
   <script type="module" src="/static/arc_mm/arc_mm.js"></script>
 

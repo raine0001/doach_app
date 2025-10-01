@@ -1,7 +1,7 @@
 // shot_arc.js — Canonical release/exit timing from pose + ball + hoop
 // Focus: define robust shot release and exit points with small delays to improve trail quality.
 
-import { stepFBFArc, fillArcGaps } from './ball_tracker.js';
+import { stepFBFArc, fillArcGaps } from '/static/js/ball_tracker.js';
 
 // Tunables (overridable via window.*)
 const CFG = {

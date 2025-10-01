@@ -1,6 +1,10 @@
 // Legacy loader that backfills the ES module version of shot_arc when this file is included
 // via a classic <script> tag (no type="module"). It keeps older entrypoints working while
 // newer code imports /static/js/shot_arc.module.js directly.
+
+
+
+
 (function legacyShotArcBootstrap(){
   if (typeof window === 'undefined' || typeof document === 'undefined') {
     return;
@@ -35,7 +39,7 @@
   const src = (current && current.src) || '';
   const moduleUrl = (() => {
     const match = src.match(/^(.*\/)?shot_arc\.js(\?.*)?$/i);
-    if (!match) return '/static/js/shot_arc.module.js';
+    if (!match) return 'shot_arc.module.js';
     const prefix = match[1] || '';
     const suffix = match[2] || '';
     return `${prefix}shot_arc.module.js${suffix}`;
