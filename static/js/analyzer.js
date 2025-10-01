@@ -1,4 +1,4 @@
-// analyzer.js â€” RVFC + FBF analyzers (extracted from app.js)
+// analyzer.js  RVFC + FBF analyzers (extracted from app.js)
 import { ensureOverlayCss, syncOverlayToVideo, updateDebugOverlay, drawLiveOverlay, sendFrameToDetect } from '../../static/js/fix_overlay_display.js';
 import { stabilizeLockedHoop, getLockedHoopBox, asTopLeft, canonHoop, filterObjectsToLockedHoop, autoDetectHoop } from './hoop_tracker.js';
 import { updatePlayerTracker, playerState } from '../../static/js/player_tracker.js';

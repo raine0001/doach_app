@@ -3,7 +3,7 @@
 // NOTE: If analyzer.js/hoop_tracker.js live under /static/arc_mm/,
 // change the imports to '/static/arc_mm/analyzer.js' and '/static/arc_mm/hoop_tracker.js'
 
-import { analyzeVideoFrameByFrame, runShotFBF } from './analyzer.js';
+import { analyzeVideoFrameByFrame, runShotFBF } from '../static/js/analyzer.js';
 import { getLockedHoopBox, autoDetectHoop } from './hoop_tracker.js';
 
 (function ArcMM() {

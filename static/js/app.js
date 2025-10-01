@@ -785,3 +785,207 @@ const bootPipelines = async () => {
 
 
 
+(function installObserverStreamer(){
+  if (window.__observerStreamerInstalled) return;
+  window.__observerStreamerInstalled = true;
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { alpha: false });
+  let timer = null;
+  let inFlight = false;
+  let seq = 0;
+  let targetSid = null;
+  const EVENT_CAP = 80;
+  const events = [];
+
+  function pushEvent(type, detail){
+    try {
+      events.push({
+        type: String(type || 'event'),
+        detail: detail ?? null,
+        frame: Number(window.__AN_IDX || null) || null,
+        ts: Date.now()
+      });
+      if (events.length > EVENT_CAP) events.splice(0, events.length - EVENT_CAP);
+    } catch {}
+  }
+
+  function safePoint(pt){
+    if (!pt || typeof pt !== 'object') return null;
+    const x = Number(pt.x);
+    const y = Number(pt.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const out = { x, y };
+    if (Number.isFinite(pt.z)) out.z = Number(pt.z);
+    return out;
+  }
+
+  function copyTrail(list, cap = 140){
+    if (!Array.isArray(list) || !list.length) return [];
+    const out = [];
+    const start = Math.max(0, list.length - cap);
+    for (let i = start; i < list.length; i += 1){
+      const pt = safePoint(list[i]);
+      if (pt) out.push(pt);
+    }
+    return out;
+  }
+
+  function copyObjects(objs){
+    if (!Array.isArray(objs)) return [];
+    return objs.slice(0, 12).map((o) => {
+      const label = o?.label || o?.class || o?.type || null;
+      const score = Number.isFinite(o?.score) ? Number(o.score) : (Number(o?.confidence) || null);
+      let box = null;
+      if (Array.isArray(o?.box)) box = o.box.slice(0, 6);
+      else if (Array.isArray(o?.bbox)) box = o.bbox.slice(0, 6);
+      else if (Array.isArray(o?.rect)) box = o.rect.slice(0, 6);
+      return { label, score, box };
+    });
+  }
+
+  function safeClone(src){
+    if (!src || typeof src !== 'object') return null;
+    try { return JSON.parse(JSON.stringify(src)); }
+    catch { return null; }
+  }
+
+  const shotFields = ['id','idx','frameStart','frameEnd','made','pending','result','gate','poseSnapshot','trail','clip'];
+  function copyShots(list){
+    if (!Array.isArray(list)) return [];
+    return list.slice(-8).map((shot) => {
+      if (!shot || typeof shot !== 'object') return null;
+      const out = {};
+      shotFields.forEach((key) => {
+        if (shot[key] == null) return;
+        if (key === 'trail') out.trail = copyTrail(shot.trail, 80);
+        else if (key === 'poseSnapshot') {
+          const pose = safeClone(shot.poseSnapshot);
+          if (pose?.landmarks) delete pose.landmarks;
+          out.poseSnapshot = pose;
+        } else if (typeof shot[key] === 'object') {
+          out[key] = safeClone(shot[key]);
+        } else {
+          out[key] = shot[key];
+        }
+      });
+      return out;
+    }).filter(Boolean);
+  }
+
+  function buildState(width, height){
+    const frameIdx = Number(window.__AN_IDX || null) || null;
+    const bs = window.ballState || {};
+    const arc = window.ballArc || {};
+    const detectSrc = window.__DETECT_SOURCE || (window.__forceServerDetect ? 'server' : 'client');
+    const last = window.__lastSummary || null;
+    const gate = window.__releaseGateLast || null;
+    const pose = Number(window.__poseGateStreak ?? window.__POSE_STREAK__ ?? 0);
+    const lastFrame = window.lastDetectedFrame || {};
+    const shots = copyShots(window.__shotList);
+
+    return {
+      ts: Date.now(),
+      frame: frameIdx,
+      seq: ++seq,
+      detectSource: detectSrc,
+      overlayMode: window.__OVERLAY_MODE || null,
+      view: { vw: width, vh: height },
+      bg: { width, height },
+      events: events.slice(-40),
+      ballStateTrailLen: Array.isArray(bs.trail) ? bs.trail.length : 0,
+      ballArcTrailLen: Array.isArray(arc.trail) ? arc.trail.length : 0,
+      ballArcRefLen: Array.isArray(arc.refinedTrail) ? arc.refinedTrail.length : 0,
+      ballState: {
+        state: bs.state || null,
+        releaseFrame: bs.releaseFrame ?? null,
+        proxEnterFrame: bs.proxEnterFrame ?? null,
+        proxExitFrame: bs.proxExitFrame ?? null,
+        shots: Array.isArray(bs.frozenShots) ? bs.frozenShots.length : (bs.shots ?? null),
+        trail: copyTrail(bs.trail, 160)
+      },
+      proxRect: safeClone(window.__proxRect || window.__PROX_RECT || null),
+      ballArc: {
+        trail: copyTrail(arc.trail, 160),
+        refinedTrail: copyTrail(arc.refinedTrail, 160),
+        releasePoint: safeClone(arc.releasePoint),
+        apexPoint: safeClone(arc.apexPoint),
+        rimCrossingPoint: safeClone(arc.rimCrossingPoint)
+      },
+      lastSummary: safeClone(last),
+      ballStateFrozen: Array.isArray(bs.frozenShots) ? copyShots(bs.frozenShots) : [],
+      objects: copyObjects(lastFrame.objects),
+      shots,
+      shotCount: Array.isArray(window.__shotList) ? window.__shotList.length : (window.__SESSION_SHOT_COUNT || 0),
+      pose: { streak: pose },
+      analyzer: { frame: frameIdx },
+      gate: gate && typeof gate === 'object' ? safeClone(gate.best || gate) : null,
+      detect: lastFrame._source || null
+    };
+  }
+
+  function stopStreaming(){
+    if (timer) { clearInterval(timer); timer = null; }
+    targetSid = null;
+  }
+
+  async function sendSnapshot(){
+    if (!targetSid || inFlight) return;
+    const video = document.getElementById('videoPlayer');
+    const overlay = document.getElementById('overlay');
+    if (!video || !video.videoWidth || !video.videoHeight) return;
+    const width = video.videoWidth;
+    const height = video.videoHeight;
+    canvas.width = width;
+    canvas.height = height;
+    try { ctx.drawImage(video, 0, 0, width, height); } catch {}
+    try {
+      if (overlay && overlay.width && overlay.height) {
+        ctx.drawImage(overlay, 0, 0, overlay.width, overlay.height, 0, 0, width, height);
+      }
+    } catch {}
+    const blob = await new Promise((resolve) => { canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.7); });
+    if (!blob) return;
+    const state = buildState(width, height);
+    const form = new FormData();
+    form.append('image', blob, `frame-${Date.now()}.jpg`);
+    try { form.append('state', JSON.stringify(state)); } catch {}
+    const base = (typeof window.__API_BASE === 'string') ? window.__API_BASE : '';
+    const url = base + '/api/sessions/' + encodeURIComponent(targetSid) + '/observer_frame';
+    inFlight = true;
+    try {
+      await fetch(url, { method: 'POST', body: form, credentials: 'include' });
+    } catch (err) {
+      console.warn('[observer] upload failed', err);
+    } finally {
+      inFlight = false;
+    }
+  }
+
+  window.startObserverStreaming = function startObserverStreaming(fps = 2, sidOverride){
+    const sid = sidOverride || window.__SESSION_ID || null;
+    if (!sid) {
+      console.warn('[observer] no session id available');
+      return false;
+    }
+    targetSid = String(sid);
+    const intervalMs = Math.max(300, Math.round(1000 / Math.max(1, Number(fps) || 1)));
+    stopStreaming();
+    timer = setInterval(sendSnapshot, intervalMs);
+    events.length = 0;
+    pushEvent('observer:start', { intervalMs });
+    sendSnapshot();
+    console.info(`[observer] streaming to ${targetSid} every ${intervalMs}ms`);
+    return true;
+  };
+
+  window.stopObserverStreaming = function stopObserverStreaming(){
+    pushEvent('observer:stop', {});
+    stopStreaming();
+  };
+
+  window.__logObserverEvent = function logObserverEvent(type, detail){
+    pushEvent(type, detail);
+  };
+})();
+

@@ -470,6 +470,14 @@
             }
           } catch {}
           try {
+            await window.requestInitialMediaAccess?.({ video: true, audio: true });
+          } catch (err) {
+            try { console.warn('[media] initial access failed', err); } catch {}
+          }
+          try { await window.ensureMicPrimed?.(); } catch {}
+          try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch {}
+          try { window.doachVoice?.on?.(); } catch {}
+          try {
             await window.primeCoachAudio?.();
           } catch {}
           try {
