@@ -144,6 +144,15 @@ async function startSession() {
 }
 
 async function persistShotFromSummary(detail) {
+  console.debug('[persistShot] detail', detail);
+
+  const poseRelease = window.__POSE_RELEASES?.get?.(detail?.shotId) || null;
+  if (poseRelease) {
+    detail.poseSnapshot = typeof structuredClone === 'function'
+      ? structuredClone(poseRelease)
+      : JSON.parse(JSON.stringify(poseRelease));
+  }
+
   // Only persist if we have a session id; otherwise try to start one lazily
   if (!__sid) {
     try { await startSession(); } catch {}

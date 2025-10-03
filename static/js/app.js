@@ -168,7 +168,14 @@ window.poseDetectSerial = poseDetectSerial;
     try {
       const list = window.__shotList || [];
       const row  = list.find(r => r && (r.id === shotId || r.idx === shotId)) || list.at?.(-1) || {};
+      const hadRowSnapshot = !!row?.poseSnapshot;
       const snap = row?.poseSnapshot || window.__LAST_POSE_SNAP || null;
+      if (!hadRowSnapshot && snap) {
+        console.warn('[pose:summary] using cached pose snapshot', { shotId });
+      }
+      if (!snap) {
+        console.error('[pose:summary] no pose snapshot available for summary', { shotId, lastPoseCached: !!window.__LAST_POSE_SNAP });
+      }
 
       const sum = {
         id: shotId,
@@ -178,7 +185,9 @@ window.poseDetectSerial = poseDetectSerial;
       };
       window.recordShotSummary?.(sum);
       window.dispatchEvent(new CustomEvent('shot:summary', { detail: sum }));
-    } catch {}
+    } catch (err) {
+      console.error('[pose:summary] emit failed', { shotId, error: String(err) });
+    }
   }
   window.emitMicroclipSummary = emitMicroclipSummary; // keep fallback callable
 
@@ -304,6 +313,23 @@ function shotArcProx(hoopBox){
 })();
 
 
+function clonePoseSnapshotLocal(snap) {
+  if (!snap || typeof snap !== 'object') return null;
+  try { return structuredClone ? structuredClone(snap) : JSON.parse(JSON.stringify(snap)); } catch {
+    try { return JSON.parse(JSON.stringify(snap)); } catch { return null; }
+  }
+}
+
+function setPoseIfMissing(shotId, snap) {
+  if (!snap || typeof snap !== 'object') return;
+  try {
+    const map = window.__shots;
+    if (map?.get?.(shotId)?.poseSnapshot) return;
+    const cloned = clonePoseSnapshotLocal(snap) || snap;
+    window.updateShot?.(shotId, { poseSnapshot: cloned });
+  } catch {}
+}
+
 // ---------- Release emitter (single source) ----------
 (function installReleaseCore(){
   if (window.safeEmitRelease) return;
@@ -348,27 +374,72 @@ function shotArcProx(hoopBox){
     }
 
     // Capture the release snapshot from recent history (not the idle/reset pose)
+    const poseHistory = window.playerState?.frameHistory || [];
+    const poseHistoryFrames = poseHistory.slice(-12)
+      .map(f => Number.isFinite(f?.frame) ? f.frame : null)
+      .filter(f => f !== null);
+    let poseCaptureSource = 'history';
+    let poseCaptureOk = false;
+    let poseCaptureError = null;
+    let releaseSnapshot = null;
+    const summarizePose = (snap) => {
+      if (!snap || typeof snap !== 'object') return null;
+      const keys = ['stanceWidthFeet','stanceWidth','stanceRatio','elbowExtDeg','armVerticalityDeg','torsoLeanAngle','kneeFlex','feetAngleDiff','headToHoopDeg','followThroughHoldFrames'];
+      const out = {};
+      for (const key of keys) {
+        const val = snap[key];
+        if (typeof val === 'number') out[key] = Number(val.toFixed(1));
+      }
+      return out;
+    };
     try {
       const lockedHoop = window.getLockedHoopBox?.() || null;   // OK if null
       let snap = window.snapshotAtRelease?.(lockedHoop) || null;
 
-      // Failsafe: if history picker failed, fall back to current keypoints once
       if (!snap) {
+        poseCaptureSource = 'history-miss';
         const kps = window.playerState?.keypoints || null;
         snap = window.extractPoseSnapshot?.(kps, lockedHoop) || null;
+        if (snap) poseCaptureSource = 'current-keypoints';
       }
 
       if (snap) {
-        window.updateShot?.(shotId, { poseSnapshot: snap });
+        releaseSnapshot = snap;
         window.__LAST_POSE_SNAP = snap; // always refresh to per-shot release
+        poseCaptureOk = true;
+      } else if (poseCaptureSource === 'history') {
+        poseCaptureSource = 'empty-history';
       }
-    } catch {}
-
+    } catch (err) {
+      poseCaptureError = err;
+      poseCaptureSource = 'error';
+    }
 
     // Create shot record (UI) and assign identity
     window.__REL_LAST_FIRE_MS = now;
     const rec    = window.createShot?.();
     const shotId = rec?.id || (Number(window.__SHOT_ID || 0) || 1);
+
+    if (releaseSnapshot) {
+      setPoseIfMissing(shotId, releaseSnapshot);
+      console.log('[shot:update] release snapshot set', { shotId, snapshot: summarizePose(releaseSnapshot) });
+    }
+
+    if (window.DOACH_RELEASE_TRACE === true || !poseCaptureOk) {
+      const payload = {
+        shotId,
+        frame: fnum,
+        via,
+        poseCaptureOk,
+        poseCaptureSource,
+        historyFrames: poseHistory.length,
+        historyFrameIds: poseHistoryFrames,
+        snapshot: summarizePose(releaseSnapshot)
+      };
+      if (poseCaptureError) payload.poseCaptureError = String(poseCaptureError);
+      const logFn = poseCaptureOk ? console.log : console.warn;
+      try { logFn('[pose:release] capture status', JSON.stringify(payload)); } catch { logFn('[pose:release] capture status', payload); }
+    }
 
     // Backend marker (async, best-effort)
     (async ()=>{
@@ -397,27 +468,58 @@ function shotArcProx(hoopBox){
     }
 
     // ===== BRUTAL MODE: guarantee usable pose + a summary even if clip stalls =====
+    let snapNowStatus = 'not-run';
+    let snapNowSummary = null;
     try {
-      // 1) Grab a fresh snapshot right now and attach it to the shot row and cache.
       const snapNow = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
       if (snapNow) {
         window.__LAST_POSE_SNAP = snapNow;
-        window.updateShot?.(shotId, { poseSnapshot: snapNow });
+        // window.updateShot?.(shotId, { poseSnapshot: snapNow });
+        setPoseIfMissing(shotId, snapNow);
+        snapNowStatus = 'captured';
+        snapNowSummary = summarizePose(snapNow);
+      } else {
+        snapNowStatus = 'empty';
       }
-    } catch {}
+    } catch (err) {
+      snapNowStatus = 'error';
+      console.warn('[pose:brutal] immediate capture error', { shotId, frame: fnum, error: String(err) });
+    }
+    if (window.DOACH_RELEASE_TRACE === true || snapNowStatus !== 'captured') {
+      const payload = { shotId, frame: fnum, snapNowStatus, snapshot: snapNowSummary || null };
+      if (!payload.snapshot) delete payload.snapshot;
+      console.log('[pose:brutal] immediate capture status', payload)
+    }
 
     setTimeout(() => {
+      let snapLaterStatus = 'not-run';
+      let snapLaterSummary = null;
       try {
-        // 2) Re-sample once more after a short beat, then force-emit another summary.
-        //    Yes, this may double-speak. You said you don’t care tonight.
         const snapLater = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
         if (snapLater) {
           window.__LAST_POSE_SNAP = snapLater;
-          window.updateShot?.(shotId, { poseSnapshot: snapLater });
+          //window.updateShot?.(shotId, { poseSnapshot: snapLater });
+          setPoseIfMissing(shotId, snapLater);
+          snapLaterStatus = 'captured';
+          snapLaterSummary = summarizePose(snapLater);
+        } else {
+          snapLaterStatus = 'empty';
         }
         window.emitMicroclipSummary?.(shotId);
-      } catch {}
+      } catch (err) {
+        snapLaterStatus = 'error';
+        console.warn('[pose:brutal] delayed capture error', { shotId, frame: fnum, error: String(err) });
+      } finally {
+        if (window.DOACH_RELEASE_TRACE === true || snapLaterStatus !== 'captured') {
+          const payload = { shotId, frame: fnum, snapLaterStatus, snapshot: snapLaterSummary || null };
+          if (!payload.snapshot) delete payload.snapshot;
+          console.log('[pose:brutal] delayed capture status', payload)
+        }
+      }
     }, 650);
+
+
+
 
 
     // Ask coach (UI can overlay tips, voice happens on summary)
@@ -1020,3 +1122,4 @@ const bootPipelines = async () => {
   }, { passive: true });
 
 })();
+

@@ -292,7 +292,6 @@ function preferShotNumber(s) {
 
 // 1) Force the new extractor (do NOT early-return if an old one exists)
 window.extractPoseSnapshot = function extractPoseSnapshot_v2(keypoints, hoopBox){
-  console.log('[coachAssistant] extractPoseSnapshot', keypoints, hoopBox);
   try {
     // ---------- helpers ----------
     const kp = Array.isArray(keypoints) ? keypoints : (window.playerState?.keypoints || []);
@@ -2256,7 +2255,8 @@ function __getPoseSnapshot(){
 
   // ---------- Capture pose content for analysis ----------
   window.capturePoseSnapshot = function(playerState, hoopBox){
-
+    console.log('capturePoseSnapshot called');
+    
     if (!playerState) return null;
     try {
       try { defineExtractPoseSnapshotOnce(); } catch {}
