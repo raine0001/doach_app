@@ -292,6 +292,7 @@ function preferShotNumber(s) {
 
 // 1) Force the new extractor (do NOT early-return if an old one exists)
 window.extractPoseSnapshot = function extractPoseSnapshot_v2(keypoints, hoopBox){
+  console.log('[coachAssistant] extractPoseSnapshot', keypoints, hoopBox);
   try {
     // ---------- helpers ----------
     const kp = Array.isArray(keypoints) ? keypoints : (window.playerState?.keypoints || []);
@@ -530,39 +531,39 @@ window.extractPoseSnapshot = function extractPoseSnapshot_v2(keypoints, hoopBox)
 };
 try { window.__SNAP_IMPL = 'snapshot-v2'; } catch {}
 
-// 2) Rescue hook: if a summary arrives with a bad/old snapshot, recompute it immediately
-(function(){
-  if (window.__summaryResnapWired) return; window.__summaryResnapWired = true;
+// // 2) Rescue hook: if a summary arrives with a bad/old snapshot, recompute it immediately
+// (function(){
+//   if (window.__summaryResnapWired) return; window.__summaryResnapWired = true;
 
-  function looksBad(snap){
-    if (!snap) return true;
-    // old extractor negative lean, or missing core fields
-    if (typeof snap.torsoLeanAngle === 'number' && snap.torsoLeanAngle < -0.1) return true;
-    if (typeof snap.armVerticalityDeg !== 'number') return true;
-    if (typeof snap.shoulderToWristAngle !== 'number') return true;
-    return false;
-  }
+//   function looksBad(snap){
+//     if (!snap) return true;
+//     // old extractor negative lean, or missing core fields
+//     if (typeof snap.torsoLeanAngle === 'number' && snap.torsoLeanAngle < -0.1) return true;
+//     if (typeof snap.armVerticalityDeg !== 'number') return true;
+//     if (typeof snap.shoulderToWristAngle !== 'number') return true;
+//     return false;
+//   }
 
-  window.addEventListener('shot:summary', (e) => {
-    try {
-      const d = e?.detail || {};
-      if (!looksBad(d.poseSnapshot)) return;
+//   window.addEventListener('shot:summary', (e) => {
+//     try {
+//       const d = e?.detail || {};
+//       if (!looksBad(d.poseSnapshot)) return;
 
-      const kps  = window.playerState?.keypoints || null;
-      const hoop = window.getLockedHoopBox?.() || null;
-      const snap = window.extractPoseSnapshot?.(kps, hoop) || null;
-      if (snap) {
-        d.poseSnapshot = snap;                          // fix payload in-place
-        try {
-          // also patch the last UI row so table/overlay match
-          const list = window.__shotList || [];
-          const last = list.at?.(-1);
-          if (last) last.poseSnapshot = snap;
-        } catch {}
-      }
-    } catch {}
-  }, { passive:true });
-})();
+//       const kps  = window.playerState?.keypoints || null;
+//       const hoop = window.getLockedHoopBox?.() || null;
+//       const snap = window.extractPoseSnapshot?.(kps, hoop) || null;
+//       if (snap) {
+//         d.poseSnapshot = snap;                          // fix payload in-place
+//         try {
+//           // also patch the last UI row so table/overlay match
+//           const list = window.__shotList || [];
+//           const last = list.at?.(-1);
+//           if (last) last.poseSnapshot = snap;
+//         } catch {}
+//       }
+//     } catch {}
+//   }, { passive:true });
+// })();
 
 
 
@@ -645,13 +646,15 @@ function getPoseSnapshotFrom(s) {
 
 // Ensure every shot:summary has a poseSnapshot before anyone formats/speaks
 window.addEventListener('shot:summary', (e) => {
-  try {
-    const d = e?.detail || {};
-    if (!d.poseSnapshot) {
-      const s = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
-      if (s) d.poseSnapshot = s;
-    }
-  } catch {}
+  const d = e?.detail || {};
+  const shotId = Number(d.shotId || window.__SHOT_ID || 0) || null;
+  if (d.poseSnapshot) {
+    console.log('[pose:summary] pose snapshot ready', { shotId });
+    return;
+  }
+  const historyFrames = (window.playerState?.frameHistory || []).length;
+  console.error('[pose:summary] pose snapshot missing', { shotId, historyFrames });
+  window.dispatchEvent(new CustomEvent('pose:error', { detail: { shotId, reason: 'missing-summary-snapshot', historyFrames } }));
 }, { passive: true });
 
 
@@ -2253,64 +2256,16 @@ function __getPoseSnapshot(){
 
   // ---------- Capture pose content for analysis ----------
   window.capturePoseSnapshot = function(playerState, hoopBox){
-    try{
-      const kp = playerState?.keypoints||[];
-      // BlazePose indices
-      const NOSE=0, L_SHOULDER=11,R_SHOULDER=12,L_ELBOW=13,R_ELBOW=14,L_WRIST=15,R_WRIST=16;
-      const L_HIP=23,R_HIP=24,L_KNEE=25,R_KNEE=26,L_ANK=27,R_ANK=28,L_HEEL=29,R_HEEL=30,L_TOE=31,R_TOE=32;
 
-      const need = [L_SHOULDER,R_SHOULDER,L_ELBOW,R_ELBOW,L_WRIST,R_WRIST,L_HIP,R_HIP,L_KNEE,R_KNEE,L_ANK,R_ANK,L_TOE,R_TOE]
-        .every(i => kp[i]?.x!=null && kp[i]?.y!=null);
-      if(!need) return null;
-
-      const avg = (a,b)=>({x:(a.x+b.x)/2,y:(a.y+b.y)/2});
-      const shoulder=avg(kp[L_SHOULDER],kp[R_SHOULDER]);
-      const elbow   = avg(kp[L_ELBOW],kp[R_ELBOW]);
-      const wrist   = avg(kp[L_WRIST],kp[R_WRIST]);
-      const hip     = avg(kp[L_HIP],kp[R_HIP]);
-      const knee    = avg(kp[L_KNEE],kp[R_KNEE]);
-      const ank     = avg(kp[L_ANK],kp[R_ANK]);
-
-      const deg = r => Math.round(r*180/Math.PI);
-      const angleDeg=(a,b)=>deg(Math.atan2(a.y-b.y, b.x-a.x));   // vertical-ish measure
-      const signed  =(a,b)=>deg(Math.atan2(b.y-a.y, b.x-a.x));   // signed around body
-
-      // Feet angles (ankle -> toe) and differences / stagger
-      const footAngle = (ankle, toe) => deg(Math.atan2(toe.y-ankle.y, toe.x-ankle.x));
-      const leftFootAngle  = footAngle(kp[L_ANK], kp[L_TOE]);
-      const rightFootAngle = footAngle(kp[R_ANK], kp[R_TOE]);
-      const feetAngleDiff  = Math.abs(leftFootAngle - rightFootAngle);
-      const feetStagger    = Math.abs(kp[L_ANK].y - kp[R_ANK].y);
-
-      // Useful metrics
-      const stanceWidthFeet = Math.abs(kp[L_ANK].x - kp[R_ANK].x);
-      const stanceWidthHip  = Math.abs(kp[L_HIP].x - kp[R_HIP].x); // keep your legacy
-      const kneeFlex        = Math.max(0, (knee.y - hip.y));       // px: bigger = more bend
-      const torsoLeanAngle  = signed(hip, shoulder);               // + forward, - backward
-      const shoulderToWristAngle = angleDeg(shoulder, wrist);      // higher = more vertical arm
-      const releaseAboveShoulder = (wrist.y + elbow.y)/2 < shoulder.y; // y-up is negative screen
-
-      const wristToHoop = hoopBox
-        ? Math.hypot((hoopBox.x + (hoopBox.w||0)/2) - wrist.x, (hoopBox.y + (hoopBox.h||0)/2) - wrist.y)
-        : null;
-
-      return {
-        // keep old names so your code keeps working
-        stanceWidth: stanceWidthHip,
-        kneeFlex,
-        torsoLeanAngle,
-        shoulderToWristAngle,
-        wristToHoop,
-
-        // NEW: explicit heights for your rating rules
-        wristY: wrist.y, elbowY: elbow.y, shoulderY: shoulder.y,
-        releaseAboveShoulder,
-
-        // NEW: feet metrics
-        stanceWidthFeet,
-        leftFootAngle, rightFootAngle, feetAngleDiff, feetStagger
-      };
-    }catch{ return null; }
+    if (!playerState) return null;
+    try {
+      try { defineExtractPoseSnapshotOnce(); } catch {}
+      const kp = playerState?.keypoints;
+      if (Array.isArray(kp) && kp.length >= 33 && typeof window.extractPoseSnapshot === 'function') {
+        return window.extractPoseSnapshot(kp, hoopBox);
+      }
+    } catch {}
+    return null;
   };
 
   //LLM helper

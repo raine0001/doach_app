@@ -13,7 +13,7 @@
     tiles[tile.dataset.k] = tile.querySelector('b');
   });
   if (tiles.dedupe) tiles.dedupe.textContent = String(window.__gateDedupeCount || 0);
-  if (tiles.clip) tiles.clip.textContent = '—';
+  if (tiles.clip) tiles.clip.textContent = '?';
   const tBody = document.getElementById('opg-tbody');
   const stats = document.getElementById('opg-stats');
   const chkAuto = document.getElementById('opg-autoscroll');
@@ -43,6 +43,10 @@
   const btnPause = document.getElementById('opg-pause');
   const btnClear = document.getElementById('opg-clear');
   const btnDown  = document.getElementById('opg-download');
+  if (!btnPause || !btnClear || !btnDown || !tBody) {
+    console.warn('[One-Page Debug] controls missing; skipping OPG init');
+    return;
+  }
   btnPause.onclick = () => {
     paused = !paused;
     btnPause.textContent = paused ? '? resume' : '? pause';
@@ -51,12 +55,12 @@
     ledger.clear();
     tBody.innerHTML = '';
     events = 0;
-    stats.textContent = 'frames: 0 • events: 0';
+    stats.textContent = 'frames: 0 ? events: 0';
     candidateHist.length = 0;
     clipHist.length = 0;
     updateCandidateView();
     updateClipView();
-    if (tiles.clip) tiles.clip.textContent = '—';
+    if (tiles.clip) tiles.clip.textContent = '?';
   };
   btnDown.onclick = () => {
     const blob = new Blob([JSON.stringify({ records: sink.buf, frames: [...ledger.values()] }, null, 2)], { type: 'application/json' });
@@ -74,20 +78,20 @@
         frame,
         tMs: Date.now(),
         detN: 0,
-        ball: '—',
-        trail: '—',
-        trailRel: '—',
-        freshTrail: '—',
-        trailAge: '—',
-        arc: '—',
-        prox: '—',
-        gate: '—',
-        candidate: '—',
-        clip: '—',
+        ball: '?',
+        trail: '?',
+        trailRel: '?',
+        freshTrail: '?',
+        trailAge: '?',
+        arc: '?',
+        prox: '?',
+        gate: '?',
+        candidate: '?',
+        clip: '?',
         clipLink: null,
-        release: '—',
-        summary: '—',
-        top: '—'
+        release: '?',
+        summary: '?',
+        top: '?'
       };
       ledger.set(frame, row);
       if (ledger.size > MAX_ROWS) {
@@ -110,20 +114,19 @@
     }
     const keys = ['dx','dy','dSE','dSW','elbowAngleDeg','elbowExtended','wristUpTrend','alignOK'];
     candidatesEl.textContent = candidateHist.map((entry) => {
-      const score = Number.isFinite(entry.score) ? entry.score.toFixed(3) : '—';
+      const score = Number.isFinite(entry.score) ? entry.score.toFixed(3) : '?';
       const tests = entry.tests || {};
       const testsLine = keys.map((k) => {
         const v = tests[k];
         if (typeof v === 'boolean') return `${k}:${v ? 'Y' : 'N'}`;
         const num = Number(v);
         if (Number.isFinite(num)) return `${k}:${num}`;
-        return `${k}:${v ?? '—'}`;
+        return `${k}:${v ?? '?'}`;
       }).join(' ');
       const pose = entry.poseStreak != null ? ` streak:${entry.poseStreak}` : '';
-      return `${entry.frame ?? '—'} ${entry.side ?? '?'} ${score} ${entry.reason ?? 'blocked'}${pose}
+      return `${entry.frame ?? '?'} ${entry.side ?? '?'} ${score} ${entry.reason ?? 'blocked'}${pose}
   ${testsLine}`;
-    }).join('
-');
+}).join('\n');
   }
   function updateConfigView(){
     if (!configEl) return;
@@ -141,11 +144,11 @@
       return;
     }
     clipsEl.textContent = clipHist.map((entry) => {
-      const size = Number.isFinite(Number(entry.size)) ? `${Math.round(Number(entry.size) / 1024)}kB` : '—';
-      const path = entry.path ?? (entry.url ? '[blob]' : '—');
+      const size = Number.isFinite(Number(entry.size)) ? `${Math.round(Number(entry.size) / 1024)}kB` : '?';
+      const path = entry.path ?? (entry.url ? '[blob]' : '?');
       const state = entry.ok === false ? 'err' : (entry.ok ? 'ok' : 'pending');
       const err = entry.error ? ` ${entry.error}` : '';
-      return `shot ${entry.shotIdx ?? '?'} frame:${entry.frame ?? '—'} size:${size} ${state} ${path}${err}`;
+      return `shot ${entry.shotIdx ?? '?'} frame:${entry.frame ?? '?'} size:${size} ${state} ${path}${err}`;
     }).join('\n');
   }
 
@@ -178,8 +181,8 @@
     events++;
     const row = rowFor(frame);
     if (Number.isFinite(d.x) && Number.isFinite(d.y)) {
-      const conf = Number.isFinite(Number(d.conf)) ? Number(d.conf).toFixed(2) : '—';
-      const via = d.via || '—';
+      const conf = Number.isFinite(Number(d.conf)) ? Number(d.conf).toFixed(2) : '?';
+      const via = d.via || '?';
       row.ball = `${Math.round(d.x)},${Math.round(d.y)} (${conf}|${via})`;
     }
     push('ball:point', { frame, x: d.x, y: d.y, conf: d.conf, via: d.via, top: d.top, roi: d.roi });
@@ -198,7 +201,7 @@
       tiles.trail.textContent = trailLen;
       const arc = window.ballArc || {};
       const pts = Array.isArray(arc.refinedTrail) ? arc.refinedTrail.length : (Array.isArray(arc.trail) ? arc.trail.length : 0);
-      if (!tiles.arc.textContent || tiles.arc.textContent === '—') tiles.arc.textContent = pts;
+      if (!tiles.arc.textContent || tiles.arc.textContent === '?') tiles.arc.textContent = pts;
     } catch {}
   }, { passive: true });
 
@@ -207,9 +210,9 @@
     const frame = Number.isFinite(d.frame) ? d.frame : F();
     events++;
     const row = rowFor(frame);
-    row.trailRel = Number.isFinite(Number(d.trailLen)) ? Number(d.trailLen) : '—';
-    row.freshTrail = typeof d.freshTrail === 'boolean' ? (d.freshTrail ? 'Y' : 'N') : '—';
-    row.trailAge = Number.isFinite(Number(d.lastTrailAgeMs)) ? Math.round(Number(d.lastTrailAgeMs)) : '—';
+    row.trailRel = Number.isFinite(Number(d.trailLen)) ? Number(d.trailLen) : '?';
+    row.freshTrail = typeof d.freshTrail === 'boolean' ? (d.freshTrail ? 'Y' : 'N') : '?';
+    row.trailAge = Number.isFinite(Number(d.lastTrailAgeMs)) ? Math.round(Number(d.lastTrailAgeMs)) : '?';
     push('release:context', { frame, ...d });
   }, { passive: true });
 
@@ -217,7 +220,7 @@
     const d = e.detail || {};
     const frame = Number.isFinite(d.frame) ? d.frame : F();
     events++;
-    const text = `${d.latched ? 'Y' : 'N'} ${d.enterF ?? '—'}?${d.exitF ?? '—'}`;
+    const text = `${d.latched ? 'Y' : 'N'} ${d.enterF ?? '?'}?${d.exitF ?? '?'}`;
     rowFor(frame).prox = text;
     try { tiles.prox.textContent = text; } catch {}
     push('prox:state', { frame, ...d });
@@ -262,7 +265,7 @@
     const frame = Number.isFinite(d.frame) ? d.frame : F();
     events++;
     const scoreVal = Number(d.score);
-    const score = Number.isFinite(scoreVal) ? scoreVal.toFixed(3) : '—';
+    const score = Number.isFinite(scoreVal) ? scoreVal.toFixed(3) : '?';
     const reason = d.reason ?? (d.strictOK ? 'strict' : 'blocked');
     rowFor(frame).candidate = `${d.side ?? '?'} ${score} ${reason}`;
     push('gate:candidate', { frame, detail: d });
@@ -397,18 +400,18 @@
       tiles.trail.textContent = trailLen;
       tiles.frame.textContent = Number(window.__AN_IDX) || 0;
       if (!candidateHist.length) tiles.dedupe.textContent = String(window.__gateDedupeCount || 0);
-      if (!tiles.arc.textContent || tiles.arc.textContent === '—') {
+      if (!tiles.arc.textContent || tiles.arc.textContent === '?') {
         const pts = Array.isArray(arc.refinedTrail) ? arc.refinedTrail.length : (Array.isArray(arc.trail) ? arc.trail.length : 0);
         tiles.arc.textContent = pts;
       }
-      stats.textContent = `frames: ${ledger.size} • events: ${events}`;
+      stats.textContent = `frames: ${ledger.size} ? events: ${events}`;
     } catch {}
   }, 400);
 
   function render(){
     if (!paused) {
       const rows = [...ledger.values()].sort((a, b) => a.frame - b.frame).slice(-300);
-      const safe = (v) => (v === undefined || v === null || v === '' ? '—' : v);
+      const safe = (v) => (v === undefined || v === null || v === '' ? '?' : v);
       const html = rows.map((row) => (
         `<tr>
             <td style="padding:4px 6px;border-top:1px solid #163;">${safe(row.frame)}</td>

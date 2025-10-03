@@ -9,33 +9,54 @@
     body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Arial; background:#0b0f14; color:#e6edf3; min-height:100vh; display:flex; flex-direction:column; }
     header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; background:#0f1621; border-bottom:1px solid #1f2a36; flex-shrink:0; }
     h1 { font-size:18px; margin:0; }
-    main { display:grid; grid-template-columns:380px 1fr; gap:14px; padding:14px; flex:1 1 auto; box-sizing:border-box; min-height:0; }
-    section { background:#0f1621; border:1px solid #1f2a36; border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:0; }
+    main { display:grid; grid-template-columns:380px 1fr; gap:14px; padding:14px; flex:1 1 auto; box-sizing:border-box; min-height:0; height:calc(100vh - 96px); }
+    section { background:#0f1621; border:1px solid #1f2a36; border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:0; max-height:100%; }
     section > h2 { font-size:14px; margin:0; padding:10px 12px; background:#111a25; border-bottom:1px solid #1f2a36; flex-shrink:0; }
     .list { padding:8px; overflow:auto; flex:1 1 auto; }
     .row { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid #16202b; cursor:pointer; transition:background 0.2s ease, border-left 0.2s ease; }
     .row:hover { background:#0d131c; }
     .row.active { background:#122819; border-left:4px solid #2dd683; }
     .row.active:hover { background:#163121; }
+    .row-live { border-left:4px solid #f97316; }
+    .row.selected { outline:1px solid #2563eb; }
+    .session-main { flex:1; display:flex; flex-direction:column; gap:2px; }
+    .session-meta { text-align:right; font-size:12px; }
+    .info-line { font-size:12px; }
+    .pill-live { display:inline-block; margin-left:6px; font-size:11px; padding:2px 6px; border-radius:999px; border:1px solid #f97316; background:#431407; color:#fb923c; text-transform:uppercase; letter-spacing:0.05em; }
     .muted { opacity:.8; }
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:12px; }
     .ok { background:#11331f; color:#34d399; border:1px solid #1e7a42; }
     .bad { background:#2a1111; color:#f87171; border:1px solid #7a1e1e; }
+    .pending { background:#1c1b24; color:#d1d5db; border:1px solid #54535c; }
     .btn { background:#1a2533; color:#dbe5ee; border:1px solid #283241; padding:6px 10px; border-radius:8px; cursor:pointer; }
     .btn:hover { background:#223144; }
     .toolbar { display:flex; gap:8px; align-items:center; }
-    #viewer { flex:1 1 auto; display:flex; align-items:center; justify-content:center; padding:10px; min-height:0; }
+    .debug-header { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px; }
+    .debug-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+    #dbg-json { background:#0b0f12; color:#cfe8ff; border:1px solid #2a6; border-radius:8px; padding:12px; margin:0; flex:1 1 auto; min-height:240px; max-height:48vh; overflow:auto; font:12px/1.4 monospace; }
+    .shots-wrap { margin-top:16px; }
+    .shots-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+    .shots-header h3 { margin:0; font-size:14px; }
+    .shots-meta { font-size:12px; color:#94a3b8; }
+    .shots-table { width:100%; border-collapse:collapse; font-size:12px; }
+    .shots-table th, .shots-table td { padding:6px 8px; border-bottom:1px solid #1f2a36; text-align:left; vertical-align:top; }
+    .shots-table tbody tr:hover { background:#101a29; }
+    .clip-link { color:#7dd3fc; text-decoration:none; }
+    .clip-link:hover { text-decoration:underline; }
+    .clip-link-disabled { color:#94a3b8; pointer-events:none; text-decoration:none; }
+    .shots-empty { padding:10px; font-style:italic; color:#94a3b8; border:1px dashed #2a3a4a; border-radius:8px; }
+    .shots-pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:600; font-size:11px; border:1px solid transparent; text-transform:uppercase; letter-spacing:0.04em; }
+    .shots-pill.make { border-color:#1e7a42; background:#11331f; color:#34d399; }
+    .shots-pill.miss { border-color:#7a1e1e; background:#2a1111; color:#f87171; }
+    .shots-pill.pending { border-color:#54535c; background:#1c1b24; color:#d1d5db; }
+    #sessionPane { display:flex; flex-direction:column; min-height:0; max-height:100%; }
+    #sessionPane .list { max-height:100%; overflow-y:auto; }
+    #sessionsList { max-height:100%; overflow-y:auto; }
+    #viewer { flex:1 1 auto; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; padding:10px; min-height:0; }
     iframe { width:100%; height:100%; border:none; border-radius:10px; background:#0b0f14; min-height:0; }
     .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; flex-shrink:0; }
     pre { background:#0b0f14; border:1px solid #1f2a36; border-radius:8px; padding:8px; overflow:auto; max-height:320px; }
     input[type="text"] { background:#0b0f14; color:#e6edf3; border:1px solid #1f2a36; padding:6px 8px; border-radius:8px; width:200px; }
-    .clips { padding:10px; border-top:1px solid #1f2a36; }
-    .clips-header { display:flex; justify-content:space-between; align-items:center; gap:8px; margin-bottom:6px; }
-    .clips-header h3 { margin:0; font-size:13px; }
-    .clips-table { width:100%; border-collapse:collapse; font-size:12px; }
-    .clips-table th, .clips-table td { padding:6px 8px; border-bottom:1px solid #1f2a36; text-align:left; }
-    .clips-table tbody tr:hover { background:#0d131c; }
-    .clips-empty { padding:8px; color:#94a3b8; font-style:italic; }
     @media (max-width: 1040px) {
       main { grid-template-columns:1fr; }
       #viewer { min-height:320px; }
@@ -46,470 +67,43 @@
   <header>
     <h1>Doach Admin</h1>
     <div class="toolbar">
-      <input id="filterTxt" type="text" placeholder="Filter sessions…"/>
+      <input id="filterTxt" type="text" placeholder="Filter sessions..."/>
       <button class="btn" id="btnRefresh">Refresh</button>
     </div>
   </header>
   <main>
-    <section>
+    <section id="sessionPane">
       <h2>Sessions</h2>
       <div class="list" id="sessionsList"></div>
     </section>
     <section>
       <h2>Details</h2>
       <div id="viewer">
-        <div class="muted" style="max-width:560px; text-align:center;">
-          <div style="margin-bottom:8px;">Select a session to view observer and debug.</div>
-          <div style="text-align:left; background:#0b0f14; border:1px dashed #2a3a4a; padding:10px; border-radius:8px;">
-            <strong>Tip</strong>: On the client, open DevTools and run:
-            <pre>startObserverStreaming(2)</pre>
-            Then open the Observe tab here.
+        <div class="debug-header">
+          <div>
+            <h2 style="margin:0;">Doach Live Debug</h2>
+            <div id="dbg-session-label" class="muted" style="font-size:12px;">No session selected.</div>
+          </div>
+          <div class="debug-actions">
+            <button id="dbg-open-observe" disabled>Observe</button>
+            <button id="dbg-open-json" disabled>Open JSON</button>
+            <button id="adm-dbg-download" disabled>Download</button>
+            <button id="dbg-copy" disabled>Copy</button>
           </div>
         </div>
-      </div>
-      <div class="grid">
-        <div>
-          <h3 style="padding:6px 10px; margin:0;">Debug JSON</h3>
-          <pre id="debugJson">(none)</pre>
-        </div>
-        <div>
-          <h3 style="padding:6px 10px; margin:0;">Active Users</h3>
-          <pre id="activeUsers">(loading)</pre>
+        <pre id="dbg-json">(select a session to load debug details)</pre>
+        <div class="shots-wrap">
+          <div class="shots-header">
+            <h3>Shots</h3>
+            <span id="shotsMeta" class="shots-meta">0/0</span>
+          </div>
+          <div id="shotsTableWrap" class="shots-empty">Select a session to view shots.</div>
         </div>
       </div>
-      <div class="clips">
-        <div class="clips-header">
-          <h3>Shot Clips <span id="clipCount" class="muted">(0)</span></h3>
-        </div>
-        <div id="clipTableWrap" class="clips-empty">Select a session to view clips.</div>
-      </div>
-    </section>
-  </main>
-  <script>
-    const elSessions = document.getElementById('sessionsList');
-    const elViewer   = document.getElementById('viewer');
-    const elDebug    = document.getElementById('debugJson');
-    const elActive   = document.getElementById('activeUsers');
-
-    const elClipCount = document.getElementById("clipCount");
-    const elClipWrap  = document.getElementById("clipTableWrap");
-    let clipPollTimer = null;
-    let clipSessionId = null;
-    async function fetchJSON(url){ const r = await fetch(url); if(!r.ok) throw new Error('HTTP '+r.status); return await r.json(); }
-
-    function fmt(ts){
-      if (!ts) return '—';
-      try { const d = new Date(ts); return d.toLocaleString(); } catch { return String(ts); }
-    }
-
-    function fmtClipTime(iso){
-      if (!iso) return '�';
-      try { return new Date(iso).toLocaleString(); } catch { return String(iso); }
-    }
-
-    function fmtBytes(bytes){
-      if (!Number.isFinite(bytes)) return '�';
-      const units = ['B','KB','MB','GB'];
-      let value = bytes;
-      let unit = 0;
-      while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
-      const digits = unit === 0 ? 0 : 1;
-      return `${value.toFixed(digits)} ${units[unit]}`;
-    }
-
-    function showClipMessage(msg, count = 0){
-      elClipCount.textContent = String(count);
-      elClipWrap.className = 'clips-empty';
-      elClipWrap.textContent = msg;
-    }
-
-    function renderClipRows(clips, totalCount){
-      const count = Number.isFinite(totalCount) ? totalCount : (Array.isArray(clips) ? clips.length : 0);
-      if (!Array.isArray(clips) || !clips.length){
-        showClipMessage('No clips yet.', count || 0);
-        return;
-      }
-      elClipCount.textContent = String(count);
-      const rows = clips.map((clip, idx) => {
-        const size = fmtBytes(clip.size);
-        const saved = fmtClipTime(clip.created);
-        const label = clip.name || `clip-${idx + 1}`;
-        return `<tr><td>${idx + 1}</td><td><a href="${clip.url}" target="_blank" rel="noopener">${label}</a></td><td>${size}</td><td>${saved}</td></tr>`;
-      }).join('');
-      elClipWrap.className = '';
-      elClipWrap.innerHTML = `<table class="clips-table"><thead><tr><th>#</th><th>Clip</th><th>Size</th><th>Saved</th></tr></thead><tbody>${rows}</tbody></table>`;
-    }
-
-    async function loadClips(sid){
-      if (!sid){
-        showClipMessage('Select a session to view clips.', 0);
-        return;
-      }
-      try {
-        const data = await fetchJSON(`/admin/session/${sid}/clips`);
-        if (clipSessionId !== sid) return;
-        const clips = Array.isArray(data.clips) ? data.clips : [];
-        const total = Number.isFinite(data.count) ? Number(data.count) : clips.length;
-        if (!total || !clips.length) {
-          showClipMessage('No clips yet.', total || 0);
-          return;
-        }
-        renderClipRows(clips, total);
-      } catch (err) {
-        if (clipSessionId === sid) showClipMessage('Failed to load clips.', 0);
-      }
-    }
-
-    function startClipPolling(sid){
-      clipSessionId = sid;
-      if (clipPollTimer) clearInterval(clipPollTimer);
-      loadClips(sid);
-      clipPollTimer = setInterval(() => {
-        if (clipSessionId) loadClips(clipSessionId);
-      }, 4000);
-    }
-
-    function stopClipPolling(){
-      if (clipPollTimer){
-        clearInterval(clipPollTimer);
-        clipPollTimer = null;
-      }
-      clipSessionId = null;
-    }
-    showClipMessage('Select a session to view clips.', 0);
 
 
 
-    function rowHTML(s){
-      const acc = Number.isFinite(s.accuracy) ? s.accuracy : (s.totals?.accuracy ?? null);
-      const shots = s.shots ?? s.totals?.attempts ?? 0;
-      const pill = acc != null ? `<span class="pill ${acc>=50?'ok':'bad'}">${acc}%</span>` : '';
-    const active = !!(s.active || s.__inc || s.status === 'active');
-    const cls = `row${active ? ' active' : ''}`;
-    const liveBadge = s.__inc ? '<span class="pill ok" style="margin-left:6px;">live</span>' : '';
-    return `<div class="${cls}" data-sid="${s.sid||s.id}">
-        <div style="flex:1; min-width:0;">
-          <div style="font-weight:700;">${s.sid||s.id}</div>
-          <div class="muted">${fmt(s.created_at||s.startedAt)} → ${fmt(s.ended_at||s.endedAt)}</div>
-        </div>
-        <div class="muted">${shots} shots</div>
-        ${pill}
-        ${liveBadge}
-        <button class="btn" data-act="observe">Observe</button>
-        <button class="btn" data-act="debug">Debug</button>
-        <button class="btn" data-act="download">Download Debug</button>
-      </div>`;
-    }
-
-    const __prevCounts = new Map();
-    async function loadSessions(){
-      const filt = (document.getElementById('filterTxt').value||'').toLowerCase();
-      const data = await fetchJSON('/admin/sessions');
-      const list = (data.sessions||[]).slice().sort((a,b)=>{
-        const A = new Date(a.created_at||a.started_at||a.startedAt||0).getTime();
-        const B = new Date(b.created_at||b.started_at||b.startedAt||0).getTime();
-        return (B - A);
-      });
-      list.forEach(s => {
-        const k = s.sid||s.id; const n = s.shots||0; const p = __prevCounts.get(k)||0; s.__inc = (n>p); __prevCounts.set(k,n);
-      });
-      elSessions.innerHTML = list
-        .filter(s => !filt || (s.sid||'').toLowerCase().includes(filt))
-        .map(rowHTML)
-        .join('') || '<div class="muted" style="padding:10px;">No sessions.</div>';
-    }
-
-    async function loadActive(){
-      try {
-        const data = await fetchJSON('/admin/users');
-        const txt = JSON.stringify({ users: data.users, active: data.active }, null, 2);
-        elActive.textContent = txt;
-      } catch (e) { elActive.textContent = '(error) '+e.message; }
-    }
-
-    elSessions.addEventListener('click', async (e) => {
-      const row = e.target.closest('.row'); if (!row) return;
-      const sid = row.getAttribute('data-sid');
-      const act = e.target.getAttribute('data-act');
-      if (act === 'observe') {
-        elViewer.innerHTML = `<iframe src="/admin/observe/${sid}"></iframe>`;
-        startClipPolling(sid);
-        return;
-      }
-      if (act === 'debug') {
-      try {
-        const j = await fetchJSON(`/admin/session/${sid}/debug`);
-        elDebug.textContent = JSON.stringify(j, null, 2);
-        elViewer.innerHTML = `<div style="padding:10px;">
-          <div style="margin-bottom:8px; font-weight:700;">${sid}</div>
-          <a class="btn" href="/admin/observe/${sid}" target="_blank">Open Observe</a>
-          <a class="btn" href="/admin/session/${sid}/debug" target="_blank">Open Debug JSON</a>
-        </div>`;
-      } catch (err) {
-        elDebug.textContent = '(error) '+err.message;
-      }
-      startClipPolling(sid);
-      return;
-    }
-      if (act === 'download') {
-      try {
-        const j = await fetchJSON(`/admin/session/${sid}/debug`);
-        const blob = new Blob([JSON.stringify(j, null, 2)], { type: 'application/json' });
-        const a = document.createElement('a');
-        a.href = URL.createObjectURL(blob);
-        a.download = `${sid}-debug.json`;
-        a.click();
-      } catch (err) {
-        alert('Download failed: ' + err.message);
-      }
-      return;
-    }
-  });
-
-    document.getElementById('btnRefresh').onclick = () => { loadSessions(); loadActive(); if (clipSessionId) loadClips(clipSessionId); };
-    document.getElementById('filterTxt').oninput = () => { loadSessions(); };
-
-    loadSessions(); loadActive();
-    setInterval(loadSessions, 4000);
-    setInterval(loadActive, 5000);
-  </script>
-<!-- ===== Doach Admin Debug ===== -->
-<section id="doach-admin-debug" style="margin:16px 0;">
-  <h2 style="margin:0 0 8px;">Doach Live Debug</h2>
-
-  <!-- Controls -->
-  <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-    <button id="adm-dbg-pause">⏸ pause</button>
-    <button id="adm-dbg-clear">🗑 clear</button>
-    <button id="adm-dbg-download">⬇ download</button>
-    <label style="margin-left:12px;display:flex;align-items:center;gap:6px;">
-      <input type="checkbox" id="adm-dbg-autoscroll" checked> autoscroll
-    </label>
-  </div>
-
-  <!-- Snap Stats -->
-  <div id="adm-dbg-stats" style="display:grid;grid-template-columns:repeat(6, minmax(120px,1fr));gap:8px;margin-bottom:8px;font:12px/1.35 monospace;">
-    <div class="tile" data-k="armed"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">armed:<b>?</b></div>
-    <div class="tile" data-k="ready"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">ready:<b>?</b></div>
-    <div class="tile" data-k="pose"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">pose:<b>?</b></div>
-    <div class="tile" data-k="hoop"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">hoop:<b>?</b></div>
-    <div class="tile" data-k="trail"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">trail:<b>0</b></div>
-    <div class="tile" data-k="frame"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">frame:<b>0</b></div>
-  </div>
-
-  <!-- Last Key Events -->
-  <div style="display:grid;grid-template-columns:repeat(3, minmax(220px,1fr));gap:8px;margin-bottom:8px;font:12px/1.35 monospace;">
-    <div id="adm-last-release" style="padding:8px;border:1px solid #666;border-radius:6px;">last release:<br><b>—</b></div>
-    <div id="adm-last-summary" style="padding:8px;border:1px solid #666;border-radius:6px;">last summary:<br><b>—</b></div>
-    <div id="adm-last-gate"    style="padding:8px;border:1px solid #666;border-radius:6px;">last gate block:<br><b>—</b></div>
-  </div>
-
-  <!-- Log -->
-  <pre id="adm-dbg-log" style="background:#0b0f12;color:#cfe8ff;border:1px solid #2a6;border-radius:8px;padding:8px;margin:0;max-height:42vh;overflow:auto;font:12px/1.35 monospace;"></pre>
-</section>
-
-<script>
-(function adminDebugInstall(){
-  if (window.__admDbgInstalled) return; window.__admDbgInstalled = true;
-
-  const logEl = document.getElementById('adm-dbg-log');
-  const tiles = {};
-  document.querySelectorAll('#adm-dbg-stats .tile').forEach(t=>{
-    tiles[t.dataset.k] = t.querySelector('b');
-  });
-  const elLastRelease = document.getElementById('adm-last-release').querySelector('b');
-  const elLastSummary = document.getElementById('adm-last-summary').querySelector('b');
-  const elLastGate    = document.getElementById('adm-last-gate').querySelector('b');
-
-  const btnPause = document.getElementById('adm-dbg-pause');
-  const btnClear = document.getElementById('adm-dbg-clear');
-  const btnDown  = document.getElementById('adm-dbg-download');
-  const chkAuto  = document.getElementById('adm-dbg-autoscroll');
-
-  let paused = false;
-  let buf = [];
-  const CAP = 2000;
-
-  function ts(){ return new Date().toLocaleTimeString(); }
-
-  function write(line){
-    if (paused) return;
-    buf.push(line);
-    if (buf.length > CAP) buf = buf.slice(-CAP);
-logEl.textContent += line + '\n';
-if (logEl.textContent.split('\n').length > CAP) {
-  const lines = logEl.textContent.split('\n');
-  logEl.textContent = lines.slice(-CAP).join('\n');
-}
-    if (chkAuto.checked) logEl.scrollTop = logEl.scrollHeight;
-  }
-
-  btnPause.onclick = () => { paused = !paused; btnPause.textContent = paused ? '▶ resume' : '⏸ pause'; };
-  btnClear.onclick = () => { buf = []; logEl.textContent = ''; };
-btnDown.onclick  = () => {
-    const blob = new Blob([buf.join('\n')], {type:'text/plain'});
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = 'doach_debug_log.txt';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-  };
-
-  function patchDbgLine(){
-    if (window.__admDbgPatched) return;
-    if (typeof window.__dbgLine !== 'function') return;
-    const prev = window.__dbgLine;
-    window.__dbgLine = function patched(t){
-      try { prev && prev(t); } catch {}
-      try {
-        window.dispatchEvent(new CustomEvent('dbg:line', { detail: { t, at: Date.now() }}));
-      } catch {}
-      write(`[${ts()}] ${t}`);
-    };
-    window.__admDbgPatched = true;
-  }
-  patchDbgLine();
-  let tries = 0;
-  const iv = setInterval(()=>{
-    if (!window.__admDbgPatched) patchDbgLine();
-    if (++tries > 40 || window.__admDbgPatched) clearInterval(iv);
-  }, 250);
-
-  if (typeof window.__dbgLine !== 'function') {
-    window.__dbgLine = (t)=> {
-      try { window.dispatchEvent(new CustomEvent('dbg:line', { detail: { t, at: Date.now() }})); } catch {}
-      write(`[${ts()}] ${t}`);
-    };
-  }
-
-  window.addEventListener('shot:release', e=>{
-    const d = e?.detail||{};
-    elLastRelease.textContent = `via=${d.via||'?'} frame=${d.frame||'?'} tMs=${d.tMs||'?'}`;
-  }, { passive:true });
-
-  window.addEventListener('shot:summary', e=>{
-    const s = e?.detail||{};
-    elLastSummary.textContent = `made=${s.made} arcH=${s.arcHeight} rel=${s.releaseAngle} entry=${s.entryAngle}`;
-  }, { passive:true });
-
-  window.addEventListener('gate:block', e=>{
-    const d = e?.detail||{};
-    elLastGate.textContent = `${d.reason||'unknown'} ${JSON.stringify(d.extra||{})}`;
-    write(`[${ts()}] [gate:block] ${d.reason||'unknown'} ${JSON.stringify(d.extra||{})}`);
-  }, { passive:true });
-
-  window.addEventListener('microclip:echo', e=>{
-    const d = e?.detail||{};
-    write(`[${ts()}] [microclip:${d.type}] ${JSON.stringify(d.payload).slice(0, 160)}`);
-  }, { passive:true });
-
-  setInterval(()=>{
-    try {
-      const bs = window.ballState || {};
-      tiles.armed.textContent = !!window.__shotTrackingArmed;
-      tiles.ready.textContent = !!window.__readyForScoring;
-      tiles.pose.textContent  = !!window.__POSE_WARMUP_OK;
-      tiles.hoop.textContent  = !!window.__hoopConfirmed;
-
-      const trailLen = Array.isArray(bs.trail) ? bs.trail.length : 0;
-      tiles.trail.textContent = trailLen;
-
-      const f = Number(window.__AN_IDX)||0;
-      tiles.frame.textContent = f;
-    } catch {}
-  }, 300);
-
-  if (!window.__dbgBlock) {
-    window.__dbgBlock = function(reason, extra){
-      try {
-        window.dispatchEvent(new CustomEvent('gate:block', { detail: { reason, extra }}));
-      } catch {}
-      window.__dbgLine?.(`[gate:block] ${reason} ${JSON.stringify(extra||{})}`);
-    };
-  }
-
-})();
-</script>
-
-  <!-- ===== One-Page Debug (d_admin) ======================================= -->
-  <section id="onepage-debug" style="margin:12px 0;">
-    <h2 style="margin:0 0 8px;">One-Page Debug</h2>
-    <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;">
-      <button id="opg-pause">⏸ pause</button>
-      <button id="opg-clear">🗑 clear</button>
-      <button id="opg-download">⬇ download JSON</button>
-      <label style="margin-left:12px;display:flex;align-items:center;gap:6px;">
-        <input id="opg-autoscroll" type="checkbox" checked> autoscroll
-      </label>
-      <span id="opg-stats" style="margin-left:auto;font:12px/1.35 monospace;color:#8fd;">
-        frames: 0 • events: 0
-      </span>
-    </div>
-
-    <div id="opg-tiles" style="display:grid;grid-template-columns:repeat(11,minmax(110px,1fr));gap:8px;margin-bottom:8px;font:12px/1.35 monospace;">
-      <div class="tile" data-k="detect"  style="padding:8px;border:1px solid #2a6;border-radius:6px;">detect:<b>?</b></div>
-      <div class="tile" data-k="pose"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">pose:<b>?</b></div>
-      <div class="tile" data-k="armed"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">armed:<b>?</b></div>
-      <div class="tile" data-k="trail"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">trail:<b>0</b></div>
-      <div class="tile" data-k="arc"     style="padding:8px;border:1px solid #2a6;border-radius:6px;">arc fit:<b>—</b></div>
-      <div class="tile" data-k="hoop"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">hoop:<b>?</b></div>
-      <div class="tile" data-k="frame"   style="padding:8px;border:1px solid #2a6;border-radius:6px;">an frame:<b>0</b></div>
-      <div class="tile" data-k="prox"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">prox:<b>—</b></div>
-      <div class="tile" data-k="dedupe"  style="padding:8px;border:1px solid #2a6;border-radius:6px;">dedupe:<b>0</b></div>
-      <div class="tile" data-k="gate"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">gate:<b>—</b></div>
-      <div class="tile" data-k="clip"    style="padding:8px;border:1px solid #2a6;border-radius:6px;">clip:<b>—</b></div>
-    </div>
-
-    <div style="border:1px solid #2a6;border-radius:8px;overflow:hidden;">
-      <table id="opg-table" style="width:100%;border-collapse:collapse;font:12px/1.35 monospace;">
-        <thead style="position:sticky;top:0;background:#0b0f12;">
-          <tr>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">frame</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">tMs</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">detN</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">ball(x,y|via)</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">trail</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">trail@rel</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">fresh</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">ageMs</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">arc fit</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">prox</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">gate</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">candidate</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">clip</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">release</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">summary</th>
-            <th style="text-align:left;padding:6px;border-bottom:1px solid #2a6;">top det</th>
-          </tr>
-        </thead>
-        <tbody id="opg-tbody"></tbody>
-      </table>
-    </div>
-    <div style="display:flex;gap:12px;margin-top:12px;font:12px/1.35 monospace;">
-      <div style="flex:1;">
-        <h3 style="padding:6px 10px;margin:0;">Gate Candidates (last 5)</h3>
-        <pre id="opg-candidates">(none)</pre>
-      </div>
-      <div style="flex:1;">
-        <h3 style="padding:6px 10px;margin:0;">Session Config</h3>
-        <pre id="opg-config">(pending)</pre>
-      </div>
-      <div style="flex:1;">
-        <h3 style="padding:6px 10px;margin:0;">MicroClips</h3>
-        <pre id="opg-clips">(none)</pre>
-      </div>
-    </div>
-  </section>
-
+  <script src="/static/js/admin_dashboard.js"></script>
   <script src="/static/js/d_admin_opg.js"></script>
 </body>
 </html>
-
-
-
-
-
-
-
-
