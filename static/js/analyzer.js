@@ -5,6 +5,8 @@ import { updatePlayerTracker, playerState } from '../../static/js/player_tracker
 import { updateBall } from '../../static/js/ball_tracker.js';
 import { bufferDetectedObjects, scoringTick, checkShotConditions } from '../../static/js/shot_logger.js';
 import { detectNetMotionFromCanvas } from './hoop_tracker.js';
+
+
 function __shotArcModule() {
   const api = window.shotArcModule || window.shotArc;
   return (api && typeof api === 'object') ? api : null;
@@ -110,7 +112,7 @@ function emitPoseMetrics(frameIdx, metrics = { ok: false }){
   return m;
 }
 
-// Detect with optional ROI crop around hoop proximity (backend slow-play near hoop)
+// Detect with ROI crop around hoop proximity (backend slow-play near hoop)
 async function detectWithROI(buf, frameIdx, hoopLockedGuess = null) {
   try {
     const ROI_ONLY = (window.DETECT_ROI_ONLY !== false); // default on

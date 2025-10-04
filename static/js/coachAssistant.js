@@ -288,6 +288,41 @@ function preferShotNumber(s) {
 
 
 
+window.addEventListener('doach:session-review', (event) => {
+  try {
+    const summary = event?.detail?.summary;
+    if (!summary) return;
+    const table = document.querySelector('.hud-table tbody');
+    if (!table) return;
+    let row = document.getElementById('sessionReviewRow');
+    if (!row) {
+      row = document.createElement('tr');
+      row.id = 'sessionReviewRow';
+      row.innerHTML = '<td class="num">~</td><td class="coach session-review"></td><td class="clip"></td>';
+      table.appendChild(row);
+    }
+    const cell = row.querySelector('.coach');
+    if (cell) {
+      cell.textContent = summary;
+      row.style.display = 'table-row';
+      row.dataset.visible = 'true';
+    }
+  } catch (err) { console.warn('[session-review] inline render failed', err); }
+});
+
+window.addEventListener('hud:start-session', () => {
+  try {
+    const row = document.getElementById('sessionReviewRow');
+    if (row) {
+      row.style.display = 'none';
+      row.dataset.visible = 'false';
+      const cell = row.querySelector('.coach');
+      if (cell) cell.textContent = '';
+    }
+    hideCoachNotes();
+  } catch {}
+});
+
 // === SNAPSHOT V2: force replace extractor + rescue bad summaries =================
 
 // 1) Force the new extractor (do NOT early-return if an old one exists)
@@ -720,9 +755,7 @@ window.addEventListener('shot:summary', (e) => {
 
   // Update UI text
   try {
-    const el = (typeof ensureCoachNotes === 'function')
-      ? ensureCoachNotes() : document.getElementById('coachNotes');
-    if (el) { el.style.display='block'; el.textContent = formatted; }
+    setCoachNotesContent(formatted);
   } catch {}
 
   // Tell the frontend store (table/row) what the coach line is
@@ -794,12 +827,127 @@ window.addEventListener('shot:feedback:request', (e) => {
         const root = document.body || document.documentElement;
         el = document.createElement('div');
         el.id = 'coachNotes';
-        el.style.cssText = 'position:absolute;top:14px;left:50%;transform:translateX(-50%);max-width:520px;background:rgba(0,0,0,0.7);color:#fff;padding:10px 14px;border-radius:8px;text-align:center;font-size:14px;line-height:1.4;z-index:900;pointer-events:none;display:none;';
-        el.textContent = '';
         root.appendChild(el);
       }
+      const baseStyles = {
+        position: 'absolute',
+        top: '14px',
+        left: '50%',
+        transform: 'translateX(-50%)',
+        maxWidth: '520px',
+        background: 'rgba(0,0,0,0.7)',
+        color: '#fff',
+        padding: '16px 20px 14px',
+        borderRadius: '10px',
+        textAlign: 'center',
+        fontSize: '14px',
+        lineHeight: '1.4',
+        pointerEvents: 'auto',
+        boxShadow: '0 12px 24px rgba(0,0,0,0.35)'
+      };
+      Object.assign(el.style, baseStyles);
+      if (!el.dataset.baseZ) el.dataset.baseZ = '900';
+      if (!el.style.zIndex) el.style.zIndex = el.dataset.baseZ;
+      if (!el.style.display) el.style.display = 'none';
+      ensureCoachNotesBody(el);
+      ensureCoachNotesClose(el);
       return el;
     } catch { return null; }
+  }
+
+  function ensureCoachNotesBody(el){
+    if (!el) return null;
+    let body = el.querySelector('.coach-notes__body');
+    if (!body) {
+      body = document.createElement('div');
+      body.className = 'coach-notes__body';
+      el.appendChild(body);
+    }
+    return body;
+  }
+
+  function ensureCoachNotesClose(el){
+    if (!el) return null;
+    let btn = el.querySelector('.coach-notes__close');
+    if (!btn) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'coach-notes__close';
+      btn.setAttribute('aria-label', 'Close coach summary');
+      btn.innerHTML = '&times;';
+      Object.assign(btn.style, {
+        position: 'absolute',
+        top: '8px',
+        right: '10px',
+        width: '26px',
+        height: '26px',
+        border: 'none',
+        borderRadius: '50%',
+        background: 'rgba(255,255,255,0.16)',
+        color: '#fff',
+        fontSize: '18px',
+        lineHeight: '1',
+        cursor: 'pointer',
+        padding: '0',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center'
+      });
+      btn.addEventListener('click', (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (el.dataset.baseZ) el.style.zIndex = el.dataset.baseZ;
+        el.style.display = 'none';
+        el.dataset.dismissed = 'true';
+      });
+      el.appendChild(btn);
+    }
+    return btn;
+  }
+
+  function setCoachNotesContent(content, options = {}) {
+    const el = ensureCoachNotes();
+    if (!el) return null;
+    const body = ensureCoachNotesBody(el);
+
+    if (options.html === true) {
+      body.innerHTML = content ?? '';
+    } else if (typeof content === 'string') {
+      body.textContent = content;
+    } else {
+      body.textContent = content == null ? '' : String(content);
+    }
+
+    if (typeof options.zIndex !== 'undefined') {
+      el.style.zIndex = String(options.zIndex);
+    } else if (options.resetZ === true && el.dataset.baseZ) {
+      el.style.zIndex = el.dataset.baseZ;
+    }
+
+    if (options.extraStyles && typeof options.extraStyles === 'object') {
+      Object.assign(el.style, options.extraStyles);
+    }
+
+    const dismissed = el.dataset.dismissed === 'true';
+    const forceShow = options.force === true;
+    if (forceShow || !dismissed) {
+      el.style.display = options.display ?? 'block';
+      el.dataset.dismissed = 'false';
+    }
+
+    ensureCoachNotesClose(el);
+    return el;
+  }
+
+  function hideCoachNotes(){
+    const el = document.getElementById('coachNotes');
+    if (!el) return null;
+    el.style.display = 'none';
+    if (el.dataset.baseZ) el.style.zIndex = el.dataset.baseZ;
+    el.dataset.dismissed = 'false';
+    const body = ensureCoachNotesBody(el);
+    if (body) body.textContent = '';
+    return el;
   }
 
   const SPEAK_DEDUP_MS = 1200;
@@ -1407,7 +1555,7 @@ function __getPoseSnapshot(){
           const out = withShotPrefix(local);
           window.__lastCoachText = out;
           try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:speak:off]', { via, out }); } catch {}
-          try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
+          try { setCoachNotesContent(out); } catch {}
         } else { postDisconnected(); }
       } catch { postDisconnected(); }
       return;
@@ -1436,7 +1584,7 @@ function __getPoseSnapshot(){
         try {
           const out = withShotPrefix(text);
           window.__lastCoachText = out;
-          try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
+          try { setCoachNotesContent(out); } catch {}
         } catch {}
         return;
       }
@@ -1447,7 +1595,7 @@ function __getPoseSnapshot(){
           const out = withShotPrefix(local);
           window.__lastCoachText = out;
           try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:speak:fallback-local]', { via, out }); } catch {}
-          try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
+          try { setCoachNotesContent(out); } catch {}
           return;
         }
       } catch {}
@@ -1461,7 +1609,7 @@ function __getPoseSnapshot(){
           const out = withShotPrefix(local);
           window.__lastCoachText = out;
           try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:speak:error-local]', { via, out }); } catch {}
-          try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.textContent = out; } } catch {}
+          try { setCoachNotesContent(out); } catch {}
           return;
         }
       } catch {}
@@ -1850,8 +1998,16 @@ function __getPoseSnapshot(){
       // Always deliver the session review regardless of DOACH_ONLY_REALTIME.
       const out = `Session review. ${lines.join(' ')}`;
       try { window.__lastCoachText = out; } catch {}
-      try { const el = (typeof ensureCoachNotes === 'function') ? ensureCoachNotes() : document.getElementById('coachNotes'); if (el) { el.style.display='block'; el.style.zIndex='10070'; el.textContent = out; } } catch {}
-      try { (window.doachSpeak || window.coachSpeak)?.(out); window.__SESSION_REVIEW_SPOKEN = true; } catch {}
+      try { setCoachNotesContent(out, { zIndex: 10070, force: true }); } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent('doach:session-review', {
+          detail: { summary: out, lines, trends, limiting: lim }
+        }));
+      } catch {}
+      try {
+        (window.doachSpeak || window.coachSpeak)?.(out);
+        window.__SESSION_REVIEW_SPOKEN = true;
+      } catch {}
     } catch {}
   }
 
@@ -2354,8 +2510,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
       }
     } catch (e) { console.warn('[doach] coach text UI update failed:', e); }
 
-    const el = document.getElementById('coachNotes');
-    if (el) { el.style.display='block'; el.textContent = text; }
+    setCoachNotesContent(text);
     const now = Date.now();
       if (text === __lastSpeak.text && (now - __lastSpeak.at) < SPEAK_DEDUP_MS) {
         return; // skip duplicate speak
@@ -2372,8 +2527,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
   //  Pass analysis to memory  ------------------------------- //
   window.updateCoachNotes = function updateCoachNotes(shot) {
-    const container = document.getElementById('coachNotes');
-    if (!container || !shot) return;
+    if (!shot) return;
 
     const mem = window.DOACH_MEM.get();
     const golden = mem.golden;
@@ -2395,11 +2549,11 @@ Draft to refine (optional): '${draftLine}'` : ''}
       </div>` + html;
     }
 
-    container.style.display = 'block';
-    container.innerHTML = html;
+    const container = setCoachNotesContent(html, { html: true });
+    if (!container) return;
     container.style.backgroundColor = 'rgba(0,0,0,0.9)';
     container.style.border = '1px solid lime';
-    };
+  };
 
   window.computeShotRating = function computeShotRating(pose, golden){
     const clamp = (n,a,b) => Math.max(a, Math.min(b, n));
@@ -2492,10 +2646,10 @@ Draft to refine (optional): '${draftLine}'` : ''}
   return issues;
   };
 
-// ───────────────────────────────────────────────
+// -----------------------------------------------
 // Hands-Free Doach (standalone, no global collisions)
 // Exposes: window.doachHandsFree.start(), .stop(), .toggle(), .isActive()
-// ───────────────────────────────────────────────
+// -----------------------------------------------
 (() => {
   if (window.__doachHFInit) return;          // prevent duplicate init
   window.__doachHFInit = true;
@@ -2575,9 +2729,10 @@ Draft to refine (optional): '${draftLine}'` : ''}
       const reply = answerFromMetrics(transcript, mem.lastShot, mem.golden);
       doachSpeak?.(reply);
 
-      const box = document.getElementById('coachNotes');
-      if (box) box.innerHTML =
-        `<strong>🎙 You:</strong> ${transcript}<br><strong>🤖 Doach:</strong> ${reply}`;
+      setCoachNotesContent(
+        `<strong>🎙 You:</strong> ${transcript}<br><strong>🤖 Doach:</strong> ${reply}`,
+        { html: true }
+      );
     };
 
     hfRec.onerror = (ev) => {

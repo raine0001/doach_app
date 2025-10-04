@@ -10,7 +10,6 @@
     #controls { display:flex; gap:12px; align-items:center; margin-bottom:8px; }
     #shotList .shot { margin: 6px 0; }
     button { cursor: pointer; }
-    /* detector tap canvas lives offscreen; we still want a DOM canvas, not OffscreenCanvas */
     #detTap { position:absolute; left:-99999px; top:-99999px; }
   </style>
 </head>
@@ -28,12 +27,12 @@
       <video id="videoPlayer" playsinline muted></video>
       <canvas id="overlay"></canvas>
       <canvas id="exportCanvas" style="position:absolute; left:-9999px"></canvas>
-      <!-- IMPORTANT: HTMLCanvasElement for the detector bridge -->
+      <!-- detector bridge uses a DOM canvas -->
       <canvas id="detTap" width="1" height="1"></canvas>
     </div>
   </div>
 
-  <!-- 0) Config FIRST -->
+  <!-- Config FIRST -->
   <script>
     window.DETECTOR_WORKER_PATH = "/static/js/detector.worker.js";
     window.DETECTOR_MODEL_URL   = "/static/models/best.onnx";
@@ -48,7 +47,7 @@
     });
   </script>
 
-  <!-- 1) Enable the local detector using original API + sane thresholds -->
+  <!-- Enable local detector exactly like old index.html -->
   <script type="module">
     import '/static/js/local_detector.js';
     (async () => {
@@ -56,120 +55,48 @@
       try {
         const ok = await window.localDetector.enable(
           '/static/models/best.onnx',
-          null,                                // use model's labels.json
-          { conf: 0.10, imgsz: 896 }           // small-ball friendly
+          null,                      // let labels.json decide classes
+          { conf: 0.10, imgsz: 896 } // better recall for small ball
         );
         console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
         window.__DET_INIT_DONE = !!ok;
-      } catch (e) {
-        console.warn('[LocalDetector] init failed; will fall back if available', e);
-      }
+      } catch (e) { console.warn('[LocalDetector] init failed', e); }
     })();
   </script>
 
-  <!-- 2) Normalize detector results from either MessagePort or Worker into lastDetectedFrame -->
+  <!-- Your app orchestrator (FBF analyzer, overlay, etc.) and HUD -->
+  <script type="module" src="/static/js/app.js"></script>
+  <script type="module" src="/static/js/bg_hud.js"></script>
+
+  <!-- Page entry: composite + rim pick + feed detector with DOM canvas -->
+  <script type="module" src="/static/arc_mm/arc_mm_fbf.js"></script>
+
+  <!-- Per-frame detect: draw video onto #detTap and call the REAL bridge -->
   <script type="module">
-    function normalize(arr){
-      return arr.map(o=>{
-        const label = (o.label ?? o.class ?? o.cls ?? o.name ?? '').toString().toLowerCase();
-        const conf  = o.conf ?? o.score ?? o.prob ?? null;
-        const bb    = o.box || o.bbox;
-        if (Array.isArray(bb) && bb.length===4) { const [x1,y1,x2,y2]=bb; return { label, box:[x1,y1,x2,y2], conf }; }
-        if ([o.x,o.y,o.w,o.h].every(Number.isFinite)) { return { label, box:[o.x,o.y,o.x+o.w,o.y+o.h], conf }; }
-        if (Array.isArray(o.xyxy) && o.xyxy.length===4) { const [x1,y1,x2,y2]=o.xyxy; return { label, box:[x1,y1,x2,y2], conf }; }
-        return null;
-      }).filter(Boolean);
-    }
-    function handleDetMsg(ev){
-      const d = ev?.data || {};
-      if (d.type === 'ready' || d.type === 'detector:ready' || d.type === 'detector:ep' || d.type === 'info') {
-        window.__DET_INIT_DONE = true;
-      }
-      const raw = Array.isArray(d.objects) ? d.objects
-               : Array.isArray(d.detections) ? d.detections
-               : Array.isArray(d.dets) ? d.dets
-               : Array.isArray(d.boxes) ? d.boxes
-               : (d.data && (d.data.objects||d.data.detections||d.data.dets||d.data.boxes)) || null;
-      if (Array.isArray(raw)) {
-        const objs = normalize(raw);
-        if (objs.length) window.lastDetectedFrame = { __frameIdx:(window.fidx|0), objects: objs, poses: [] };
-      }
-    }
-
-    // Hook both message channels ONCE
-    if (!window.__DET_PORT_HOOK) {
-      window.__DET_PORT_HOOK = true;
-
-      // MessagePort: tee all messages
-      const _add = MessagePort.prototype.addEventListener;
-      MessagePort.prototype.addEventListener = function(type, listener, opts){
-        if (type === 'message') {
-          const tee = (ev)=>{ try{ handleDetMsg(ev); }catch{} return listener.call(this, ev); };
-          return _add.call(this, type, tee, opts);
-        }
-        return _add.call(this, type, listener, opts);
-      };
-
-      // Worker.postMessage: catch transferred ports and init them
-      const _wpm = Worker.prototype.postMessage;
-      Worker.prototype.postMessage = function(msg, transfer){
-        try {
-          if (transfer && transfer.length) {
-            for (const t of transfer) {
-              if (t && typeof t.postMessage === 'function' && typeof t.start === 'function') {
-                try { t.addEventListener('message', handleDetMsg, { passive:true }); t.start(); } catch {}
-                window.__detectorPort = t;
-              }
-            }
-          }
-        } catch {}
-        return _wpm.call(this, msg, transfer);
-      };
-
-      // Worker constructor: listen on main channel too
-      const ORIG = window.Worker;
-      window.Worker = function(url, opts){
-        const w = new ORIG(url, opts);
-        if (/detector|local|microclip|worker\.js/i.test(String(url||''))) {
-          console.log('[hook] intercept:', String(url));
-          window.__detectorWorker = w;
-          w.addEventListener('message', handleDetMsg, { passive:true });
-        }
-        return w;
-      };
-    }
-
-    // Send one frame per FBF tick using the REAL bridge (HTMLCanvasElement)
     const video   = document.getElementById('videoPlayer');
     const overlay = document.getElementById('overlay');
-    const detTap  = document.getElementById('detTap');
+    const tap     = document.getElementById('detTap');
 
     window.addEventListener('analyzer:frame-done', () => {
-      window.fidx = (window.fidx|0) + 1;                      // some builds expect this
+      window.fidx = (window.fidx|0) + 1;
 
       const W = overlay.width, H = overlay.height;
       if (!W || !H) return;
+      if (tap.width !== W || tap.height !== H) { tap.width = W; tap.height = H; }
 
-      // Always use a DOM canvas for the bridge
-      if (detTap.width !== W || detTap.height !== H) {
-        detTap.width = W; detTap.height = H;
-      }
-      const ctx = detTap.getContext('2d', { willReadFrequently:true });
-      ctx.drawImage(video, 0, 0, W, H);
+      // draw current video frame to DOM canvas
+      tap.getContext('2d', { willReadFrequently:true }).drawImage(video, 0, 0, W, H);
 
+      // use the app’s bridge exactly as built
       if (typeof window.sendFrameToDetect === 'function') {
-        try { window.sendFrameToDetect(detTap, (window.fidx|0)); } catch {}
+        try { window.sendFrameToDetect(tap, (window.fidx|0)); } catch {}
       }
-      // heartbeat: see object count without spam
-      if (((window.__detBeat=(window.__detBeat||0)+1)%12)===0) {
+
+      // heartbeat: watch object flow
+      if (((window.__beat=(window.__beat||0)+1)%12)===0) {
         console.log('[det] objs:', (window.lastDetectedFrame?.objects||[]).length);
       }
     });
   </script>
-
-  <!-- 3) Your orchestrator (FBF + record + rim pick) and the HUD that draws boxes -->
-  <script type="module" src="/static/js/app.js"></script>
-  <script type="module" src="/static/js/bg_hud.js"></script>
-  <script type="module" src="/static/arc_mm/arc_mm_fbf.js"></script>
 </body>
 </html>
