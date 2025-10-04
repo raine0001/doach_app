@@ -1334,10 +1334,13 @@ def admin_sessions():
             with db['Session']() as s:
                 rows = s.execute(select(db['SessionRow'])).scalars().all()
                 for r in rows:
+                    last_shot_dt = s.execute(select(db['ShotRow'].created_at).where(db['ShotRow'].sid == r.sid).order_by(db['ShotRow'].created_at.desc()).limit(1)).scalar_one_or_none()
                     items.append({
                         'sid': r.sid,
                         'created_at': r.created_at.isoformat() if r.created_at else None,
                         'ended_at': r.ended_at.isoformat() if r.ended_at else None,
+                        'updated_at': r.updated_at.isoformat() if getattr(r, 'updated_at', None) else None,
+                        'last_shot_at': last_shot_dt.isoformat() if last_shot_dt else None,
                         'shots': r.shots_count,
                         'makes': r.makes,
                         'accuracy': r.accuracy,
@@ -1351,11 +1354,28 @@ def admin_sessions():
                     try:
                         with open(p, 'r', encoding='utf-8') as f:
                             sdat = json.load(f)
+                        shots = sdat.get('shots', []) or []
+                        last_ms = None
+                        for shot in shots:
+                            try:
+                                t = shot.get('t')
+                                if isinstance(t, (int, float)):
+                                    last_ms = max(last_ms or t, t)
+                            except Exception:
+                                continue
+                        last_iso = None
+                        if last_ms is not None:
+                            try:
+                                last_iso = datetime.fromtimestamp(last_ms/1000, timezone.utc).isoformat()
+                            except Exception:
+                                last_iso = None
                         items.append({
                             'sid': sid,
                             'created_at': sdat.get('startedAt'),
                             'ended_at': sdat.get('endedAt'),
-                            'shots': len(sdat.get('shots', [])),
+                            'updated_at': None,
+                            'last_shot_at': last_iso,
+                            'shots': len(shots),
                             'user': None
                         })
                     except Exception:

@@ -56,22 +56,46 @@
     return `${value.toFixed(digits)} ${units[unit]}`;
   };
 
-
-  const getSessionTimestamp = (session) => {
-    if (!session || typeof session !== 'object') return 0;
-    const fields = [
-      'ended_at','ended','endedAt','updated_at','updated','last_activity',
-      'created_at','created','started_at','started','start_at','start_ms','created_ms','created_ts','ts','timestamp'
-    ];
-    for (const key of fields) {
-      if (!(key in session)) continue;
-      const value = session[key];
-      if (value == null) continue;
-      const num = Number(value);
-      if (Number.isFinite(num)) return num;
-      const parsed = Date.parse(value);
+  const parseTimestampValue = (value) => {
+    if (value === null || value === undefined) return 0;
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : 0;
+    }
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return 0;
+      if (/^\d+$/.test(trimmed)) {
+        const num = Number(trimmed);
+        if (Number.isFinite(num)) return num;
+      }
+      const parsed = Date.parse(trimmed);
       if (!Number.isNaN(parsed)) return parsed;
     }
+    return 0;
+  };
+
+  const timestampFromSid = (sid) => {
+    if (!sid) return 0;
+    const match = String(sid).match(/^(\d{4})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/);
+    if (!match) return 0;
+    const [, year, month, day, hour, minute, second] = match;
+    const iso = `${year}-${month}-${day}T${hour}:${minute}:${second}Z`;
+    const ms = Date.parse(iso);
+    return Number.isNaN(ms) ? 0 : ms;
+  };
+
+
+  const getSessionTimestamp = (session) => {
+    if (!session || typeof session !== 'object') {
+      return timestampFromSid(session?.sid || session);
+    }
+    const fields = ['last_shot_at','updated_at','last_activity','ended_at','ended','endedAt','created_at','created','started_at','started','start_at','start_ms','created_ms','created_ts','ts','timestamp'];
+    for (const key of fields) {
+      const ts = parseTimestampValue(session[key]);
+      if (ts) return ts;
+    }
+    const sidTs = timestampFromSid(session.sid);
+    if (sidTs) return sidTs;
     return 0;
   };
 
@@ -108,7 +132,32 @@
     return `<span class="shots-pill ${cls}">${text}</span>`;
   };
 
+  const getLastActivityTimestamp = (session) => {
+    if (!session || typeof session !== 'object') return 0;
+    const candidates = ['last_shot_at','updated_at','last_activity','created_at','created'];
+    for (const key of candidates) {
+      const ts = parseTimestampValue(session[key]);
+      if (ts) return ts;
+    }
+    return timestampFromSid(session.sid);
+  };
+
   const isMadeResult = (value) => value === true || value === 'made' || value === 'make' || value === 1 || value === '1';
+
+  const LIVE_MAX_AGE_MS = 5 * 60 * 1000;
+
+  const isSessionLive = (session) => {
+    if (!session || typeof session !== 'object') return false;
+    const shots = Number(session.shots ?? session.shot_count ?? session.totals?.attempts);
+    if (!Number.isFinite(shots) || shots <= 1 || shots >= 10) return false;
+    const ended = session.ended_at || session.ended || session.endedAt || session.done === true;
+    if (ended) return false;
+    const activityTs = getLastActivityTimestamp(session);
+    if (!activityTs) return false;
+    const age = Math.abs(Date.now() - activityTs);
+    if (age > LIVE_MAX_AGE_MS) return false;
+    return true;
+  };
 
   const setButtonsEnabled = (enabled) => {
     [btnObserve, btnOpenJson, btnDownload, btnCopy].forEach((btn) => { if (btn) btn.disabled = !enabled; });
@@ -197,6 +246,7 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       sessions = Array.isArray(data.sessions) ? data.sessions.slice() : [];
+      sessions = sessions.map((session) => ({ ...session, live: isSessionLive(session) }));
       sessions.sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
       renderSessions();
     } catch (err) {
