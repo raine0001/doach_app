@@ -463,12 +463,12 @@
         document.getElementById('btnStartLive').onclick = async () => {
           try { hideStart(); } catch {}
           try {
-            // Ensure a backend session row exists so admin sees it immediately
-            if (!window.__SESSION_ID) {
-              const r = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ device: navigator.userAgent }) });
-              if (r.ok) { const j = await r.json(); window.__SESSION_ID = j.id; window.__SHOT_IDX = 0; }
-            }
-          } catch {}
+            const started = await window.doachSession?.start?.();
+            if (started && !window.__SESSION_ID) window.__SESSION_ID = started;
+            window.__SHOT_IDX = window.__SHOT_IDX || 0;
+          } catch (err) {
+            console.warn('[start-live] session start failed', err);
+          }
           try {
             await window.requestInitialMediaAccess?.({ video: true, audio: true });
           } catch (err) {

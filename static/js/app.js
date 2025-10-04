@@ -460,8 +460,16 @@ function setPoseIfMissing(shotId, snap) {
       if (!snapshot) return false;
       try {
         if (!window.__SESSION_ID) {
-          const rr = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ device:navigator.userAgent }), credentials:'include' });
-          if (rr.ok) { const jj = await rr.json(); window.__SESSION_ID = jj?.id || null; }
+          try {
+            const started = await window.doachSession?.start?.();
+            if (!window.__SESSION_ID && started) window.__SESSION_ID = started;
+          } catch {
+            console.warn('[pose:release] unable to start session for release mark', { shotId, label });
+          }
+        }
+        if (!window.__SESSION_ID) {
+          console.warn('[pose:release] skipping release_mark persist (no session id)', { shotId, label });
+          return false;
         }
         await fetch('/api/release_mark', {
           method:'POST', headers:{'Content-Type':'application/json'},
