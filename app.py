@@ -497,6 +497,13 @@ def api_release_mark():
         via   = (data.get('via') or 'frontend').strip()
         snap  = data.get('poseSnapshot') or None
         hoop  = data.get('hoop') or None
+        gate  = data.get('gate') or None
+        if not sid:
+            return jsonify({'ok': False, 'error': 'sessionId required'}), 400
+        if shot is None:
+            return jsonify({'ok': False, 'error': 'shotId required'}), 400
+        if not isinstance(snap, dict) or not snap:
+            return jsonify({'ok': False, 'error': 'poseSnapshot required'}), 422
         entry = {
             'ts': datetime.utcnow().isoformat(timespec='milliseconds')+'Z',
             'sessionId': sid,
@@ -506,7 +513,7 @@ def api_release_mark():
             'via': via,
             'poseSnapshot': snap,
             'hoop': hoop,
-            'gate': data.get('gate') or None,
+            'gate': gate,
         }
         # Persist to session folder if present; else log in a global file
         if sid:
@@ -1831,7 +1838,14 @@ def admin_session_debug(sid):
                 out['snapshots'] = snaps
     except Exception as e:
         _trace('admin_session_debug: backfill error:', e)
-    _trace('admin_session_debug', {'sid': sid, 'sessionFile': (len(out.get('sessionFile',{}).get('shots',[]) or [])), 'shotsDB': len(out.get('shotsDB') or []), 'feedback': len(out.get('feedback') or [])})
+    session_shots = 0
+    try:
+        session_file = out.get('sessionFile')
+        if isinstance(session_file, dict):
+            session_shots = len(session_file.get('shots') or [])
+    except Exception:
+        session_shots = 0
+    _trace('admin_session_debug', {'sid': sid, 'sessionFile': session_shots, 'shotsDB': len(out.get('shotsDB') or []), 'feedback': len(out.get('feedback') or [])})
     return jsonify(out)
 
 @app.get('/admin/session/<sid>/clips')

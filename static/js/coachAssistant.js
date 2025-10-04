@@ -638,8 +638,17 @@ window.getShotNumber = window.getShotNumber || function() {
 // Canonical pose snapshot getter used across coach paths.
 function getPoseSnapshotFrom(s) {
   try { if (s && s.poseSnapshot) return s.poseSnapshot; } catch {}
-  try { if (window.__LAST_POSE_SNAP) return window.__LAST_POSE_SNAP; } catch {}
-  try { return window.capturePoseSnapshot?.() || null; } catch {}
+  const shotId = Number(s?.shotId);
+  if (Number.isFinite(shotId)) {
+    const stored = window.poseStore?.get(shotId) || null;
+    if (stored) return stored;
+  }
+  try {
+    const state = window.playerState || null;
+    if (state && Array.isArray(state.keypoints) && state.keypoints.length >= 33 && typeof window.extractPoseSnapshot === 'function') {
+      return window.extractPoseSnapshot(state.keypoints, window.getLockedHoopBox?.());
+    }
+  } catch {}
   return null;
 }
 
@@ -804,6 +813,8 @@ window.addEventListener('shot:feedback:request', (e) => {
 
   // Pose snapshot + metrics (richer). Prefer window.extractPoseSnapshot if provided; else define here.
 function defineExtractPoseSnapshotOnce(){
+  return;
+
   if (typeof window.extractPoseSnapshot === 'function') return;
 
   window.extractPoseSnapshot = function extractPoseSnapshot(keypoints, hoopBox){
@@ -1076,67 +1087,18 @@ function defineExtractPoseSnapshotOnce(){
 
 // Wire quick pose tips on release - gated off by default. Enable with window.PREF_LIVE_TIPS=true
 function __getPoseSnapshot(){
-  try { defineExtractPoseSnapshotOnce(); } catch {}
   try {
-    // Prefer extractPoseSnapshot(keypoints, hoopBox)
-    if (typeof window.extractPoseSnapshot === 'function') {
-      // Choose best-available keypoints: current -> last good -> last in history
-      let kps = null;
-      try {
-        if (Array.isArray(window.playerState?.keypoints) && window.playerState.keypoints.length >= 33) kps = window.playerState.keypoints;
-        if (!kps && Array.isArray(window.__lastPoseKP) && window.__lastPoseKP.length >= 33) kps = window.__lastPoseKP;
-        if (!kps) {
-          const hist = (window.playerState?.frameHistory || []).slice().reverse();
-          const found = hist.find(f => Array.isArray(f?.keypoints) && f.keypoints.length >= 33);
-          if (found) kps = found.keypoints;
-        }
-      } catch {}
-      if (kps) return window.extractPoseSnapshot(kps, window.getLockedHoopBox?.());
+    const entries = window.poseStore?.entries?.() || [];
+    if (entries.length) {
+      const latest = entries[entries.length - 1];
+      if (latest?.snap) return latest.snap;
     }
-    // Fallback to legacy capture API if present
+  } catch {}
+  try {
     if (typeof window.capturePoseSnapshot === 'function') {
       return window.capturePoseSnapshot(window.playerState, window.getLockedHoopBox?.());
     }
   } catch {}
-
-  // Minimal emergency snapshot from current keypoints or gate tests
-  try {
-    const kps = (window.playerState?.keypoints && Array.isArray(window.playerState.keypoints) && window.playerState.keypoints.length >= 33)
-      ? window.playerState.keypoints
-      : (Array.isArray(window.__lastPoseKP) && window.__lastPoseKP.length >= 33 ? window.__lastPoseKP : null);
-    const gate = window.__LAST_GATE?.detail?.tests || {};
-    if (Array.isArray(kps) && kps.length >= 33) {
-      const sh = kps[12], wr = kps[16], el = kps[14], hp = kps[24]; // R-side
-      if (sh && wr && el && hp) {
-        const forearm = { x: wr.x - sh.x, y: wr.y - sh.y };
-        const shoulderToWristAngle = Math.atan2(Math.abs(forearm.y), Math.abs(forearm.x)) * 180 / Math.PI;
-        const torsoVec = { x: sh.x - hp.x, y: sh.y - hp.y };
-        const torsoLeanAngle = (function(u){
-          const m = Math.hypot(u.x,u.y) || 1e-6;
-          const dot = (u.x * 0) + (u.y * -1);
-          const t = Math.max(-1, Math.min(1, dot / m));
-          return Math.abs(Math.acos(t) * 180 / Math.PI);
-        })(torsoVec);
-        return {
-          releaseAboveShoulder: wr.y < sh.y,
-          shoulderToWristAngle: Math.round(shoulderToWristAngle),
-          armVerticalityDeg: Math.round(Math.abs(90 - shoulderToWristAngle)),
-          torsoLeanAngle: Math.round(torsoLeanAngle)
-        };
-      }
-    }
-    if (gate && (gate.wristAboveShoulder != null)) {
-      const dx = Number(gate.dx || 0), dy = Number(gate.dy || 0);
-      const ang = (dx || dy) ? (Math.atan2(Math.abs(dy), Math.abs(dx)) * 180 / Math.PI) : null;
-      return {
-        releaseAboveShoulder: !!gate.wristAboveShoulder,
-        shoulderToWristAngle: Number.isFinite(ang) ? Math.round(ang) : null,
-        armVerticalityDeg: Number.isFinite(ang) ? Math.round(Math.abs(90 - ang)) : null,
-        torsoLeanAngle: null
-      };
-    }
-  } catch {}
-
   return null;
 }
 
@@ -2253,21 +2215,22 @@ function __getPoseSnapshot(){
     }catch{ return text; }
   }
 
-  // ---------- Capture pose content for analysis ----------
-  window.capturePoseSnapshot = function(playerState, hoopBox){
-    console.log('capturePoseSnapshot called');
-    
-    if (!playerState) return null;
+
+  // ---------- wraps extractPoseSnapshot for analysis ----------
+  window.capturePoseSnapshot = function capturePoseSnapshot(playerState, hoopBox){
+    const state = playerState || window.playerState || null;
+    if (!state) return null;
     try {
-      try { defineExtractPoseSnapshotOnce(); } catch {}
-      const kp = playerState?.keypoints;
+      const kp = state?.keypoints;
       if (Array.isArray(kp) && kp.length >= 33 && typeof window.extractPoseSnapshot === 'function') {
-        return window.extractPoseSnapshot(kp, hoopBox);
+        return window.extractPoseSnapshot(kp, hoopBox ?? window.getLockedHoopBox?.());
       }
     } catch {}
     return null;
   };
 
+  
+  
   //LLM helper
   function composeLLMPrompt(shot, golden, draftLine, made, personality) {
     const ctx = {
@@ -2975,11 +2938,3 @@ window.addEventListener('shot:summary', (e) => {
 })();
 
   })();
-
-
-
-
-
-
-
-

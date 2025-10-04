@@ -146,12 +146,30 @@ async function startSession() {
 async function persistShotFromSummary(detail) {
   console.debug('[persistShot] detail', detail);
 
-  const poseRelease = window.__POSE_RELEASES?.get?.(detail?.shotId) || null;
-  if (poseRelease) {
-    detail.poseSnapshot = typeof structuredClone === 'function'
-      ? structuredClone(poseRelease)
-      : JSON.parse(JSON.stringify(poseRelease));
+  const shotId = Number(detail?.shotId);
+  const releasePose = Number.isFinite(shotId)
+    ? window.poseStore?.get(shotId) || null
+    : null;
+
+  let poseSnapshot = null;
+  const poseSource = releasePose || detail?.poseSnapshot || null;
+  if (poseSource && typeof poseSource === 'object') {
+    try {
+      poseSnapshot = typeof structuredClone === 'function'
+        ? structuredClone(poseSource)
+        : JSON.parse(JSON.stringify(poseSource));
+    } catch {
+      try { poseSnapshot = JSON.parse(JSON.stringify(poseSource)); }
+      catch { poseSnapshot = null; }
+    }
   }
+  if (!poseSnapshot) {
+    console.error('[persistShot] missing canonical pose snapshot', { shotId });
+    window.dispatchEvent(new CustomEvent('pose:capture-missing', { detail: { shotId, reason: 'no-pose-for-summary' } }));
+    return;
+  }
+  detail.poseSnapshot = poseSnapshot;
+  try { window.poseStore?.set(shotId, poseSnapshot, { source: 'persist', overwrite: false }); } catch {}
 
   // Only persist if we have a session id; otherwise try to start one lazily
   if (!__sid) {
@@ -161,7 +179,7 @@ async function persistShotFromSummary(detail) {
 
   // Build a stable de-dupe key from what we actually have
   const sid   = String(__sid || '');
-  const shot  = Number(detail?.shotId);
+  const shot  = shotId;
   const fEnd  = Number(detail?.frameEnd ?? detail?.endFrame ?? NaN);
   const fAny  = Number(detail?.frame ?? NaN);
   const key   = [sid, Number.isFinite(shot) ? shot : '', Number.isFinite(fEnd) ? fEnd : '', Number.isFinite(fAny) ? fAny : ''].join('|');
@@ -172,7 +190,7 @@ async function persistShotFromSummary(detail) {
   }
 
   // Compute idx: prefer provided shotId; else allocate our own
-  let idx = Number(detail?.shotId);
+  let idx = shotId;
   if (!Number.isFinite(idx) || idx <= 0) idx = nextShotIndex();
 
   const payload = {
@@ -182,7 +200,7 @@ async function persistShotFromSummary(detail) {
     arcHeight: Number.isFinite(detail?.arcHeight) ? Number(detail.arcHeight) : null,
     entryAngle: Number.isFinite(detail?.entryAngle) ? Number(detail.entryAngle) : null,
     releaseAngle: Number.isFinite(detail?.releaseAngle) ? Number(detail.releaseAngle) : null,
-    pose: detail?.poseSnapshot || null   // optional, server can ignore
+    pose: poseSnapshot || null   // optional, server can ignore
   };
 
   try {

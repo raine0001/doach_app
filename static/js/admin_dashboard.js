@@ -18,6 +18,7 @@
   let cachedDebug = null;
   let clipTimer = null;
   let debugTimer = null;
+  let lastClipsPayload = null;
 
   const escapeHtmlMap = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
   const escapeHtml = (value) => String(value ?? '').replace(/[&<>\"']/g, (ch) => escapeHtmlMap[ch] || ch);
@@ -56,6 +57,25 @@
   };
 
 
+  const getSessionTimestamp = (session) => {
+    if (!session || typeof session !== 'object') return 0;
+    const fields = [
+      'ended_at','ended','endedAt','updated_at','updated','last_activity',
+      'created_at','created','started_at','started','start_at','start_ms','created_ms','created_ts','ts','timestamp'
+    ];
+    for (const key of fields) {
+      if (!(key in session)) continue;
+      const value = session[key];
+      if (value == null) continue;
+      const num = Number(value);
+      if (Number.isFinite(num)) return num;
+      const parsed = Date.parse(value);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+    return 0;
+  };
+
+
   const buildPoseSummary = (metrics) => {
     if (!metrics || typeof metrics !== 'object') return '';
     const parts = [];
@@ -87,6 +107,8 @@
     else if (result === false || result === 'miss') { cls = 'miss'; text = 'miss'; }
     return `<span class="shots-pill ${cls}">${text}</span>`;
   };
+
+  const isMadeResult = (value) => value === true || value === 'made' || value === 'make' || value === 1 || value === '1';
 
   const setButtonsEnabled = (enabled) => {
     [btnObserve, btnOpenJson, btnDownload, btnCopy].forEach((btn) => { if (btn) btn.disabled = !enabled; });
@@ -158,6 +180,7 @@
     } else {
       sessionsList.appendChild(frag);
     }
+    setActiveRow(activeSid);
   };
 
   const setActiveRow = (sid) => {
@@ -173,7 +196,8 @@
       const res = await fetch('/admin/sessions');
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-      sessions = Array.isArray(data.sessions) ? data.sessions : [];
+      sessions = Array.isArray(data.sessions) ? data.sessions.slice() : [];
+      sessions.sort((a, b) => getSessionTimestamp(b) - getSessionTimestamp(a));
       renderSessions();
     } catch (err) {
       sessionsList.innerHTML = `<div class="muted" style="padding:12px;">Failed to load sessions: ${escapeHtml(err.message || err)}</div>`;
@@ -192,102 +216,184 @@
     sessionLabel.textContent = `${sid}${bits.length ? ' - ' + bits.join(' - ') : ''}`;
   };
 
-  const renderShots = (payload) => {
+  const collectShotMeta = () => {
+    const map = new Map();
+    const ensure = (idx) => {
+      if (!Number.isFinite(idx) || idx <= 0) return null;
+      if (!map.has(idx)) map.set(idx, {});
+      return map.get(idx);
+    };
+    const noteSummary = (entry, summary, source) => {
+      if (!entry) return;
+      if (typeof summary !== 'string') return;
+      const trimmed = summary.trim();
+      if (!trimmed) return;
+      if (!entry.summary || (source === 'AI' && entry.summarySource !== 'AI')) {
+        entry.summary = trimmed;
+        entry.summarySource = source;
+      }
+    };
 
-    if (!shotsWrap) return;
-
-    if (!payload || !Array.isArray(payload.clips) || !payload.clips.length) {
-
-      shotsWrap.className = 'shots-empty';
-
-      shotsWrap.textContent = activeSid ? 'Waiting for clips...' : 'No clips yet.';
-
-      if (shotsMeta) shotsMeta.textContent = '0';
-
-      return;
-
+    const sessionShots = cachedDebug?.sessionFile?.shots;
+    if (Array.isArray(sessionShots)) {
+      sessionShots.forEach((shot, idxZero) => {
+        let idx = Number(shot?.idx ?? shot?.shotId ?? shot?.id);
+        if (!Number.isFinite(idx) || idx <= 0) idx = idxZero + 1;
+        const entry = ensure(idx);
+        if (!entry) return;
+        noteSummary(entry, shot?.doach, 'AI');
+        noteSummary(entry, shot?.coachLine, 'coach');
+        noteSummary(entry, shot?.summary, entry.summarySource || 'summary');
+        noteSummary(entry, shot?.coach?.line, 'coach');
+        noteSummary(entry, shot?.coach?.summary, 'coach');
+        if (shot?.feedback && typeof shot.feedback.text === 'string') noteSummary(entry, shot.feedback.text, 'AI');
+        if (shot?.poseSummary) noteSummary(entry, shot.poseSummary, entry.summarySource || 'pose');
+        if (shot?.notes && !entry.extraText) entry.extraText = String(shot.notes).trim();
+        if (shot?.made !== undefined && entry.result === undefined) entry.result = shot.made;
+        if (!entry.pose && shot?.poseSnapshot) entry.pose = shot.poseSnapshot;
+        if (!entry.pose && shot?.pose) entry.pose = shot.pose;
+        if (!entry.poseMetrics && shot?.poseMetrics) entry.poseMetrics = shot.poseMetrics;
+        if (!entry.poseSource && shot?.poseSource) entry.poseSource = shot.poseSource;
+      });
     }
 
+    const feedbackList = cachedDebug?.feedback;
+    if (Array.isArray(feedbackList)) {
+      feedbackList.forEach((fb) => {
+        const idx0 = Number(fb?.shot_idx);
+        if (!Number.isFinite(idx0)) return;
+        const entry = ensure(idx0 + 1);
+        noteSummary(entry, fb?.text, 'AI');
+      });
+    }
 
+    const shotsDB = cachedDebug?.shotsDB;
+    if (Array.isArray(shotsDB)) {
+      shotsDB.forEach((shot) => {
+        const idx = Number(shot?.idx);
+        if (!Number.isFinite(idx)) return;
+        const entry = ensure(idx);
+        if (!entry) return;
+        if (shot.made !== undefined) entry.result = shot.made;
+        if (shot.arcHeight != null) entry.arcHeight = shot.arcHeight;
+        if (shot.entryAngle != null) entry.entryAngle = shot.entryAngle;
+        if (shot.releaseAngle != null) entry.releaseAngle = shot.releaseAngle;
+      });
+    }
 
-    const rows = payload.clips.map((clip, index) => {
+    const snapshots = cachedDebug?.snapshots;
+    if (Array.isArray(snapshots)) {
+      snapshots.forEach((snap) => {
+        let idxRaw = snap?.shot_idx;
+        if (idxRaw == null) idxRaw = snap?.shotId ?? snap?.shot;
+        let idx = Number(idxRaw);
+        if (Number.isFinite(idx) && idx <= 0 && snap?.shot_idx === idxRaw) idx = idx + 1;
+        if (!Number.isFinite(idx) || idx <= 0) return;
+        const entry = ensure(idx);
+        if (!entry) return;
+        if (!entry.pose && snap?.metrics && typeof snap.metrics === 'object') entry.pose = snap.metrics;
+        if (!entry.poseSource && snap?.via) entry.poseSource = snap.via;
+      });
+    }
 
-      const displayIdx = clip.displayIdx != null ? clip.displayIdx : (clip.idx != null ? clip.idx + 1 : index + 1);
+    return map;
+  };
 
-      const pillHtml = resultPill(clip.result);
+  const renderShots = (payload) => {
+    if (!shotsWrap) return;
 
-      const summaryLine = clip.poseSummary || buildPoseSummary(clip.poseMetrics || clip.pose);
+    lastClipsPayload = payload;
 
-      const summaryHtml = summaryLine ? escapeHtml(summaryLine) : '';
+    if (!payload || !Array.isArray(payload.clips) || !payload.clips.length) {
+      shotsWrap.className = 'shots-empty';
+      shotsWrap.textContent = activeSid ? 'Waiting for clips...' : 'No clips yet.';
+      if (shotsMeta) shotsMeta.textContent = '0';
+      return;
+    }
 
-      const sourceHtml = clip.poseSource ? ` <span class="pose-source">[${escapeHtml(clip.poseSource)}]</span>` : '';
+    const totals = payload.totals || cachedDebug?.sessionFile?.totals || {};
+    const shotMeta = collectShotMeta();
+    const shotRows = [];
+    const shotResults = [];
 
-      const textHtml = clip.poseText ? `<div class="pose-text">${escapeHtml(clip.poseText)}</div>` : '';
+    const deriveShotIdx = (clip, fallback) => {
+      const candidates = [];
+      if (clip.displayIdx != null) candidates.push(clip.displayIdx);
+      if (clip.idx != null) {
+        const idxNum = Number(clip.idx);
+        if (Number.isFinite(idxNum)) candidates.push(idxNum > 0 ? idxNum : idxNum + 1);
+      }
+      if (clip.id != null) candidates.push(clip.id);
+      if (clip.shotIndex != null) candidates.push(clip.shotIndex);
+      const label = clip.name || clip.label || clip.url || clip.href || '';
+      const match = label.match(/shot[-_]?([0-9]+)/i);
+      if (match) candidates.push(Number(match[1]));
+      for (const candidate of candidates) {
+        const num = Number(candidate);
+        if (Number.isFinite(num) && num > 0) return Math.round(num);
+      }
+      return fallback;
+    };
 
-      const poseCell = summaryHtml ? `${summaryHtml}${sourceHtml}${textHtml}` : (textHtml || '--');
+    payload.clips.forEach((clip, index) => {
+      const shotIdx = deriveShotIdx(clip, index + 1);
+      const meta = shotMeta.get(shotIdx) || {};
+
+      const resultValue = meta.result ?? clip.result;
+      shotResults.push({ idx: shotIdx, result: resultValue });
+      const pillHtml = resultPill(resultValue);
+
+      const metricsSource = meta.poseMetrics || meta.pose || clip.poseMetrics || clip.pose;
+      const summaryLine = meta.summary || clip.poseSummary || '';
+      const metricsFallback = !summaryLine ? buildPoseSummary(metricsSource) : '';
+      const summaryDisplay = summaryLine || metricsFallback || '';
+      const summaryHtml = summaryDisplay ? escapeHtml(summaryDisplay) : '';
+      const summaryTitle = summaryDisplay ? escapeHtml(summaryDisplay) : '';
+      const sourceLabel = meta.summarySource || meta.poseSource || clip.poseSource || (summaryLine ? 'AI' : '');
+      const sourceTextRaw = sourceLabel ? String(sourceLabel).toUpperCase() : '';
+      const sourceHtml = sourceTextRaw ? ` <span class="pose-source">[${escapeHtml(sourceTextRaw)}]</span>` : '';
+      const extraText = meta.extraText || clip.poseText || '';
+      const extraHtml = extraText ? `<div class="pose-text">${escapeHtml(extraText)}</div>` : '';
+
+      const poseCell = summaryHtml
+        ? `<div class="pose-line" title="${summaryTitle}">${summaryHtml}</div>${sourceHtml}${extraHtml}`
+        : (extraHtml || '--');
 
       const saved = fmtTime(clip.created);
-
       const size = fmtSize(clip.size);
 
-      const linkText = clip.label || clip.name || `shot-${displayIdx}`;
-
-      const hasUrl = Boolean(clip.url || clip.href);
-
+      const linkText = clip.label || clip.name || `shot-${shotIdx}`;
       const linkUrl = clip.url || clip.href || '#';
-
+      const hasUrl = Boolean(clip.url || clip.href);
       const linkHtml = hasUrl
-
         ? `<a class="clip-link" href="${linkUrl}" target="_blank" rel="noopener">${escapeHtml(linkText)}</a>`
-
         : `<span class="clip-link clip-link-disabled">${escapeHtml(linkText)}</span>`;
 
-      return `
-
+      shotRows.push(`
         <tr>
-
-          <td>${displayIdx}</td>
-
+          <td>${shotIdx}</td>
           <td>${pillHtml}</td>
-
           <td>${linkHtml}</td>
-
           <td>${poseCell}</td>
-
           <td>${saved}</td>
-
           <td>${size}</td>
-
-        </tr>`;
-
-    }).join('');
-
-
+        </tr>`);
+    });
 
     shotsWrap.className = '';
-
     shotsWrap.innerHTML = `
-
       <table class='shots-table'>
-
         <thead><tr><th>#</th><th>Result</th><th>Clip</th><th>Pose Highlights</th><th>Saved</th><th>Size</th></tr></thead>
-
-        <tbody>${rows}</tbody>
-
+        <tbody>${shotRows.join('')}</tbody>
       </table>`;
 
     if (shotsMeta) {
-
-      const totals = payload.totals || {};
-
-      const attempts = Number.isFinite(totals.attempts) && totals.attempts > 0 ? totals.attempts : payload.clips.length;
-
-      const made = Number.isFinite(totals.made) ? totals.made : payload.clips.filter((clip) => clip.result === true || clip.result === 'made').length;
-
+      const attempts = Number.isFinite(totals.attempts) && totals.attempts > 0 ? totals.attempts : shotResults.length;
+      const made = Number.isFinite(totals.made)
+        ? totals.made
+        : shotResults.filter(({ result }) => isMadeResult(result)).length;
       shotsMeta.textContent = `${made} of ${attempts} made`;
-
     }
-
   };
 
 
@@ -324,6 +430,9 @@
       const data = await res.json();
       if (sid !== activeSid) return;
       cachedDebug = data;
+      if (lastClipsPayload && Array.isArray(lastClipsPayload.clips) && lastClipsPayload.clips.length) {
+        renderShots(lastClipsPayload);
+      }
       if (dbgJson) dbgJson.textContent = JSON.stringify(data, null, 2);
       const stats = {
         sid,
@@ -348,6 +457,7 @@
     setActiveRow(sid);
     setButtonsEnabled(true);
     cachedDebug = null;
+    lastClipsPayload = null;
     clearTimers();
     if (dbgJson) dbgJson.textContent = '(loading...)';
     const sessionInfo = sessions.find((s) => s.sid === sid) || {};

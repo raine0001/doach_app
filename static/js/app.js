@@ -169,12 +169,13 @@ window.poseDetectSerial = poseDetectSerial;
       const list = window.__shotList || [];
       const row  = list.find(r => r && (r.id === shotId || r.idx === shotId)) || list.at?.(-1) || {};
       const hadRowSnapshot = !!row?.poseSnapshot;
-      const snap = row?.poseSnapshot || window.__LAST_POSE_SNAP || null;
+      const storeSnap = Number.isFinite(shotId) ? (window.poseStore?.get(shotId) || null) : null;
+      const snap = row?.poseSnapshot || storeSnap || null;
       if (!hadRowSnapshot && snap) {
-        console.warn('[pose:summary] using cached pose snapshot', { shotId });
+        console.warn('[pose:summary] using cached pose snapshot', { shotId, source: storeSnap ? 'store' : 'row' });
       }
       if (!snap) {
-        console.error('[pose:summary] no pose snapshot available for summary', { shotId, lastPoseCached: !!window.__LAST_POSE_SNAP });
+        console.error('[pose:summary] no pose snapshot available for summary', { shotId, storeHasPose: !!storeSnap });
       }
 
       const sum = {
@@ -320,14 +321,84 @@ function clonePoseSnapshotLocal(snap) {
   }
 }
 
+// ---------- Pose snapshot store ----------
+(function installPoseSnapshotStore(){
+  if (window.__poseSnapshotStoreInstalled) return;
+  window.__poseSnapshotStoreInstalled = true;
+
+  const store = new Map();
+  const meta  = new Map();
+
+  function normalizeShotId(id) {
+    const num = Number(id);
+    return Number.isFinite(num) && num > 0 ? num : null;
+  }
+
+  function cloneForStore(snap) {
+    if (!snap || typeof snap !== 'object') return null;
+    try { return structuredClone ? structuredClone(snap) : JSON.parse(JSON.stringify(snap)); } catch {
+      try { return JSON.parse(JSON.stringify(snap)); } catch { return null; }
+    }
+  }
+
+  const api = {
+    set(shotId, snap, opts = {}) {
+      const id = normalizeShotId(shotId);
+      if (!id || !snap || typeof snap !== 'object') return false;
+      const overwrite = opts.overwrite === true;
+      if (!overwrite && store.has(id)) return false;
+      const cloned = cloneForStore(snap);
+      if (!cloned) return false;
+      store.set(id, cloned);
+      meta.set(id, { source: opts.source || 'unknown', capturedAt: Date.now() });
+      try { window.__LAST_POSE_SNAP = cloneForStore(cloned) || cloned; } catch {}
+      return true;
+    },
+    get(shotId) {
+      const id = normalizeShotId(shotId);
+      if (!id) return null;
+      const value = store.get(id);
+      return value ? (cloneForStore(value) || value) : null;
+    },
+    has(shotId) {
+      const id = normalizeShotId(shotId);
+      return id ? store.has(id) : false;
+    },
+    info(shotId) {
+      const id = normalizeShotId(shotId);
+      return id ? (meta.get(id) || null) : null;
+    },
+    clear() {
+      store.clear();
+      meta.clear();
+    },
+    entries() {
+      return Array.from(store.entries()).map(([id, snap]) => ({ id, snap: cloneForStore(snap) || snap, meta: meta.get(id) || null }));
+    }
+  };
+
+  window.poseStore = api;
+  window.__POSE_RELEASES = store;
+
+  const reset = () => { try { api.clear(); } catch {}; };
+  window.addEventListener('hud:start-session', reset, { passive: true });
+})();
+
 function setPoseIfMissing(shotId, snap) {
-  if (!snap || typeof snap !== 'object') return;
+  if (!snap || typeof snap !== 'object') return null;
+  let resolved = clonePoseSnapshotLocal(snap) || null;
+  if (!resolved && typeof snap === 'object') resolved = snap;
   try {
     const map = window.__shots;
-    if (map?.get?.(shotId)?.poseSnapshot) return;
-    const cloned = clonePoseSnapshotLocal(snap) || snap;
-    window.updateShot?.(shotId, { poseSnapshot: cloned });
+    const existing = map?.get?.(shotId)?.poseSnapshot;
+    if (existing && typeof existing === 'object') {
+      resolved = existing;
+    } else if (resolved) {
+      window.updateShot?.(shotId, { poseSnapshot: resolved });
+    }
   } catch {}
+  try { if (resolved) window.poseStore?.set(shotId, resolved, { source: 'shot-store', overwrite: false }); } catch {}
+  return resolved || null;
 }
 
 // ---------- Release emitter (single source) ----------
@@ -382,6 +453,27 @@ function setPoseIfMissing(shotId, snap) {
     let poseCaptureOk = false;
     let poseCaptureError = null;
     let releaseSnapshot = null;
+    let canonicalSnapshot = null;
+    const gatePayload = opts?.gate || null;
+
+    const persistReleaseMark = async (snapshot, label = via) => {
+      if (!snapshot) return false;
+      try {
+        if (!window.__SESSION_ID) {
+          const rr = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ device:navigator.userAgent }), credentials:'include' });
+          if (rr.ok) { const jj = await rr.json(); window.__SESSION_ID = jj?.id || null; }
+        }
+        await fetch('/api/release_mark', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ sessionId: window.__SESSION_ID||null, shotId, frame:fnum, tMs:Date.now(), via: label, hoop: hoopBox, poseSnapshot: snapshot, gate: gatePayload }),
+          credentials:'include'
+        });
+        return true;
+      } catch (err) {
+        console.warn('[pose:release] persist failed', { shotId, label, error: String(err) });
+        return false;
+      }
+    };
     const summarizePose = (snap) => {
       if (!snap || typeof snap !== 'object') return null;
       const keys = ['stanceWidthFeet','stanceWidth','stanceRatio','elbowExtDeg','armVerticalityDeg','torsoLeanAngle','kneeFlex','feetAngleDiff','headToHoopDeg','followThroughHoldFrames'];
@@ -421,8 +513,9 @@ function setPoseIfMissing(shotId, snap) {
     const shotId = rec?.id || (Number(window.__SHOT_ID || 0) || 1);
 
     if (releaseSnapshot) {
-      setPoseIfMissing(shotId, releaseSnapshot);
-      console.log('[shot:update] release snapshot set', { shotId, snapshot: summarizePose(releaseSnapshot) });
+      canonicalSnapshot = setPoseIfMissing(shotId, releaseSnapshot) || releaseSnapshot;
+      try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release', overwrite: true }); } catch {}
+      console.log('[shot:update] release snapshot set', { shotId, snapshot: summarizePose(canonicalSnapshot) });
     }
 
     if (window.DOACH_RELEASE_TRACE === true || !poseCaptureOk) {
@@ -442,19 +535,7 @@ function setPoseIfMissing(shotId, snap) {
     }
 
     // Backend marker (async, best-effort)
-    (async ()=>{
-      try {
-        if (!window.__SESSION_ID) {
-          const rr = await fetch('/api/sessions/start', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ device:navigator.userAgent }), credentials:'include' });
-          if (rr.ok) { const jj = await rr.json(); window.__SESSION_ID = jj?.id || null; }
-        }
-        await fetch('/api/release_mark', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ sessionId: window.__SESSION_ID||null, shotId, frame:fnum, tMs:Date.now(), via, hoop: hoopBox }),
-          credentials:'include'
-        });
-      } catch {}
-    })();
+    persistReleaseMark(canonicalSnapshot).catch(() => {});
 
     // Emit release (with identity)
     const prox = shotArcProx(hoopBox);
@@ -473,11 +554,16 @@ function setPoseIfMissing(shotId, snap) {
     try {
       const snapNow = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
       if (snapNow) {
-        window.__LAST_POSE_SNAP = snapNow;
-        // window.updateShot?.(shotId, { poseSnapshot: snapNow });
-        setPoseIfMissing(shotId, snapNow);
+        const storedSnap = setPoseIfMissing(shotId, snapNow) || snapNow;
+        if (!canonicalSnapshot && storedSnap) {
+          canonicalSnapshot = storedSnap;
+          try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release-immediate', overwrite: true }); } catch {}
+          persistReleaseMark(canonicalSnapshot, 'release-immediate').catch(() => {});
+        } else {
+          try { window.poseStore?.set(shotId, storedSnap, { source: 'release-immediate', overwrite: false }); } catch {}
+        }
         snapNowStatus = 'captured';
-        snapNowSummary = summarizePose(snapNow);
+        snapNowSummary = summarizePose(storedSnap);
       } else {
         snapNowStatus = 'empty';
       }
@@ -497,11 +583,16 @@ function setPoseIfMissing(shotId, snap) {
       try {
         const snapLater = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
         if (snapLater) {
-          window.__LAST_POSE_SNAP = snapLater;
-          //window.updateShot?.(shotId, { poseSnapshot: snapLater });
-          setPoseIfMissing(shotId, snapLater);
+          const storedSnap = setPoseIfMissing(shotId, snapLater) || snapLater;
+          if (!canonicalSnapshot && storedSnap) {
+            canonicalSnapshot = storedSnap;
+            try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release-delayed', overwrite: true }); } catch {}
+            persistReleaseMark(canonicalSnapshot, 'release-delayed').catch(() => {});
+          } else {
+            try { window.poseStore?.set(shotId, storedSnap, { source: 'release-delayed', overwrite: false }); } catch {}
+          }
           snapLaterStatus = 'captured';
-          snapLaterSummary = summarizePose(snapLater);
+          snapLaterSummary = summarizePose(storedSnap);
         } else {
           snapLaterStatus = 'empty';
         }
@@ -1122,4 +1213,3 @@ const bootPipelines = async () => {
   }, { passive: true });
 
 })();
-
