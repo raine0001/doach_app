@@ -705,6 +705,24 @@ export function renderFullShotTable() {
   modal.querySelector('#closeFull').onclick = () => { modal.style.display = 'none'; };
   modal.style.display = 'block';
   try { modal.style.zIndex = '10060'; } catch {}
+
+  try {
+    const detail = window.__SESSION_REVIEW_LAST;
+    if (detail?.summary) {
+      let row = modal.querySelector('#sessionReviewRow');
+      if (!row) {
+        row = document.createElement('tr');
+        row.id = 'sessionReviewRow';
+        row.innerHTML = '<td class="num">~</td><td class="coach session-review"></td><td class="clip"></td>';
+        modal.querySelector('tbody')?.appendChild(row);
+      }
+      const cell = row.querySelector('.coach');
+      if (cell) cell.textContent = detail.summary;
+      row.style.display = 'table-row';
+      row.dataset.visible = 'true';
+    }
+  } catch {}
+
   return modal;
 }
 window.renderFullShotTable = renderFullShotTable;
@@ -801,6 +819,264 @@ window.addEventListener('shot:summary', () => {
   if (v) { try { v.playbackRate = 1; } catch {} }
 });
 
+/* ------------------------ Session restart prompt ------------------------ */
+const NEW_SESSION_PROMPT_DELAY_MS = 25000;
+let __newSessionPromptTimer = null;
+let __newSessionResetWatcher = null;
+let __newSessionQuestionAsked = false;
+let __newSessionFinalized = false;
+let __newSessionAwaitingConfirm = false;
+
+function setAwaitingNewSessionConfirm(state) {
+  __newSessionAwaitingConfirm = !!state;
+  try { window.__AWAITING_NEW_SESSION_CONFIRM = __newSessionAwaitingConfirm; } catch {}
+}
+
+function hideStartSessionOverlay() {
+  try {
+    const overlay = document.getElementById('startSessionOverlay');
+    if (overlay) overlay.style.display = 'none';
+  } catch {}
+}
+
+function showStartSessionOverlay() {
+  try {
+    const overlay = document.getElementById('startSessionOverlay');
+    if (overlay) overlay.style.display = 'flex';
+  } catch {}
+}
+
+function getPlayerDisplayNameForPrompt() {
+  try {
+    const nameLike = [
+      window.__USER_NAME,
+      window.__USER_DISPLAY_NAME,
+      window.__PLAYER_NAME
+    ].find((n) => typeof n === 'string' && n.trim());
+    if (nameLike) return nameLike.trim();
+  } catch {}
+  try {
+    const lsName = localStorage.getItem('firstname');
+    if (typeof lsName === 'string' && lsName.trim()) return lsName.trim();
+  } catch {}
+  try {
+    const raw = localStorage.getItem('doachProfile');
+    if (raw) {
+      const profile = JSON.parse(raw);
+      const name = profile?.name || profile?.firstName;
+      if (typeof name === 'string' && name.trim()) return name.trim();
+    }
+  } catch {}
+  return 'Player';
+}
+
+function isElementVisible(el) {
+  if (!el) return false;
+  if (el.hidden === true) return false;
+  const display = (el.style && el.style.display) || '';
+  if (display && display.toLowerCase() === 'none') return false;
+  return true;
+}
+
+function clearNewSessionPromptTimers() {
+  if (__newSessionPromptTimer) {
+    clearTimeout(__newSessionPromptTimer);
+    __newSessionPromptTimer = null;
+  }
+  if (__newSessionResetWatcher) {
+    clearInterval(__newSessionResetWatcher);
+    __newSessionResetWatcher = null;
+  }
+}
+
+function finalizeToStartOverlay() {
+  if (__newSessionFinalized !== false) return;
+  __newSessionFinalized = true;
+  clearNewSessionPromptTimers();
+  setAwaitingNewSessionConfirm(false);
+  try {
+    const blk = document.getElementById('endBlackout');
+    if (blk) blk.style.display = 'none';
+  } catch {}
+  try {
+    const modal = document.getElementById('fullShotModal');
+    if (modal) modal.style.display = 'none';
+  } catch {}
+  try {
+    const coach = document.getElementById('coachNotes');
+    if (coach) {
+      coach.style.display = 'none';
+      coach.dataset.dismissed = 'false';
+      if (coach.dataset.baseZ) coach.style.zIndex = coach.dataset.baseZ;
+    }
+  } catch {}
+  try { setSessionStatus?.(null); } catch {}
+  try { updateSessionHUD?.({ taken: 0, made: 0, accuracy: 0, elapsedSec: 0 }); } catch {}
+  try { window.doachSession?.reset?.(); } catch {}
+  try { clearInterval(window.__coachPoseInterval); window.__coachPoseInterval = null; } catch {}
+  try { cancelAnimationFrame(window.__coachPaintRaf); window.__coachPaintRaf = null; } catch {}
+  showStartSessionOverlay();
+  __newSessionQuestionAsked = false;
+  try { window.__SESSION_REVIEW_SPOKEN = false; } catch {}
+  try { window.__NEW_SESSION_PROMPTED = false; } catch {}
+}
+
+function scheduleNewSessionResetWatcher() {
+  if (__newSessionResetWatcher) return;
+  __newSessionResetWatcher = setInterval(() => {
+    if (!__newSessionQuestionAsked) return;
+    const summaryVisible = isElementVisible(document.getElementById('fullShotModal'));
+    const coachVisible = isElementVisible(document.getElementById('coachNotes'));
+    if (!summaryVisible && !coachVisible) {
+      finalizeToStartOverlay();
+    }
+  }, 650);
+}
+
+function ensureCoachFeedbackVisible() {
+  try {
+    const coach = document.getElementById('coachNotes');
+    if (!coach) return;
+    coach.style.display = 'block';
+    coach.dataset.dismissed = 'false';
+    if (!coach.dataset.baseZ) coach.dataset.baseZ = coach.style.zIndex || '10050';
+    coach.style.zIndex = '10070';
+  } catch {}
+}
+
+async function speakNewSessionInvite(line) {
+  if (!line) return;
+  if (typeof window.doachSpeak === 'function') {
+    try {
+      await window.doachSpeak(line);
+      return;
+    } catch {}
+  }
+  try { speak(line); } catch {}
+}
+
+function requestNewSessionPrompt(options = {}) {
+  if (__newSessionPromptTimer || __newSessionQuestionAsked) return;
+  const delayMs = Math.max(0, Number(options.delayMs ?? window.NEW_SESSION_PROMPT_DELAY_MS ?? NEW_SESSION_PROMPT_DELAY_MS) || 0);
+  __newSessionFinalized = false;
+  __newSessionQuestionAsked = false;
+
+  __newSessionPromptTimer = setTimeout(async () => {
+    __newSessionPromptTimer = null;
+    let modal = null;
+    try {
+      modal = renderFullShotTable?.();
+    } catch {}
+    if (!modal) {
+      try { modal = document.getElementById('fullShotModal'); }
+      catch { modal = null; }
+    }
+    if (modal) {
+      try { modal.dataset.pendingNewSession = ''; } catch {}
+      try { modal.style.display = 'block'; } catch {}
+      try { modal.style.zIndex = '10060'; } catch {}
+    }
+
+    ensureCoachFeedbackVisible();
+    scheduleNewSessionResetWatcher();
+
+    const name = getPlayerDisplayNameForPrompt();
+    const line = `${name}, do you want to start a new session?`;
+    try {
+      await speakNewSessionInvite(line);
+    } finally {
+      __newSessionQuestionAsked = true;
+      setAwaitingNewSessionConfirm(true);
+    }
+  }, delayMs);
+}
+
+if (typeof window.requestNewSessionPrompt !== 'function') {
+  window.requestNewSessionPrompt = requestNewSessionPrompt;
+}
+
+function handleHudStartSession(event) {
+  clearNewSessionPromptTimers();
+  setAwaitingNewSessionConfirm(false);
+  __newSessionQuestionAsked = false;
+  __newSessionFinalized = false;
+  try { window.__NEW_SESSION_PROMPTED = false; } catch {}
+  try { window.__SESSION_REVIEW_SPOKEN = false; } catch {}
+  try { window.__SESSION_REVIEW_LAST = null; } catch {}
+
+  hideStartSessionOverlay();
+  try {
+    const blk = document.getElementById('endBlackout');
+    if (blk) blk.style.display = 'none';
+  } catch {}
+  try {
+    const modal = document.getElementById('fullShotModal');
+    if (modal) modal.style.display = 'none';
+  } catch {}
+  try {
+    const coach = document.getElementById('coachNotes');
+    if (coach) {
+      coach.style.display = 'none';
+      coach.dataset.dismissed = 'false';
+      if (coach.dataset.baseZ) coach.style.zIndex = coach.dataset.baseZ;
+    }
+  } catch {}
+
+  try { window.__shotList = []; } catch {}
+  try {
+    if (window.__finalizedShotIds instanceof Set) window.__finalizedShotIds.clear();
+    else window.__finalizedShotIds = new Set();
+  } catch {}
+  try {
+    window.__shots = new Map();
+    window.__SHOT_ID = 0;
+    window.__sessionTotals = { attempts: 0, made: 0 };
+  } catch {}
+  try { updateSessionHUD?.({ taken: 0, made: 0, accuracy: 0, elapsedSec: 0 }); } catch {}
+
+  try { window.__sessionStart = Date.now(); } catch {}
+  try { window.__SESSION_ACTIVE = true; } catch {}
+  try { window.__SESSION_SHOT_COUNT = 0; } catch {}
+  try { window.__armCountdownActive = false; } catch {}
+
+  try { setSessionStatus?.('SESSION IN PROGRESS…'); } catch {}
+  try { hidePromptMessage(); } catch {}
+
+  const hoopBox = (() => {
+    try { return getLockedHoopBox?.(); } catch { return null; }
+  })();
+  const hoopWasLocked = (() => {
+    try { return !!hoopBox || window.__hoopConfirmed === true || !!window.__lockedHoopBox; }
+    catch { return !!hoopBox; }
+  })();
+
+  try { window.__shotTrackingArmed = false; } catch {}
+  try { window.__armCountdownActive = false; } catch {}
+  try { window.__RELEASE_LOCK_UNTIL = 0; window.__REL_LAST_FIRE_MS = 0; window.__releaseLatchUntil = 0; window.__LAST_FIRED_FRAME = null; } catch {}
+  try { window.__SAMPLER_BLOCK_UNTIL = 0; } catch {}
+
+  if (hoopWasLocked) {
+    try { window.__hoopConfirmed = true; } catch {}
+    try { window.resumeHoopTracking?.(); } catch {}
+    setTimeout(() => {
+      try {
+        window.dispatchEvent(new CustomEvent('hoop:locked', { detail: { via: 'session-restart' } }));
+      } catch {}
+      try { window.scheduleArmWhenReady?.(0); } catch {}
+    }, 0);
+  } else {
+    try { window.__hoopConfirmed = false; } catch {}
+    if (window.__pickingHoop === true || window.__hoopPromptSpeakTimer || window.__hoopPromptRepeatTimer) {
+      return;
+    }
+    setTimeout(() => {
+      try { enableHoopPickOnce?.(); } catch {}
+    }, 120);
+  }
+}
+
+window.addEventListener('hud:start-session', handleHudStartSession);
+
 /* -------------------- Center prompt + countdown -------------------- */
 function showCenterPrompt(msg) {
   let el = document.getElementById('overlayPrompt');
@@ -874,8 +1150,22 @@ async function autoEndSessionAndSummarize() {
     }
   } catch {}
 
-  try { renderFullShotTable?.(); } catch {}
+  try {
+    const modal = renderFullShotTable?.();
+    if (modal) {
+      modal.dataset.pendingNewSession = '1';
+      modal.style.display = 'none';
+    }
+  } catch {}
   try { window.dispatchEvent(new CustomEvent('hud:end-session')); } catch {}
+
+  setTimeout(() => {
+    try {
+      if (!window.__NEW_SESSION_PROMPTED) {
+        requestNewSessionPrompt?.({ delayMs: 0 });
+      }
+    } catch {}
+  }, Math.max(0, Number(window.NEW_SESSION_PROMPT_FALLBACK_MS || 26000)));
 }
 if (typeof window.autoEndSessionAndSummarize !== 'function') window.autoEndSessionAndSummarize = autoEndSessionAndSummarize;
 

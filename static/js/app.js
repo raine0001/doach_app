@@ -101,6 +101,55 @@ function hidePromptCompat(){
   else localHidePrompt();
 }
 
+function resumeHoopTrackingLoops() {
+  const ov  = document.getElementById('overlay');
+  const vid = document.getElementById('videoPlayer');
+  if (!ov || !vid) return;
+
+  window.__pickingHoop = false;
+  ov.style.cursor        = 'default';
+  ov.style.pointerEvents = 'none';
+  vid.style.pointerEvents = '';
+  hidePromptCompat();
+  try { clearTimeout(window.__hoopPromptSpeakTimer); } catch {}
+  try { clearInterval(window.__hoopPromptRepeatTimer); } catch {}
+  window.__hoopPromptSpeakTimer = null;
+  window.__hoopPromptRepeatTimer = null;
+
+  try { cancelAnimationFrame(window.__coachPaintRaf); } catch {}
+  const paint = () => {
+    const last = window.lastDetectedFrame || {};
+    try { drawLiveOverlay?.(last.objects || [], window.playerState); } catch {}
+    window.__coachPaintRaf = requestAnimationFrame(paint);
+  };
+  window.__coachPaintRaf = requestAnimationFrame(paint);
+
+  try { clearInterval(window.__coachPoseInterval); } catch {}
+  window.__coachPoseInterval = setInterval(async () => {
+    try {
+      if (window.__coachPoseBusy) return;
+      window.__coachPoseBusy = true;
+      const v = document.getElementById('videoPlayer');
+      if (!v?.videoWidth) return;
+      const res = await (window.poseDetectSerial?.() || Promise.resolve(null));
+      const raw = res?.landmarks;
+      const cand = Array.isArray(raw?.[0]) ? raw[0] : raw;
+      if (!Array.isArray(cand) || cand.length < 33) return;
+      const looksNorm = cand.every(k => k && Number.isFinite(k.x) && Number.isFinite(k.y) && k.x <= 1.01 && k.y <= 1.01);
+      const sx = looksNorm ? v.videoWidth : 1;
+      const sy = looksNorm ? v.videoHeight : 1;
+      const scaled = cand.map(k => ({ ...k, x: k.x * sx, y: k.y * sy }));
+      const fps = Number(window.__videoFPS) || 30;
+      const fidx = Math.max(0, Math.round((v.currentTime || 0) * fps));
+      updatePlayerTracker?.(scaled, fidx);
+    } finally {
+      window.__coachPoseBusy = false;
+    }
+  }, Math.max(80, Number(window.COACH_POSE_MS || 120)));
+}
+
+try { window.resumeHoopTracking = resumeHoopTrackingLoops; } catch {}
+
 
 // ---------- Shot store (frontend HUD backing only; no server writes here) ----------
 (function installShotStore(){
@@ -671,8 +720,6 @@ function armAfterArmDown(opts = {}) {
 window.armAfterArmDown = window.armAfterArmDown || armAfterArmDown;
 
 
-
-
 // ---------- Arming ----------
 function scheduleArmWhenReady(delay=200){
   clearTimeout(window.__armTimer);
@@ -702,6 +749,7 @@ export function enableHoopPickOnce() {
   if (window.__hoopConfirmed) {
     try { clearTimeout(window.__hoopPromptSpeakTimer); } catch {}
     try { clearInterval(window.__hoopPromptRepeatTimer); } catch {}
+    resumeHoopTrackingLoops();
     return;
   }
 
@@ -748,43 +796,7 @@ export function enableHoopPickOnce() {
   const finish = () => {
     window.__hoopConfirmed = true;
     clearHoopReminders();
-    window.__pickingHoop   = false;
-    ov.style.cursor        = 'default';
-    ov.style.pointerEvents = 'none';
-    vid.style.pointerEvents = '';
-    hidePromptCompat();
-
-    // live paint + periodic pose sample to keep tracker fresh
-    try { cancelAnimationFrame(window.__coachPaintRaf); } catch {}
-    const paint = () => {
-      const last = window.lastDetectedFrame || {};
-      try { drawLiveOverlay?.(last.objects || [], window.playerState); } catch {}
-      window.__coachPaintRaf = requestAnimationFrame(paint);
-    };
-    window.__coachPaintRaf = requestAnimationFrame(paint);
-
-    try { clearInterval(window.__coachPoseInterval); } catch {}
-    window.__coachPoseInterval = setInterval(async ()=>{
-      try {
-        if (window.__coachPoseBusy) return;
-        window.__coachPoseBusy = true;
-        const v = document.getElementById('videoPlayer');
-        if (!v?.videoWidth) return;
-        const res = await (window.poseDetectSerial?.() || Promise.resolve(null));
-        const raw = res?.landmarks;
-        const cand = Array.isArray(raw?.[0]) ? raw[0] : raw;
-        if (!Array.isArray(cand) || cand.length < 33) return;
-        const looksNorm = cand.every(k=>k && Number.isFinite(k.x) && Number.isFinite(k.y) && k.x<=1.01 && k.y<=1.01);
-        const sx = looksNorm ? v.videoWidth : 1;
-        const sy = looksNorm ? v.videoHeight: 1;
-        const scaled = cand.map(k=>({ ...k, x:k.x*sx, y:k.y*sy }));
-        const fps = Number(window.__videoFPS) || 30;
-        const fidx = Math.max(0, Math.round((v.currentTime || 0) * fps));
-        updatePlayerTracker?.(scaled, fidx);
-
-        
-      } finally { window.__coachPoseBusy = false; }
-    }, Math.max(80, Number(window.COACH_POSE_MS || 120)));
+    resumeHoopTrackingLoops();
   };
 
   let picked = false;
@@ -937,9 +949,21 @@ function startPreDetectWarm(videoEl){
   }
 
   function loop(){ try{ tryRelease(); }catch{} window.__poseSamplerT = setTimeout(loop, Number(window.COACH_POSE_MS||120)); }
+  const restartLoop = () => {
+    try { clearTimeout(window.__poseSamplerT); } catch {}
+    loop();
+  };
+
   loop();
 
-  window.addEventListener('hud:end-session', ()=>{ try{ clearTimeout(window.__poseSamplerT); }catch{} }, { passive:true });
+  window.addEventListener('hud:end-session', () => {
+    try { clearTimeout(window.__poseSamplerT); } catch {}
+    window.__poseSamplerT = null;
+  }, { passive:true });
+
+  window.addEventListener('hud:start-session', () => {
+    restartLoop();
+  }, { passive:true });
 })();
 
 // === Sampler stand-down after a release (no duplicate shots during cooldown) ===

@@ -2,6 +2,24 @@
 
 let __preferredWebVoice = null;
 
+function isOverlayVisible(el) {
+  if (!el) return false;
+  if (el.hidden === true) return false;
+  const style = window.getComputedStyle ? window.getComputedStyle(el) : el.style;
+  if (!style) return true;
+  if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+  return true;
+}
+
+function isStartSessionOverlayVisible() {
+  try {
+    const el = document.getElementById('startSessionOverlay');
+    return isOverlayVisible(el);
+  } catch {
+    return false;
+  }
+}
+
 function selectPreferredVoice() {
   try {
     const synth = window.speechSynthesis;
@@ -449,8 +467,37 @@ export function listenForEndSession(wakePhrase = 'hey doach, end the session', o
     const rec = new SR(); rec.continuous = true; rec.lang = 'en-US';
     rec.onresult = (e) => {
       try {
-        const i = e.resultIndex; const t = (e.results[i][0].transcript||'').toLowerCase().trim();
-        if (t.includes('hey doach') && t.includes('end') && t.includes('session')) { try { onEnd?.(); } catch {} }
+        const i = e.resultIndex;
+        const raw = (e.results[i][0].transcript || '').toLowerCase();
+        const t = raw.replace(/\s+/g, ' ').trim();
+        const hasWake = t.includes('hey doach');
+        const awaiting = (() => { try { return window.__AWAITING_NEW_SESSION_CONFIRM === true; } catch { return false; } })();
+        const speakYes = /\b(yes|yeah|yep|sure|let('?|’)?s go|go ahead|absolutely|yup)\b/;
+        const wantsStart = (t.includes('start') && t.includes('session')) || t.includes('new session');
+        const startOverlayVisible = isStartSessionOverlayVisible();
+
+        if ((awaiting || startOverlayVisible) && (speakYes.test(t) || wantsStart)) {
+          if (typeof window.beginLiveSession === 'function') {
+            window.beginLiveSession({ via: 'voice-affirm' });
+          } else {
+            window.dispatchEvent(new CustomEvent('hud:start-session'));
+          }
+          return;
+        }
+
+        if (hasWake && t.includes('end') && t.includes('session')) {
+          try { onEnd?.(); } catch {}
+          return;
+        }
+
+        if (hasWake && wantsStart) {
+          if (typeof window.beginLiveSession === 'function') {
+            window.beginLiveSession({ via: 'voice-command' });
+          } else {
+            window.dispatchEvent(new CustomEvent('hud:start-session'));
+          }
+          return;
+        }
       } catch {}
     };
     rec.start();

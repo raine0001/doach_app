@@ -297,6 +297,7 @@ window.addEventListener('doach:session-review', (event) => {
     if (!summary) return;
     const table = document.querySelector('.hud-table tbody');
     if (!table) return;
+    try { window.__SESSION_REVIEW_LAST = event.detail || { summary }; } catch {}
     let row = document.getElementById('sessionReviewRow');
     if (!row) {
       row = document.createElement('tr');
@@ -325,6 +326,7 @@ window.addEventListener('hud:start-session', () => {
     hideCoachNotes();
   } catch {}
   try { window.__NEW_SESSION_PROMPTED = false; } catch {}
+  try { window.__SESSION_REVIEW_LAST = null; } catch {}
 });
 
 // === SNAPSHOT V2: force replace extractor + rescue bad summaries =================
@@ -2147,7 +2149,32 @@ function __getPoseSnapshot(){
         return;
       }
       if (/\b(start (a )?new session|new session|begin session|start session)\b/.test(lower)) {
-        window.dispatchEvent(new CustomEvent('hud:start-session'));
+        if (typeof window.beginLiveSession === 'function') {
+          window.beginLiveSession({ via: 'voice-transcript' });
+        } else {
+          window.dispatchEvent(new CustomEvent('hud:start-session'));
+        }
+        return;
+      }
+      const awaiting = (() => { try { return window.__AWAITING_NEW_SESSION_CONFIRM === true; } catch { return false; } })();
+      const startOverlayVisible = (() => {
+        try {
+          const el = document.getElementById('startSessionOverlay');
+          if (!el) return false;
+          if (el.hidden === true) return false;
+          const style = window.getComputedStyle ? window.getComputedStyle(el) : el.style;
+          if (!style) return true;
+          return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+        } catch { return false; }
+      })();
+      const affirmative = /\b(yes|yeah|yep|sure|let('?|’)s go|let us go|go ahead|absolutely|yup)\b/;
+      const wantsStart = lower.includes('start session') || lower.includes('start a new session') || lower.includes('new session');
+      if ((awaiting || startOverlayVisible) && (affirmative.test(lower) || wantsStart)) {
+        if (typeof window.beginLiveSession === 'function') {
+          window.beginLiveSession({ via: 'voice-affirm' });
+        } else {
+          window.dispatchEvent(new CustomEvent('hud:start-session'));
+        }
         return;
       }
     } catch {}

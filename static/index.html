@@ -458,10 +458,22 @@
       }
       setTimeout(afterSplash, 3000);
 
-      // Start Session wiring
-      try {
-        document.getElementById('btnStartLive').onclick = async () => {
+      async function beginLiveSession(opts = {}) {
+        if (window.__beginSessionBusy) return;
+        window.__beginSessionBusy = true;
+        const detail = { via: opts.via || 'button' };
+        try {
+          try { window.__AWAITING_NEW_SESSION_CONFIRM = false; } catch {}
+          try { window.__NEW_SESSION_PROMPTED = false; } catch {}
+          try { window.doachSession?.reset?.(); } catch {}
+          try { window.__shotList = []; window.__finalizedShotIds?.clear?.(); } catch {}
+          try { window.__shots = new Map(); window.__SHOT_ID = 0; window.__sessionTotals = { attempts:0, made:0 }; } catch {}
+          try { window.__SESSION_SHOT_COUNT = 0; } catch {}
+          try { window.__SESSION_ACTIVE = false; } catch {}
+
           try { hideStart(); } catch {}
+          try { window.dispatchEvent(new CustomEvent('doach:new-session-requested', { detail })); } catch {}
+
           try {
             const started = await window.doachSession?.start?.();
             if (started && !window.__SESSION_ID) window.__SESSION_ID = started;
@@ -469,6 +481,7 @@
           } catch (err) {
             console.warn('[start-live] session start failed', err);
           }
+
           try {
             await window.requestInitialMediaAccess?.({ video: true, audio: true });
           } catch (err) {
@@ -477,15 +490,21 @@
           try { await window.ensureMicPrimed?.(); } catch {}
           try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch {}
           try { window.doachVoice?.on?.(); } catch {}
+          try { await window.primeCoachAudio?.(); } catch {}
           try {
-            await window.primeCoachAudio?.();
-          } catch {}
-          try {
-            // Prefer immediate camera start; then trigger session HUD start
             if (window.startCamera) await window.startCamera();
           } catch {}
-          try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch {}
-        };
+          try { window.dispatchEvent(new CustomEvent('hud:start-session', { detail })); } catch {}
+        } finally {
+          window.__beginSessionBusy = false;
+        }
+      }
+
+      try { window.beginLiveSession = beginLiveSession; } catch {}
+
+      // Start Session wiring
+      try {
+        document.getElementById('btnStartLive').onclick = () => { beginLiveSession({ via: 'button' }); };
       } catch {}
     })();
   </script>
