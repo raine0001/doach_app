@@ -126,16 +126,19 @@ async function startSession() {
   try {
     try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch {}
     if (localStorage.getItem('doach_muted') !== 'true') {
-      const greeting = `Hi ${name}, let's get started. Tap the hoop to lock it, then take your first shot when you're ready.`;
-      try { await primeCoachAudio?.(); } catch {}
-      try {
-        if (typeof doachSpeak === 'function') {
-          await doachSpeak(greeting);
-        } else {
+      const hoopLocked = window.__hoopConfirmed === true;
+      if (!hoopLocked) {
+        const greeting = `Hi ${name}, let's get started. Tap the hoop to lock it, then take your first shot when you're ready.`;
+        try { await primeCoachAudio?.(); } catch {}
+        try {
+          if (typeof doachSpeak === 'function') {
+            await doachSpeak(greeting);
+          } else {
+            speak(greeting);
+          }
+        } catch {
           speak(greeting);
         }
-      } catch {
-        speak(greeting);
       }
     }
   } catch {}
@@ -255,6 +258,21 @@ async function endSession(reason = 'normal') {
 
   return true;
 }
+function resetSessionForNewStart() {
+  __sid = null;
+  __ended = false;
+  __shotCounter = 0;
+  __processedSummaries.clear();
+  try {
+    window.__SESSION_ID = null;
+    window.__SESSION_ACTIVE = false;
+    window.__SESSION_SHOT_COUNT = 0;
+    window.__sessionStart = null;
+  } catch {}
+  return true;
+}
+
+
 
 /* ------------------------ wiring ------------------------ */
 (function wireOnce() {
@@ -288,6 +306,7 @@ async function endSession(reason = 'normal') {
 window.doachSession = {
   start: startSession,
   end: endSession,
+  reset: resetSessionForNewStart,
   getCap: getSessionCap,
   setCap: setSessionCap,
   get id(){ return __sid; }

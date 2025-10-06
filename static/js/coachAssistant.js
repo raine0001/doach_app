@@ -1,6 +1,9 @@
 // /static/coachAssistant.js
 
 // --- Coach voice state (persisted) ---
+// Track if we already offered a new-session prompt after summary
+try { if (typeof window.__NEW_SESSION_PROMPTED === 'undefined') window.__NEW_SESSION_PROMPTED = false; } catch {}
+
 window.__coachMuted = JSON.parse(localStorage.getItem('doach_muted') || 'false');
 
 // HUD mute button -> toggle voice
@@ -321,6 +324,7 @@ window.addEventListener('hud:start-session', () => {
     }
     hideCoachNotes();
   } catch {}
+  try { window.__NEW_SESSION_PROMPTED = false; } catch {}
 });
 
 // === SNAPSHOT V2: force replace extractor + rescue bad summaries =================
@@ -2007,6 +2011,12 @@ function __getPoseSnapshot(){
       try {
         (window.doachSpeak || window.coachSpeak)?.(out);
         window.__SESSION_REVIEW_SPOKEN = true;
+      } catch {}
+      try {
+        if (!window.__NEW_SESSION_PROMPTED) {
+          window.__NEW_SESSION_PROMPTED = true;
+          window.requestNewSessionPrompt?.();
+        }
       } catch {}
     } catch {}
   }

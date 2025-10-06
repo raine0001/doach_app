@@ -699,7 +699,11 @@ export function enableHoopPickOnce() {
   const ov  = document.getElementById('overlay');
   const vid = document.getElementById('videoPlayer');
   if (!ov || !vid) return;
-  if (window.__hoopConfirmed) return;
+  if (window.__hoopConfirmed) {
+    try { clearTimeout(window.__hoopPromptSpeakTimer); } catch {}
+    try { clearInterval(window.__hoopPromptRepeatTimer); } catch {}
+    return;
+  }
 
   window.__pickingHoop   = true;
   ov.style.pointerEvents = 'auto';
@@ -708,12 +712,42 @@ export function enableHoopPickOnce() {
   ov.style.zIndex        = '100';
   vid.style.pointerEvents = 'none';
 
-  showPromptCompat('Tap the Hoop to Begin', 4000);
+  const clearHoopReminders = () => {
+    try { clearTimeout(window.__hoopPromptSpeakTimer); } catch {}
+    try { clearInterval(window.__hoopPromptRepeatTimer); } catch {}
+    window.__hoopPromptSpeakTimer = null;
+    window.__hoopPromptRepeatTimer = null;
+  };
+  clearHoopReminders();
 
+  const speakHoopReminder = () => {
+    if (window.__hoopConfirmed || window.__coachMuted) return;
+    try {
+      const talk = window.doachSpeak || window.coachSpeak;
+      if (typeof talk === 'function') talk('Tap the hoop to begin.');
+    } catch {}
+    showPromptCompat('Tap the Hoop to Begin', 6000);
+  };
+
+  const scheduleHoopReminders = () => {
+    clearHoopReminders();
+    window.__hoopPromptSpeakTimer = setTimeout(() => {
+      if (window.__hoopConfirmed) { clearHoopReminders(); return; }
+      speakHoopReminder();
+      window.__hoopPromptRepeatTimer = setInterval(() => {
+        if (window.__hoopConfirmed) { clearHoopReminders(); return; }
+        speakHoopReminder();
+      }, 5000);
+    }, 6000);
+  };
+
+  showPromptCompat('Tap the Hoop to Begin', 6000);
+  scheduleHoopReminders();
   syncOverlayToVideo?.();
 
   const finish = () => {
     window.__hoopConfirmed = true;
+    clearHoopReminders();
     window.__pickingHoop   = false;
     ov.style.cursor        = 'default';
     ov.style.pointerEvents = 'none';

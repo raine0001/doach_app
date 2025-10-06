@@ -65,8 +65,8 @@ class LocalDetector {
 // singleton
 window.localDetector = {
   instance: null,
-  async enable(mainUrl='/static/models/backup_best.onnx', labels=null,
-               fallbackUrl='/static/models/backup_best.onnx', fbLabels=null) {
+  async enable(mainUrl='/static/models/best.onnx', labels=null,
+               fallbackUrl='/static/models/best.onnx', fbLabels=null) {
     if (!('createImageBitmap' in window)) { console.warn('[LocalDetector] bitmap missing'); return false; }
     this.instance = new LocalDetector(mainUrl, labels, fallbackUrl, fbLabels);
     await this.instance.init();

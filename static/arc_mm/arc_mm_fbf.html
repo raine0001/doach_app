@@ -16,23 +16,19 @@
 <body>
   <div id="arcmm">
     <h2>Arc & Make/Miss (Existing FBF)</h2>
-
-    <div id="controls">
-      <button id="processAll">Process All</button>
-    </div>
-
+    <div id="controls"><button id="processAll">Process All</button></div>
     <div id="shotList"></div>
 
     <div id="stage">
       <video id="videoPlayer" playsinline muted></video>
       <canvas id="overlay"></canvas>
       <canvas id="exportCanvas" style="position:absolute; left:-9999px"></canvas>
-      <!-- detector bridge uses a DOM canvas -->
+      <!-- DOM canvas the real bridge expects -->
       <canvas id="detTap" width="1" height="1"></canvas>
     </div>
   </div>
 
-  <!-- Config FIRST -->
+  <!-- Config -->
   <script>
     window.DETECTOR_WORKER_PATH = "/static/js/detector.worker.js";
     window.DETECTOR_MODEL_URL   = "/static/models/best.onnx";
@@ -47,16 +43,16 @@
     });
   </script>
 
-  <!-- Enable local detector exactly like old index.html -->
-  <script type="module">
-    import '/static/js/local_detector.js';
+  <!-- Enable local detector like the original index.html did -->
+  <script src="/static/js/local_detector.js"></script>
+  <script>
     (async () => {
       if (!window.localDetector?.enable) return;
       try {
         const ok = await window.localDetector.enable(
           '/static/models/best.onnx',
-          null,                      // let labels.json decide classes
-          { conf: 0.10, imgsz: 896 } // better recall for small ball
+          null,                    // use labels.json from the model
+          { conf: 0.10, imgsz: 896 } // better small-ball recall
         );
         console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
         window.__DET_INIT_DONE = !!ok;
@@ -64,15 +60,15 @@
     })();
   </script>
 
-  <!-- Your app orchestrator (FBF analyzer, overlay, etc.) and HUD -->
+  <!-- App orchestrator and the HUD that shows object counts/trail (your proven UI) -->
   <script type="module" src="/static/js/app.js"></script>
   <script type="module" src="/static/js/bg_hud.js"></script>
 
-  <!-- Page entry: composite + rim pick + feed detector with DOM canvas -->
+  <!-- Your FBF page code (composite + rim pick). No detector code here. -->
   <script type="module" src="/static/arc_mm/arc_mm_fbf.js"></script>
 
-  <!-- Per-frame detect: draw video onto #detTap and call the REAL bridge -->
-  <script type="module">
+  <!-- Per-frame detect: DOM canvas → real bridge -->
+  <script>
     const video   = document.getElementById('videoPlayer');
     const overlay = document.getElementById('overlay');
     const tap     = document.getElementById('detTap');
@@ -84,15 +80,12 @@
       if (!W || !H) return;
       if (tap.width !== W || tap.height !== H) { tap.width = W; tap.height = H; }
 
-      // draw current video frame to DOM canvas
       tap.getContext('2d', { willReadFrequently:true }).drawImage(video, 0, 0, W, H);
 
-      // use the app’s bridge exactly as built
       if (typeof window.sendFrameToDetect === 'function') {
         try { window.sendFrameToDetect(tap, (window.fidx|0)); } catch {}
       }
 
-      // heartbeat: watch object flow
       if (((window.__beat=(window.__beat||0)+1)%12)===0) {
         console.log('[det] objs:', (window.lastDetectedFrame?.objects||[]).length);
       }
