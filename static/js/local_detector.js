@@ -1,4 +1,4 @@
-// static/js/local_detector.js  (ES module)
+﻿// static/js/local_detector.js  (ES module)
 // Spins up the worker, loads the model, and provides detect(canvas, frameIndex).
 
 class LocalDetector {
@@ -8,10 +8,12 @@ class LocalDetector {
     this.labels     = labels || ['basketball','hoop','net','backboard','player'];
     this.fbLabels   = fbLabels || null; // if backup labels differ
     this.worker = null; this.ready = false; this._pending = new Map();
+    this.opts = {};
   }
   async init() {
     if (this.ready) return true;
-    this.worker = new Worker('/static/js/detector.worker.js', { type: 'module' });
+    const workerPath = window.DETECTOR_WORKER_PATH || '/static/js/detector.worker.js';
+    this.worker = new Worker(workerPath);
     this.worker.onmessage = (e) => {
       const msg = e.data || {};
       if (msg.type === 'ready') {
@@ -66,9 +68,10 @@ class LocalDetector {
 window.localDetector = {
   instance: null,
   async enable(mainUrl='/static/models/best.onnx', labels=null,
-               fallbackUrl='/static/models/best.onnx', fbLabels=null) {
+               fallbackUrl='/static/models/best.onnx', fbLabels=null, opts={}) {
     if (!('createImageBitmap' in window)) { console.warn('[LocalDetector] bitmap missing'); return false; }
     this.instance = new LocalDetector(mainUrl, labels, fallbackUrl, fbLabels);
+    this.instance.opts = opts || {};
     await this.instance.init();
     return true;
   },

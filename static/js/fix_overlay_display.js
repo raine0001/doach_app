@@ -1,4 +1,4 @@
-// fix_overlay_display.js — UI-only, conflict-free, iOS-safe.
+﻿// fix_overlay_display.js GÇö UI-only, conflict-free, iOS-safe.
 // Owns: overlay sizing, drawing, optional debug HUD, detection plumbing.
 // Does NOT: emit releases, bump shot counts, record clips, end sessions, or post shots.
 
@@ -220,14 +220,14 @@ export function installOverlayTracer() {
     delete ov.__tracerCleanup;
   };
 
-  console.log('🧪 overlay tracer installed');
+  console.log('=ƒº¬ overlay tracer installed');
 }
 
 export function removeOverlayTracer() {
   const ov = document.getElementById('overlay');
   if (ov?.__tracerCleanup) {
     ov.__tracerCleanup();
-    console.log('🧽 overlay tracer removed');
+    console.log('=ƒº+ overlay tracer removed');
   }
 }
 
@@ -266,7 +266,7 @@ function __computeArcHealth(trail) {
 
 /* -------------------------- Live overlay drawing ------------------------- */
 export function initOverlay(canvas, detector = null) {
-  if (!canvas) { console.warn('⚠️ initOverlay: no canvas'); return; }
+  if (!canvas) { console.warn('GÜán+Å initOverlay: no canvas'); return; }
   const video = document.getElementById('videoPlayer');
 
   window.__overlayMode = window.__overlayMode || 'live';
@@ -278,7 +278,7 @@ export function initOverlay(canvas, detector = null) {
     canvas.width  = video.videoWidth;
     canvas.height = video.videoHeight;
   } else {
-    console.warn('⚠️ initOverlay: video metadata not ready; will resize later in drawLiveOverlay');
+    console.warn('GÜán+Å initOverlay: video metadata not ready; will resize later in drawLiveOverlay');
   }
 
   window.drawLiveOverlay   = drawLiveOverlay;
@@ -378,11 +378,56 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
     drawPoseMathHUD._i = 0;
     ctx.fillStyle = '#FFFFFF'; ctx.fillText('Release Gate', x0, (drawPoseMathHUD._i++ * 14*hair) + y0);
     line(`side: ${side==='L'?'Left':'Right'}`, true);
-    line(`wrist>elbow: ${wristAboveElbow?'✓':'✗'}`, wristAboveElbow);
-    line(`wrist>shoulder: ${wristAboveShoulder?'✓':'✗'}`, wristAboveShoulder);
-    line(`elbow≥strict: ${Math.round(elbowAngleDeg)}°`, elbowExtended);
+    line(`wrist>elbow: ${wristAboveElbow?'G£ô':'G£ù'}`, wristAboveElbow);
+    line(`wrist>shoulder: ${wristAboveShoulder?'G£ô':'G£ù'}`, wristAboveShoulder);
+    line(`elbowGëÑstrict: ${Math.round(elbowAngleDeg)}-¦`, elbowExtended);
     ctx.restore();
   } catch {}
+}
+
+function drawDetectionBoxes(ctx, objects, hair = 1) {
+  if (!ctx || !Array.isArray(objects) || !objects.length) return;
+  const colors = {
+    basketball: '#ffb347',
+    hoop: '#3cc3ff',
+    net: '#c678ff',
+    backboard: '#7dd3ff',
+    player: '#6bff8a'
+  };
+  const lineW = Math.max(2.2 * hair, 2);
+  const fontSize = Math.max(11 * hair, 10);
+  ctx.save();
+  ctx.lineWidth = lineW;
+  ctx.font = `${fontSize}px system-ui, -apple-system, sans-serif`;
+  ctx.textBaseline = 'top';
+
+  for (const obj of objects) {
+    if (!obj || !Array.isArray(obj.box) || obj.box.length !== 4) continue;
+    const [x1, y1, x2, y2] = obj.box.map(Number);
+    if (![x1, y1, x2, y2].every(Number.isFinite)) continue;
+    const w = x2 - x1;
+    const h = y2 - y1;
+    if (!(w > 1 && h > 1)) continue;
+
+    const label = String(obj.label || '').toLowerCase();
+    const color = colors[label] || '#ffd966';
+    ctx.strokeStyle = color;
+    ctx.strokeRect(x1, y1, w, h);
+
+    const conf = Number(obj.confidence ?? obj.score ?? NaN);
+    const tag = label ? label[0].toUpperCase() + label.slice(1) : 'Object';
+    const text = Number.isFinite(conf) ? `${tag} ${(conf * 100).toFixed(0)}%` : tag;
+    const pad = 4 * hair;
+    const metrics = ctx.measureText(text);
+    const boxW = metrics.width + pad * 2;
+    const boxH = fontSize + pad * 2;
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(x1, y1 - boxH, boxW, boxH);
+    ctx.fillStyle = '#fff';
+    ctx.fillText(text, x1 + pad, y1 - boxH + pad);
+  }
+
+  ctx.restore();
 }
 
 export function drawLiveOverlay(objects = [], playerState) {
@@ -434,6 +479,7 @@ export function drawLiveOverlay(objects = [], playerState) {
 
   // Pose math HUD (debug)
   drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy);
+  try { drawDetectionBoxes(ctx, objects, hair); } catch {}
 
   if (mode === 'coach') {
     ctx.setTransform(1,0,0,1,0,0);
@@ -463,6 +509,7 @@ export function drawLiveOverlay(objects = [], playerState) {
         window.checkShotConditions?.(window.ballState, H, fidx);
       }
     } catch {}
+    try { drawDetectionBoxes(ctx, objects, hair); } catch {}
     return;
   }
 
@@ -479,6 +526,7 @@ export function drawLiveOverlay(objects = [], playerState) {
   try { drawShotTubeDebug?.(ctx); } catch {}
   try { drawBallArc?.(ctx); } catch {}
   try { if ((window.PREF_SHOW?.trails) !== false) drawBallTrails?.(ctx); } catch {}
+  try { drawDetectionBoxes(ctx, objects, hair); } catch {}
 
   // Final labels
   try { drawFinalShotSummary?.(ctx); } catch {}
@@ -534,8 +582,13 @@ if (typeof window.__LOCAL_DETECTOR   === 'undefined') window.__LOCAL_DETECTOR   
     if (forcedLocal) { window.__forceServerDetect = false; window.__LOCAL_DETECTOR = true; }
   } catch {}
 
+  const workerPath = (window.DETECTOR_WORKER_PATH && String(window.DETECTOR_WORKER_PATH)) || '/static/js/detector.worker.js';
+  const modelUrl   = (window.DETECTOR_MODEL_URL && String(window.DETECTOR_MODEL_URL)) || '/static/models/best.onnx';
+  const fbUrl      = (window.DETECTOR_FALLBACK_MODEL_URL && String(window.DETECTOR_FALLBACK_MODEL_URL)) || '/static/models/backup_best.onnx';
+  const labels     = Array.isArray(window.DETECTOR_LABELS) && window.DETECTOR_LABELS.length ? window.DETECTOR_LABELS : ['basketball','hoop','net','backboard','player'];
+
   try {
-    window.__detWorker = new Worker('/static/js/detector.worker.js', { name: 'detector' });
+    window.__detWorker = new Worker(workerPath, { name: 'detector' });
   } catch (e) { window.__detWorker = null; }
   window.__detReady   = false;
   window.__detPending = new Map();
@@ -604,9 +657,9 @@ if (typeof window.__LOCAL_DETECTOR   === 'undefined') window.__LOCAL_DETECTOR   
   try {
     window.__detWorker.postMessage({
       type: 'init',
-      modelUrl: '/static/models/best.onnx',
-      fbUrl:    '/static/models/backup_best.onnx',
-      labels:   ['basketball','hoop','net','backboard','player']
+      modelUrl: modelUrl,
+      fbUrl:    fbUrl,
+      labels:   labels
     });
   } catch {}
 })();
@@ -768,7 +821,7 @@ export function armHoopPick(onPick) {
     if (p && typeof onPick === 'function') onPick(p);
   };
   ov.addEventListener('pointerdown', once, { passive: true });
-  console.log('[pick] armed — tap the hoop');
+  console.log('[pick] armed GÇö tap the hoop');
 }
 
 export function clientToVideoXY(clientX, clientY) {

@@ -68,7 +68,7 @@ const NORMALIZE = {
 
 // Per-class score thresholds (tweak at runtime if needed)
 const THRESH = {
-  basketball: 0.15,
+  basketball: 0.55,
   hoop:       0.68,
   net:        0.25, 
   player:     0.45,

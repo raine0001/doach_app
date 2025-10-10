@@ -1,65 +1,430 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Arc & Make/Miss</title>
+  <title>Arc FBF – Results Renderer</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
-    body { background:#111; color:#eee; font-family:system-ui, sans-serif; }
-    #stage { position: relative; width: 960px; aspect-ratio: 16/9; background:#000; margin-top:12px; }
-    #stage > * { position:absolute; inset:0; display:block; }
-    #controls { display:flex; gap:12px; align-items:center; margin-bottom:8px; }
-    #shotList .shot { margin: 6px 0; }
-    button { cursor: pointer; }
+    :root { color-scheme: dark; }
+    body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#0b0c0e; color:#e9eef7; }
+    header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid #1a1d22; position:sticky; top:0; background:#0b0c0e; z-index:5; }
+    .btn { border:1px solid #2a2f37; background:#121418; color:#e9eef7; padding:8px 12px; border-radius:10px; cursor:pointer; }
+    .btn:disabled { opacity:0.55; cursor:default; }
+    .wrap { display:grid; grid-template-columns: 1fr 420px; gap:16px; padding:16px; }
+    .stage { position:relative; background:#0e1014; border:1px solid #1a1d22; border-radius:12px; overflow:hidden; min-height:320px; }
+    video, canvas { position:absolute; inset:0; width:100%; height:100%; }
+    #exportCanvas { display:none; }
+    #shotList { display:flex; flex-direction:column; gap:10px; max-height: calc(100vh - 90px); overflow:auto; }
+    .shot { display:flex; align-items:center; gap:10px; background:#0e1014; border:1px solid #1a1d22; border-radius:10px; padding:10px; }
+    .shot .name { opacity:0.8; }
+    .shot .status { margin-left:auto; opacity:0.8; }
+    .shot video { margin-top:6px; max-width:360px; border-radius:8px; border:1px solid #1a1d22; }
+    .hud-note { opacity:0.7; font-size:12px; }
   </style>
 </head>
 <body>
-  <div id="arcmm">
-    <h2>Arc & Make/Miss</h2>
+  <header>
+    <button id="processAll" class="btn">Process All</button>
+    <span class="hud-note">Click the rim on first frame if it isn’t autolocked.</span>
+  </header>
 
-    <div id="controls">
-      <label>Session:
-        <select id="sessionPicker"></select>
-      </label>
-      <button id="reloadSessions">Reload</button>
-      <button id="processAll">Process All</button>
-    </div>
-
-    <div id="shotList"></div>
-
-    <div id="stage">
-      <video id="mmVideo" playsinline muted></video>
+  <div class="wrap">
+    <div class="stage">
+      <video id="videoPlayer" playsinline muted></video>
       <canvas id="overlay"></canvas>
       <canvas id="exportCanvas"></canvas>
     </div>
+    <div id="shotList"></div>
   </div>
 
-  <script>
-    // same-origin paths for your 10 clips baked into assets
-    const sid = "20250930_204140_927675";
-    const base = `/static/arc_mm/sessions/${sid}/clips`;
-    window.__DEMO_SHOTS = Array.from({length: 10}, (_,i) => {
-      const n = i + 1;
-      return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
+  <script src="/static/js/local_detector.js"></script>
+
+  <script type="module">
+  // ====== Adjust these 5 paths if your project layout is different ======
+  import * as Analyzer   from '/static/js/analyzer.js';
+  import * as Hoop       from '/static/js/hoop_tracker.js';
+  // import * as localDet   from '/static/js/local_detector.js';       // ESM local detector
+  import * as ShotArcMod from '/static/arc_mm/shot_arc.module.js';
+  import * as ShotLogMod from '/static/js/shot_logger.js';
+
+
+  // Demo list (swap with server data)
+  const sid  = "20250930_204140_927675";
+  const base = `/static/arc_mm/sessions/${sid}/clips`;
+  window.__DEMO_SHOTS = Array.from({ length: 10 }, (_, i) => {
+    const n = i + 1;
+    return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
+  });
+
+  // =================== Bridge ES modules to window for legacy callers ===================
+  const g = window;
+
+  // Analyzer
+  g.analyzeVideoFrameByFrame = Analyzer.analyzeVideoFrameByFrame || Analyzer.default?.analyzeVideoFrameByFrame;
+  g.sendFrameToDetect        = Analyzer.sendFrameToDetect        || Analyzer.default?.sendFrameToDetect;
+  g.stopFrameAnalysis        = Analyzer.stopFrameAnalysis        || Analyzer.default?.stopFrameAnalysis;
+
+  // Hoop tracker
+  g.handleHoopSelection      = Hoop.handleHoopSelection          || Hoop.default?.handleHoopSelection;
+  g.getLockedHoopBox         = Hoop.getLockedHoopBox             || Hoop.default?.getLockedHoopBox;
+
+  // Shot arc (namespace on window.shotArc)
+  g.shotArc = g.shotArc || {};
+  const SA = ShotArcMod.default || ShotArcMod;
+  for (const k of ['resetShotFSM','refineBallTrajectory','updateArc','updateShotArcTick']) {
+    if (typeof SA?.[k] === 'function') g.shotArc[k] = SA[k];
+  }
+
+  // Shot logger (truth)
+  g.shotLogger = g.shotLogger || {};
+  const SL = ShotLogMod.default || ShotLogMod;
+  if (typeof SL?.summarize === 'function') g.shotLogger.summarize = SL.summarize;
+
+  // =================== Ready + seek helpers ===================
+  const HAVE_METADATA = 1;
+  async function ensureVideoReady(v) {
+    if (!v) throw new Error("no video");
+    if (v.readyState >= HAVE_METADATA && Number.isFinite(v.duration)) return v;
+    await new Promise((resolve) => {
+      const onMeta = () => { v.removeEventListener('loadedmetadata', onMeta); resolve(); };
+      v.addEventListener('loadedmetadata', onMeta, { once:true });
+      const id = setInterval(() => {
+        if (v.readyState >= HAVE_METADATA && Number.isFinite(v.duration)) {
+          clearInterval(id); v.removeEventListener('loadedmetadata', onMeta); resolve();
+        }
+      }, 50);
+      setTimeout(() => { clearInterval(id); v.removeEventListener('loadedmetadata', onMeta); resolve(); }, 1500);
     });
+    return v;
+  }
+  async function seekVideoTime(v, t, { tolerance=0.015, timeout=2500 }={}) {
+    await ensureVideoReady(v);
+    t = Number.isFinite(t) ? Math.max(0, Math.min(v.duration - 0.001, t)) : 0;
+    return new Promise((resolve) => {
+      let done=false;
+      const finish=()=>{ if (done) return; done=true; cleanup(); resolve(v.currentTime); };
+      const cleanup=()=>{ v.removeEventListener('seeked', onSeeked); v.removeEventListener('timeupdate', onTime); v.removeEventListener('loadeddata', onLoad); };
+      const good=()=> Math.abs(v.currentTime - t) <= tolerance;
+      const onSeeked = () => { if (good()) finish(); };
+      const onTime   = () => { if (good()) finish(); };
+      const onLoad   = onSeeked;
+      v.addEventListener('seeked', onSeeked);
+      v.addEventListener('timeupdate', onTime);
+      v.addEventListener('loadeddata', onLoad);
+      if (good()) v.currentTime = Math.max(0, t + 0.000001); else v.currentTime = t;
+      setTimeout(finish, timeout);
+    });
+  }
 
-    // worker + fps hints
-    
-    window.DETECTOR_WORKER_PATH = "/static/arc_mm/detector.worker.js";
-    window.__videoFPS = 30;
+  // =================== Detector bootstrap (local first, analyzer fallback) ===================
+  const DET_WORKER_URL  = '/static/arc_mm/detector.worker.js';
+  const DET_WORKER_TYPE = 'classic'; // or 'module' if your worker uses import
+
+  async function initDetector() {
+    try {
+      const LD = window.localDetector || window.LocalDetector; // accept either casing
+      const enable = LD?.enable;
+      if (typeof enable === 'function') {
+        await enable({
+          worker: DET_WORKER_URL,
+          workerType: DET_WORKER_TYPE,
+          labels: ['basketball','hoop','net','backboard','player']
+        });
+        window.sendFrameToDetect =
+          LD.sendFrameToDetect || LD.detect || window.sendFrameToDetect;
+        if (typeof window.sendFrameToDetect === 'function') {
+          console.log('✅ Local detector enabled');
+          return true;
+        }
+        console.warn('⚠️ Local detector enabled but no sendFrameToDetect export found.');
+      }
+    } catch (e) { console.warn('⚠️ Local detector init failed', e); }
+
+    // Analyzer fallback
+    const maybe = Analyzer?.sendFrameToDetect || Analyzer?.default?.sendFrameToDetect;
+    if (typeof maybe === 'function') {
+      window.sendFrameToDetect = maybe;
+      console.log('⚠️ Using Analyzer detect');
+      return true;
+    }
+
+    console.warn('❌ No detector wired.');
+    return false;
+  }
+
+  // optional: make callable from console for quick tests
+  window.initDetector = initDetector;
+
+
+
+  // =================== UI + sizing ===================
+  const ui = {
+    list: document.getElementById('shotList'),
+    video: document.getElementById('videoPlayer'),
+    overlay: document.getElementById('overlay'),
+    exportCan: document.getElementById('exportCanvas'),
+    processAllBtn: document.getElementById('processAll')
+  };
+  function syncSizes(){
+    const vw = ui.video.videoWidth||0, vh = ui.video.videoHeight||0;
+    if (!vw || !vh) return false;
+    [ui.overlay, ui.exportCan].forEach(c => { c.width = vw; c.height = vh; c.style.width='100%'; c.style.height='100%'; });
+    return true;
+  }
+  function lockOverlayToVideo(){ try { syncSizes(); } catch {} }
+  ui.video.addEventListener('loadedmetadata', lockOverlayToVideo, { once:true });
+
+  // Normalize detector outputs -> [{label, confidence, box:[x1,y1,x2,y2]}]
+  function normalizeDetections(res) {
+    const raw = res?.objects || res?.detections || res?.boxes || res || [];
+    const out = [];
+    for (const o of raw) {
+      const label = (o.label || o.class || o.name || '').toString().toLowerCase();
+      const conf  = Number(o.confidence ?? o.score ?? o.prob ?? o.probability ?? 0);
+      let box = o.box || o.bbox || o.rect || null;
+
+      if (Array.isArray(box)) {
+        if (box.length === 4) {
+          const [a,b,c,d] = box;
+          // If it looks like [x,y,w,h], convert to [x1,y1,x2,y2]
+          box = (c < a || d < b) ? [a, b, a + c, b + d] : [a, b, c, d];
+        } else continue;
+      } else if (box && typeof box === 'object') {
+        const x = box.x ?? box.left ?? 0, y = box.y ?? box.top ?? 0;
+        const w = box.w ?? box.width ?? ((box.right ?? 0) - x);
+        const h = box.h ?? box.height ?? ((box.bottom ?? 0) - y);
+        box = [x, y, x + w, y + h];
+      } else {
+        const x = o.x ?? o.cx, y = o.y ?? o.cy, w = o.w ?? o.width, h = o.h ?? o.height;
+        if ([x,y,w,h].every(n => Number.isFinite(n))) box = [x - w/2, y - h/2, x + w/2, y + h/2];
+        else continue;
+      }
+
+      out.push({ label, confidence: conf, box });
+    }
+    return out;
+  }
+  window.normalizeDetections = normalizeDetections;
+
+
+  
+  
+  
+  // =================== Detector warm + autolock rim ===================
+  async function warmAndAutolockROI({ sampleCount = 6, spanSec = 0.8 } = {}) {
+    const v = ui.video, ov = ui.overlay;
+    const det = window.sendFrameToDetect;
+    if (!det || !ov || !v.duration) return;
+
+    // ensure overlay sized
+    if (!ov.width || !ov.height) {
+      await new Promise(r=>requestAnimationFrame(r));
+      if (!ov.width || !ov.height) { try { lockOverlayToVideo(); } catch {} }
+    }
+    if (!ov.width || !ov.height) return; // still not ready; bail quietly
+
+    // scratch canvas
+    if (!ov.width || !ov.height) { lockOverlayToVideo?.(); await new Promise(r=>requestAnimationFrame(r)); }
+    if (!ov.width || !ov.height) return; // still not ready
+    const tap = (warmAndAutolockROI.tap ||= document.createElement('canvas'));
+    tap.width = ov.width; tap.height = ov.height;
+    const ctx = tap.getContext('2d', { willReadFrequently:true });
+
+    const picks = [];
+    const step = Math.min(spanSec / Math.max(1, sampleCount - 1), 0.2);
+    let t = Math.min(0.10, v.duration * 0.05);
+    for (let i=0;i<sampleCount;i++){
+      await seekVideoTime(v, t);
+      ctx.drawImage(v, 0, 0, ov.width, ov.height);
+      let res = await det(tap, (window.fidx = (window.fidx|0)+1));
+      const objs = normalizeDetections(res).filter(o => (
+        o.label.includes('hoop')     ||
+        o.label.includes('net')      ||
+        o.label === 'basket'         ||   // add your model’s actual strings here
+        o.label === 'rim'
+      ));
+      if (objs.length) picks.push(...objs);
+      t += step;
+    }
+
+    const best = picks.sort((a,b)=>(b.confidence||0)-(a.confidence||0))[0];
+    if (best) {
+      const [x1,y1,x2,y2] = best.box;
+      const cx = Math.round((x1 + x2)/2), cy = Math.round((y1 + y2)/2);
+      try { window.handleHoopSelection?.({ clientX: 0, clientY: 0, videoXY: { x: cx, y: cy } }, ov, { objects:[best] }, null); } catch {}
+    } else {
+      console.info('[autolock] no hoop/net found during warm-up; click to pick.');
+    }
+  }
+
+
+  // =================== Manual rim pick ===================
+  function enableHoopPickOnce(){
+    const ov = ui.overlay; if (!ov || g.__pickingHoop) return;
+    g.__pickingHoop = true; ov.style.cursor='crosshair';
+    const pickOnce = (e) => {
+      try { g.handleHoopSelection?.(e, ov, g.lastDetectedFrame || {objects:[]}, null); } catch {}
+      ov.style.cursor='default'; ov.removeEventListener('pointerdown', pickOnce); ov.removeEventListener('click', pickOnce); g.__pickingHoop = false;
+    };
+    ov.addEventListener('pointerdown', pickOnce, { passive:false });
+    ov.addEventListener('click',        pickOnce, { passive:false });
+  }
+
+  // =================== HUD + overlay ===================
+  function drawHUD(ctx){
+    const s = g.__lastSummary || {};
+    const line1 = `Result: ${s.result ? String(s.result).toUpperCase()
+                     : (s.made===true?'MAKE':s.made===false?'MISS':'—')}`;
+    const deg = n => typeof n==='number' ? `${Math.round(n)}°` : '—';
+    const num = n => (typeof n==='number' && isFinite(n)) ? Math.round(n) : '—';
+    const line2 = `Release ${deg(s.releaseAngle)}  •  Entry ${deg(s.entryAngle)}  •  Apex ${num(s.apexHeight)}`;
+    const pad=10, fs=16;
+    ctx.save();
+    ctx.font=`600 ${fs}px system-ui,sans-serif`;
+    const w1=ctx.measureText(line1).width, w2=ctx.measureText(line2).width;
+    const boxW=Math.max(w1,w2)+pad*2, boxH=fs*2+pad*3;
+    ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(pad,pad,boxW,boxH);
+    ctx.fillStyle='#fff'; ctx.fillText(line1, pad*1.6, pad*1.8+fs*0.1);
+    ctx.fillText(line2, pad*1.6, pad*2.6+fs);
+    ctx.restore();
+  }
+  function drawArcOverlay(ctx){
+    const arc = g.ballArc || {};
+    const trail = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+    if (!trail.length) return;
+    ctx.save();
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = 'rgba(255,165,0,0.95)';
+    ctx.beginPath(); ctx.moveTo(trail[0].x, trail[0].y);
+    for (let i=1;i<trail.length;i++) ctx.lineTo(trail[i].x, trail[i].y);
+    ctx.stroke();
+    ctx.restore();
+  }
+  function compositeFrame(){
+    const w=ui.exportCan.width,h=ui.exportCan.height; if(!w||!h) return;
+    const ctx=ui.exportCan.getContext('2d');
+    ctx.clearRect(0,0,w,h);
+    ctx.drawImage(ui.video,0,0,w,h);
+    ctx.drawImage(ui.overlay,0,0,w,h);
+    drawArcOverlay(ctx);
+    drawHUD(ctx);
+  }
+
+  // =================== Recorder ===================
+  function startCompositeRecorder(canvas, { fps=30 } = {}) {
+    const stream = canvas.captureStream(fps);
+    const mime = (MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm');
+    const rec = new MediaRecorder(stream, { mimeType:mime, videoBitsPerSecond: 4_000_000 });
+    const chunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+    const done = new Promise(resolve => rec.onstop = () => resolve(new Blob(chunks, { type:mime })));
+    rec.start(100);
+    return { rec, done };
+  }
+  function downloadBlob(blob, name){
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(()=> { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  }
+
+  // =================== Results pipeline (per clip) ===================
+  async function renderResultsClip({ id, url, outBasename }) {
+    try { g.stopFrameAnalysis?.(); } catch {}
+    try { g.resetAll?.(); } catch {}
+    try { g.shotArc?.resetShotFSM?.(); } catch {}
+
+    ui.video.srcObject = null;
+    ui.video.removeAttribute('src');
+    ui.video.src = url; ui.video.preload='auto';
+    await ensureVideoReady(ui.video);
+    lockOverlayToVideo();
+
+    // Detector must exist before autolock & analysis
+    await initDetector(); // must succeed or you’ll detect nothing
+    await warmAndAutolockROI({ sampleCount: 6, spanSec: 0.8 });
+
+    analyzeVideoFrameByFrame(ui.video, ui.overlay);
+
+
+    // strict pre-prox / relaxed in-prox
+    g.FBF_RATE = 1.0;
+    g.BALL_MIN_CONF_PRE  = 0.45;
+    g.BALL_MAX_STEP_PRE  = 55;
+    g.BALL_MIN_CONF      = 0.26;
+    g.BALL_MAX_STEP      = 85;
+    g.setBallOptions?.({ KF_PROCESS_NOISE: 1.0, KF_MEASURE_NOISE: 3.0, MAX_STEP: g.BALL_MAX_STEP, GAP_FILL_MAX: 3 });
+    g.BALL_MAX_DEV_PX   = 70;
+    g.BALL_MAX_TURN_DEG = 60;
+
+    const { rec, done } = startCompositeRecorder(ui.exportCan, { fps: 30 });
+    const onFrame = () => compositeFrame();
+    g.addEventListener('analyzer:frame-done', onFrame);
+
+    const finishNow = async () => {
+      try { g.removeEventListener('analyzer:frame-done', onFrame); } catch {}
+      try { g.shotArc?.refineBallTrajectory?.(); } catch {}
+
+      const hoop = g.getLockedHoopBox?.();
+      const summary = g.shotLogger?.summarize?.(g.ballArc, hoop) || { made:null };
+      g.__lastSummary = summary;
+
+      for (let i=0;i<24;i++) { compositeFrame(); await new Promise(r=>requestAnimationFrame(r)); }
+
+      try { rec.requestData?.(); rec.stop(); } catch {}
+      const blob = await done;
+
+      const row = document.querySelector(`[data-shot="${id}"]`);
+      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+      a.download = `${outBasename || id || 'shot'}.results.webm`; a.textContent = 'Download';
+      const v = document.createElement('video'); v.src = a.href; v.controls = true; v.muted = true; v.style.maxWidth='360px'; v.style.display='block';
+      row?.appendChild(document.createTextNode(' · '));
+      row?.appendChild(a);
+      row?.appendChild(document.createElement('br'));
+      row?.appendChild(v);
+      const st = row?.querySelector('.status'); if (st) st.textContent = summary?.made===true ? '✓ MAKE' : summary?.made===false ? '✗ MISS' : '—';
+    };
+
+    g.addEventListener('shot:summary', finishNow, { once:true });
+    g.addEventListener('shot:end',     finishNow, { once:true });
+
+    enableHoopPickOnce();
+
+    if (typeof g.analyzeVideoFrameByFrame === 'function') {
+      g.analyzeVideoFrameByFrame(ui.video, ui.overlay);
+    } else {
+      console.warn('[FBF] analyzer missing (check module exports)');
+    }
+  }
+
+  // =================== Demo list + batch ===================
+  function boot(){
+    const shots = g.__DEMO_SHOTS || [];
+    const list = document.getElementById('shotList');
+    list.innerHTML = shots.map(s => `
+      <div class="shot" data-shot="${s.id}">
+        <button class="btn go" data-id="${s.id}">Process</button>
+        <span class="status">waiting…</span>
+        <span class="name">${s.name || s.url}</span>
+      </div>
+    `).join('');
+    list.addEventListener('click', async (e) => {
+      const b = e.target.closest('button.go'); if (!b) return;
+      b.disabled = true;
+      const id = b.dataset.id;
+      const shot = shots.find(x => String(x.id) === String(id));
+      await renderResultsClip({ id: shot.id, url: shot.url, outBasename: `shot-${shot.id}` });
+    });
+    document.getElementById('processAll').onclick = async () => {
+      for (const b of [...list.querySelectorAll('.shot button.go')]) {
+        b.click();
+        await new Promise(r=>setTimeout(r, 250));
+      }
+    };
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once:true }); else boot();
   </script>
-
-
-  <script>
-    // Make sure the detector worker is resolvable from this page
-    window.DETECTOR_WORKER_PATH = "/static/arc_mm/detector.worker.js";
-    window.__videoFPS = 30;
-  </script>
-  <script src="/static/js/shot_utils.js"></script>
-  <script src="/static/js/ball_tracker.js"></script>
-  <script src="/static/js/shot_logger.js"></script>
-  <script src="/static/js/fix_overlay_display.js"></script>
-  <script src="/static/arc_mm/shot_arc.js"></script>
-  <script type="module" src="/static/arc_mm/arc_mm.js"></script>
-
 </body>
 </html>
