@@ -209,10 +209,38 @@ function pickBallCenter(objects, player, hoopLocked) {
     const balls = (objects || [])
       .filter(o => o && isBallLabelLocal(o.label) && Array.isArray(o.box))
       .map(o => {
-        const [x1,y1,x2,y2] = o.box; return { cx:(x1+x2)/2, cy:(y1+y2)/2, w:(x2-x1), h:(y2-y1), o };
+        const [x1,y1,x2,y2] = o.box;
+        return {
+          cx: (x1 + x2) / 2,
+          cy: (y1 + y2) / 2,
+          w:  (x2 - x1),
+          h:  (y2 - y1),
+          confidence: Number(o?.confidence ?? o?.score ?? 0),
+          label: o?.label || 'basketball',
+          frame: Number(o?.frame ?? o?.__frameIdx),
+          o
+        };
       })
       .sort((a,b)=> (b.w*b.h) - (a.w*a.h));
     if (!balls.length) return null;
+
+    const wrap = (entry, via) => {
+      if (!entry) return null;
+      const cx = Number(entry.cx);
+      const cy = Number(entry.cy);
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+      const point = {
+        x: Math.round(cx),
+        y: Math.round(cy),
+        confidence: Number(entry.confidence ?? entry.o?.confidence ?? entry.o?.score ?? 0),
+        score: Number(entry.confidence ?? entry.o?.confidence ?? entry.o?.score ?? 0),
+        label: entry.label || entry.o?.label || 'basketball',
+        via
+      };
+      if (Number.isFinite(entry.frame)) point.frame = entry.frame;
+      if (Array.isArray(entry.o?.box)) point.box = entry.o.box.slice();
+      return point;
+    };
 
     // Player reject zone
     const pb = (player && Array.isArray(player.box) && player.box.length===4) ? player.box : null;
@@ -251,21 +279,21 @@ function pickBallCenter(objects, player, hoopLocked) {
         .sort((a,b)=> (a.lat === b.lat ? a.d - b.d : a.lat - b.lat));
       const best = candidates[0] || null;
       if (best && (best.d <= maxStep || insideProx(best.c) || nearHoopY(best.c)))
-        return { x: Math.round(best.c.cx), y: Math.round(best.c.cy) };
+        return wrap(best.c, 'det-corridor');
       // No acceptable candidate near last: if we are inside prox, allow the nearest inside-prox one
       const proxCand = balls.find(c => aspectOK(c) && insideProx(c));
-      if (proxCand) return { x: Math.round(proxCand.cx), y: Math.round(proxCand.cy) };
+      if (proxCand) return wrap(proxCand, 'det-prox');
       return null;
     }
 
     // Prefer candidates not inside the player box unless they are near hoop/prox (tolerate legitimate near-rim contact)
     for (const c of balls) {
       if (!aspectOK(c)) continue;
-      if (!insidePlayer(c) || insideProx(c) || nearHoopY(c)) return { x: Math.round(c.cx), y: Math.round(c.cy) };
+      if (!insidePlayer(c) || insideProx(c) || nearHoopY(c)) return wrap(c, 'det-basic');
     }
     // Fallback to the largest if all are inside player (rare)
     const top = balls[0];
-    return { x: Math.round(top.cx), y: Math.round(top.cy) };
+    return wrap(top, 'det-largest');
   } catch { return null; }
 }
 
@@ -369,7 +397,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
   } catch {}
 
   // Publish
-  window.lastDetectedFrame = { __frameIdx: fidx, objects, poses };
+  window.lastDetectedFrame = { __frameIdx: frameIdx, objects, poses };
   try { bufferDetectedObjects?.(objects); } catch {}
 
   // Ball update

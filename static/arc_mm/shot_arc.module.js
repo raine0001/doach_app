@@ -18,6 +18,61 @@ const CFG = {
   EXIT_BELOW_MARGIN:    () => Number(window.EXIT_BELOW_MARGIN  ?? 12),
 };
 
+
+// --- Post-release filters ---
+const POST = {
+  MAX_DEV_PX:     () => Number(window.BALL_MAX_DEV_PX ?? 70),   // max distance from predicted
+  MAX_TURN_DEG:   () => Number(window.BALL_MAX_TURN_DEG ?? 60), // max heading change
+};
+
+const _flt = { last2: [] }; // keep last two accepted post-release points
+
+function headingDeg(a,b){
+  if (!a || !b) return null;
+  return Math.atan2(b.y - a.y, b.x - a.x) * 180 / Math.PI;
+}
+function angleDiffDeg(a,b){
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 180;
+  let d = Math.abs(a - b) % 360;
+  if (d > 180) d = 360 - d;
+  return d;
+}
+function predictNext(p1, p2){
+  if (!p1 || !p2) return null;
+  return { x: p2.x + (p2.x - p1.x), y: p2.y + (p2.y - p1.y) };
+}
+function filterPostReleaseBall(pt){
+  if (window.isBallExcluded && window.isBallExcluded(ballPt.x, ballPt.y)) return false;
+
+  try {
+    const last = _flt.last2.at(-1);
+    const prev = _flt.last2.at(-2);
+    if (!last || !prev) { _flt.last2.push(pt); return pt; }
+
+    // heading gate
+    const hPrev = headingDeg(prev, last);
+    const hNew  = headingDeg(last, pt);
+    if (angleDiffDeg(hPrev, hNew) > POST.MAX_TURN_DEG()) return null;
+
+    // distance-from-prediction gate
+    const pred = predictNext(prev, last);
+    const dev = Math.hypot(pt.x - pred.x, pt.y - pred.y);
+    if (dev > POST.MAX_DEV_PX()) return null;
+
+    _flt.last2.push(pt);
+    if (_flt.last2.length > 2) _flt.last2.shift();
+    return pt;
+  } catch { return pt; }
+}
+
+// --- Pre-release filters ---
+
+const PRE = {
+   MIN_CONF: () => Number(window.BALL_MIN_CONF_PRE ?? 0.38),
+   MAX_STEP: () => Number(window.BALL_MAX_STEP_PRE ?? 65),
+   REQUIRE_UPTREND: () => Number(window.PRE_MIN_UPTREND ?? 2) // frames of y decreasing
+ };
+
 const _state = {
   // Release guards
   relPoseStreak: 0,
@@ -28,16 +83,93 @@ const _state = {
   // Proximity tracking
   inProxPrev: false,
   postExitFrames: 0,
+  preArc: [],            // pre-release buffer [{x,y,frame}]
+  preArcLast: null,      // last accepted pre point
+  preArcUpStreak: 0,     // monotonic up streak
+  preFlushed: false
 };
 
 function resetShotFSM() {
+  _flt.last2.length = 0;
   _state.relPoseStreak = 0;
   _state.relDelay      = 0;
   _state.relLatched    = false;
   _state.lastWristYs.length = 0;
   _state.inProxPrev    = false;
   _state.postExitFrames= 0;
+  _state.preArc.length = 0;
+  _state.preArcLast = null;
+  _state.preArcUpStreak = 0;
+  _state.preFlushed = false;
 }
+
+// Basic pre-release filter to kill false balls
+ function acceptPreBall(ballPt, H){
+ if (window.isOrangeish && !window.isOrangeish(ballPt.x, ballPt.y)) return false;
+ if (window.isBallExcluded && window.isBallExcluded(ballPt.x, ballPt.y)) return false;
+
+   if (!ballPt || !Number.isFinite(ballPt.x) || !Number.isFinite(ballPt.y)) return false;
+   // confidence gate if provided
+   const lbl = String(ballPt.label || '');
+   if (lbl && lbl.toLowerCase() !== 'basketball') return false;
+   const c = Number(ballPt.confidence ?? ballPt.score ?? -1);
+   if (Number.isFinite(c) && c < PRE.MIN_CONF()) return false;
+   // monotonic upward (y decreasing) streak
+   if (_state.preArcLast) {
+     if (ballPt.y < _state.preArcLast.y - 0.8) _state.preArcUpStreak++; else _state.preArcUpStreak = 0;
+    if (_state.preArcUpStreak < PRE.REQUIRE_UPTREND()) return false;
+     const step = Math.hypot(ballPt.x - _state.preArcLast.x, ballPt.y - _state.preArcLast.y);
+    if (step > PRE.MAX_STEP()) return false;
+    // new: heading consistency while buffering
+    try {
+      const p2 = _state.preArcLast, p1 = _state.preArc.at?.(-2);
+      if (p1) {
+        const hPrev = headingDeg(p1, p2);
+        const hNew  = headingDeg(p2, ballPt);
+        if (angleDiffDeg(hPrev, hNew) > 70) return false;
+      }
+    } catch {}
+   }
+   // corridor: don’t accept points behind the hoop or far outside lane
+   if (H) {
+     const laneX = Math.abs(ballPt.x - H.cx) <= Math.max(110, H.w * 1.1); // looser
+     const above = ballPt.y <= (H.rimTop + Math.max(28, H.h * 0.45));     // taller band
+     if (!(laneX || above)) return false;
+   }
+   return true;
+ }
+
+ function collectPreArc(frame, ballPt, hoopBox){
+   const H = normHoop(hoopBox);
+   if (!acceptPreBall(ballPt, H)) return;
+   _state.preArc.push({ x: ballPt.x, y: ballPt.y, frame });
+   _state.preArcLast = { x: ballPt.x, y: ballPt.y };
+   if (_state.preArc.length > 30) _state.preArc.splice(0, _state.preArc.length - 30);
+ }
+
+ function flushPreArc(hoopBox){
+   if (_state.preFlushed || !_state.preArc.length) return;
+   const H = normHoop(hoopBox), prox = proxFromHoop(H);
+   for (const p of _state.preArc) { try { stepFBFArc?.(p, prox, p.frame); } catch {} }
+   _state.preFlushed = true;
+ }
+
+// quick HSV-ish gate: keep orange-ish blobs
+window.isOrangeish = (x,y)=> {
+  const v = document.getElementById('videoPlayer');
+  if (!v) return true;
+  const c = (window.__ballTap ||= (()=>{const t=document.createElement('canvas'); t.width=t.height=16; return t;})());
+  const ct = c.getContext('2d', { willReadFrequently: true });
+  ct.drawImage(v, x-4, y-4, 8, 8, 0, 0, 8, 8);
+  const d = ct.getImageData(0,0,8,8).data;
+  let r=0,g=0,b=0,n=0;
+  for (let i=0;i<d.length;i+=4){ r+=d[i]; g+=d[i+1]; b+=d[i+2]; n++; }
+  r/=n; g/=n; b/=n;
+  // crude orange: R high, G mid, B low
+  return (r>120 && g>70 && b<90 && r>g+20 && r>b+40);
+};
+
+
 
 // Normalize a hoop box to center-based with rim top
 function normHoop(hoop) {
@@ -227,10 +359,20 @@ function updateExit(frame, ballPt, hoopBox) {
 
 // Convenience: single tick updater to call from analyzer
 function updateShotArcTick({ frame, pose = null, ballPt = null, hoopBox = null } = {}) {
-  // Ensure proximity/enter stamping occurs before release uses it
-  const ex  = updateExit(frame, ballPt, hoopBox);
-  const rel = updateRelease(frame, pose, ballPt, hoopBox);
-  return { released: rel, ...ex };
+  // Stamp prox first
+   const ex  = updateExit(frame, ballPt, hoopBox);
+   const rel = updateRelease(frame, pose, ballPt, hoopBox);
+  try {
+    const bs = (window.ballState ||= {});
+    if (!Number.isFinite(bs.releaseFrame)) {
+      // collect pre-release points with strict filter
+      if (ballPt) collectPreArc(frame, ballPt, hoopBox);
+    } else {
+      // on/after latch, ensure buffered points are committed once
+      flushPreArc(hoopBox);
+    }
+  } catch {}
+   return { released: rel, ...ex };
 }
 
 // ---- Arc stepping (centralized) -------------------------------------------
@@ -238,199 +380,41 @@ function updateArc(frame, ballPt, hoopBox) {
   const H = normHoop(hoopBox);
   const prox = proxFromHoop(H);
   if (!ballPt || !prox) return false;
-  // Only collect arc after release to avoid pre-shot noise drawing across the court
-  try { const bs = (window.ballState ||= {}); if (!Number.isFinite(bs.releaseFrame)) return false; } catch {}
+
+  // After latch, also ensure buffered trail is merged
+  try {
+    const bs = (window.ballState ||= {});
+    if (!Number.isFinite(bs.releaseFrame)) return false;
+    flushPreArc(hoopBox);
+  } catch {}
+
+  // sanity-check motion to kill wild points
+  const clean = filterPostReleaseBall(ballPt);
+  if (!clean) return false;
+
+  
   const lastArc = window.ballArc?.trail?.at?.(-1) || null;
   if (!lastArc || lastArc.frame !== frame) {
-    try { stepFBFArc?.(ballPt, prox, frame); } catch {}
+    try { stepFBFArc?.(clean, prox, frame); } catch {}
   }
   try { fillArcGaps?.(); } catch {}
-  
-  // NEW: Refine trajectory after collecting points
-  try { refineBallTrajectory(); } catch {}
   
   return true;
 }
 
-// ---- NEW: Ball trajectory refinement functions ----
 function refineBallTrajectory() {
   const arc = window.ballArc;
-  if (!arc || !Array.isArray(arc.trail) || arc.trail.length < 3) return;
-  
-  // Apply smoothing and generate clean arc
-  const smoothedTrail = smoothTrajectory(arc.trail);
-  const cleanArc = generateCleanArc(smoothedTrail);
-  
-  // Store refined arc
-  arc.refinedTrail = cleanArc.trail;
-  arc.releasePoint = cleanArc.releasePoint;
-  arc.apexPoint = cleanArc.apexPoint;
-  arc.rimCrossingPoint = cleanArc.rimCrossingPoint;
-
-  try {
-    const refined = Array.isArray(cleanArc.trail) ? cleanArc.trail : [];
-    const rawTrail = Array.isArray(arc.trail) ? arc.trail : [];
-    const frames = refined
-      .map((p) => Number(p?.frame))
-      .filter((f) => Number.isFinite(f));
-    const minFrame = frames.length ? Math.min(...frames) : null;
-    const maxFrame = frames.length ? Math.max(...frames) : null;
-    const span = frames.length && Number.isFinite(minFrame) && Number.isFinite(maxFrame)
-      ? Math.max(1, (maxFrame - minFrame + 1))
-      : 0;
-    const continuity = span > 0 ? (new Set(frames)).size / span : 0;
-    const pairs = Math.min(rawTrail.length, refined.length);
-    let sumSq = 0;
-    let count = 0;
-    for (let i = 0; i < pairs; i++) {
-      const a = rawTrail[i];
-      const b = refined[i];
-      const ax = Number(a?.x);
-      const ay = Number(a?.y);
-      const bx = Number(b?.x);
-      const by = Number(b?.y);
-      if ([ax, ay, bx, by].every(Number.isFinite)) {
-        const dx = ax - bx;
-        const dy = ay - by;
-        sumSq += dx * dx + dy * dy;
-        count++;
-      }
-    }
-    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
-    const peakY = refined.reduce((min, p) => {
-      const y = Number(p?.y);
-      return Number.isFinite(y) ? Math.min(min, y) : min;
-    }, Number.POSITIVE_INFINITY);
-    const packet = {
-      points: refined.length,
-      continuity: Number(continuity.toFixed(3)),
-      rms: Number(rms.toFixed(3)),
-      peakY: Number.isFinite(peakY) ? peakY : null,
-      tStart: Number.isFinite(minFrame) ? minFrame : null,
-      tEnd: Number.isFinite(maxFrame) ? maxFrame : null
-    };
-    window.dispatchEvent(new CustomEvent('arc:fit', { detail: packet }));
-  } catch {}
-
-  if (window.DOACH_SHOT_DEBUG) {
-    console.log('[trajectory] refined', {
-      originalPoints: arc.trail.length,
-      refinedPoints: cleanArc.trail.length,
-      release: cleanArc.releasePoint,
-      apex: cleanArc.apexPoint
-    });
-  }
+  if (!arc || !Array.isArray(arc.trail)) return;
+  arc.refinedTrail = arc.trail.map((p) => (p && typeof p === 'object') ? { ...p } : p);
+  arc.refinedTrailSource = 'raw';
+  arc.refinedMetrics = { ok: true, count: arc.refinedTrail.length };
+  arc.releasePoint = null;
+  arc.apexPoint = null;
+  arc.rimCrossingPoint = null;
+  delete arc.refinedKeyTrail;
 }
 
-
-function smoothTrajectory(rawTrail) {
-  if (!Array.isArray(rawTrail) || rawTrail.length < 3) return rawTrail;
-  
-  // Simple moving average smoothing
-  const smoothed = [];
-  const windowSize = Math.min(3, Math.floor(rawTrail.length / 3));
-  
-  for (let i = 0; i < rawTrail.length; i++) {
-    const start = Math.max(0, i - windowSize);
-    const end = Math.min(rawTrail.length - 1, i + windowSize);
-    
-    let sumX = 0, sumY = 0, count = 0;
-    for (let j = start; j <= end; j++) {
-      sumX += rawTrail[j].x;
-      sumY += rawTrail[j].y;
-      count++;
-    }
-    
-    smoothed.push({
-      x: sumX / count,
-      y: sumY / count,
-      frame: rawTrail[i].frame
-    });
-  }
-  
-  return smoothed;
-}
-
-function generateCleanArc(smoothedTrail) {
-  if (!Array.isArray(smoothedTrail) || smoothedTrail.length < 3) {
-    return { trail: smoothedTrail, releasePoint: null, apexPoint: null, rimCrossingPoint: null };
-  }
-  
-  // Find release point (first point after release)
-  const releasePoint = smoothedTrail[0];
-  
-  // Find apex (highest point - lowest Y value)
-  let apexIdx = 0;
-  let minY = smoothedTrail[0].y;
-  for (let i = 1; i < smoothedTrail.length; i++) {
-    if (smoothedTrail[i].y < minY) {
-      minY = smoothedTrail[i].y;
-      apexIdx = i;
-    }
-  }
-  const apexPoint = smoothedTrail[apexIdx];
-  
-  // Find rim crossing point (where ball crosses rim level)
-  const hoop = window.getLockedHoopBox?.();
-  let rimCrossingPoint = null;
-  if (hoop) {
-    const rimY = hoop.cy; // Use hoop center Y as rim level
-    for (let i = 1; i < smoothedTrail.length; i++) {
-      const prev = smoothedTrail[i-1];
-      const curr = smoothedTrail[i];
-      if (prev.y <= rimY && curr.y > rimY) {
-        // Interpolate exact crossing point
-        const t = (rimY - prev.y) / (curr.y - prev.y);
-        rimCrossingPoint = {
-          x: prev.x + (curr.x - prev.x) * t,
-          y: rimY,
-          frame: prev.frame + (curr.frame - prev.frame) * t
-        };
-        break;
-      }
-    }
-  }
-  
-  // Generate clean arc with key points
-  const cleanTrail = [];
-  
-  // Add release point
-  cleanTrail.push(releasePoint);
-  
-  // Add intermediate points (simplified)
-  const step = Math.max(1, Math.floor(smoothedTrail.length / 8));
-  for (let i = step; i < smoothedTrail.length - step; i += step) {
-    cleanTrail.push(smoothedTrail[i]);
-  }
-  
-  // Add apex point if not already included
-  if (apexIdx > 0 && apexIdx < smoothedTrail.length - 1) {
-    const apexIncluded = cleanTrail.some(p => 
-      Math.abs(p.x - apexPoint.x) < 5 && Math.abs(p.y - apexPoint.y) < 5
-    );
-    if (!apexIncluded) {
-      cleanTrail.push(apexPoint);
-    }
-  }
-  
-  // Add rim crossing point if found
-  if (rimCrossingPoint) {
-    cleanTrail.push(rimCrossingPoint);
-  }
-  
-  // Add final point
-  cleanTrail.push(smoothedTrail[smoothedTrail.length - 1]);
-  
-  // Sort by frame to maintain chronological order
-  cleanTrail.sort((a, b) => (a.frame || 0) - (b.frame || 0));
-  
-  return {
-    trail: cleanTrail,
-    releasePoint,
-    apexPoint,
-    rimCrossingPoint
-  };
-}
+// (Historical helper APIs removed to keep arc drawing tied to raw detections)
 
 // ---- TESTING: Simple test function ----
 function testTrajectoryRefinement() {

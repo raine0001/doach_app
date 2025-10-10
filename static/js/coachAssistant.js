@@ -5,6 +5,48 @@
 try { if (typeof window.__NEW_SESSION_PROMPTED === 'undefined') window.__NEW_SESSION_PROMPTED = false; } catch {}
 
 window.__coachMuted = JSON.parse(localStorage.getItem('doach_muted') || 'false');
+// --- Coach bootstrap shim: never crash while the file is still loading ---
+window.__COACH_READY = false;
+window.__COACH_QUEUE = [];
+
+// One voice, one line — let shot:summary own speaking
+window.DOACH_ONLY_REALTIME = true;
+
+
+window.generatePoseCoaching = window.generatePoseCoaching || function (pose) {
+  // ultra-safe fallback, metrics-based but minimal, so we don't throw during early boot
+  try {
+    const p = pose || {};
+    const msgs = [];
+    if (Number(p.elbowExtDeg) && p.elbowExtDeg < 150) msgs.push('Extend the elbow through release.');
+    if (p.fingersDown === false) msgs.push('Finish with fingers down.');
+    if (Number(p.followThroughHoldFrames) < 2) msgs.push('Hold the follow-through for two counts.');
+    if (!msgs.length) msgs.push('Eyes on the rim. Hold your finish.');
+    return { line: msgs[0], bullets: msgs.slice(0, 2) };
+  } catch {
+    return { line: 'Eyes on the rim. Hold your finish.', bullets: [] };
+  }
+};
+
+// internal processor the handler will call once ready
+window.__onShotSummaryInternal = function (s) {
+  const pose = s.pose || (window.__lastPoseSnapshot?.metrics) || {};
+  const gate = s.gate || window.__lastPoseSnapshot?.gate || null;
+  const advice = window.generatePoseCoaching(pose, { shotIdx: s.idx, gate });
+  const line = advice.line && advice.line.trim() ? advice.line : 'Eyes on the rim. Hold your finish.';
+  try { (window.doachSpeak || window.coachSpeak)?.(line); } catch {}
+  try { window.recordShotFeedback?.({ idx: s.idx, text: line, pose }); } catch {}
+  window.__lastCoachText = line;
+};
+
+window.__flushCoachQueue = function () {
+  const q = window.__COACH_QUEUE || [];
+  window.__COACH_QUEUE = [];
+  for (const s of q) {
+    try { window.__onShotSummaryInternal(s); } catch (e) { console.warn('[coach] flush error', e); }
+  }
+};
+
 
 // HUD mute button -> toggle voice
 window.addEventListener('hud:mute-toggle', (e) => {
@@ -19,6 +61,42 @@ window.addEventListener('hud:mute-toggle', (e) => {
     window.doachSetPrefs?.(next);
   } catch {}
 });
+
+
+// --- One-time intro voice guard + throttle ---
+try {
+  if (typeof window.__INTRO_SAID === 'undefined') window.__INTRO_SAID = false;
+  if (typeof window.__INTRO_LAST_AT === 'undefined') window.__INTRO_LAST_AT = 0;
+
+  if (!window.__coachIntroWired) {
+    window.__coachIntroWired = true;
+
+    // Speak once when countdown starts, but only if explicitly enabled
+    window.addEventListener('hud:arm-countdown', () => {
+      try {
+        // hard throttle in case the event fires twice
+        const now = performance.now();
+        if (now - window.__INTRO_LAST_AT < 1500) return;
+        window.__INTRO_LAST_AT = now;
+
+        // say this intro once per ceremony
+        if (window.__INTRO_SAID) return;
+        window.__INTRO_SAID = true;
+
+        // Only speak if you actually want the intro
+        if (window.PREF_COACH_INTRO === true) {
+          (window.coachSpeak || window.doachSpeak)?.("Let's get started. Get into position and shoot when ready.");
+        }
+      } catch {}
+    });
+
+    // reset the one-shot flag at session end or a hard reset
+    ['hud:end-session','session:reset','hud:arm-reset'].forEach(evt => {
+      window.addEventListener(evt, () => { try { window.__INTRO_SAID = false; } catch {} });
+    });
+  }
+} catch {}
+
 
 // Default saved TTS preference to server voice if none is set (helps desktop first-run)
 try {
@@ -253,14 +331,52 @@ function preferShotNumber(s) {
   };
 
   // Keep summarizePoseIssues aligned for table bullets (top 2–3)
-  window.summarizePoseIssues = function summarizePoseIssuesV3(shot, golden){
-    try{
-      const p = shot?.poseSnapshot || {};
-      const g = golden || window.DOACH_MEM?.get?.()?.golden || null;
-      const issues = rankIssues(p, g).filter(i => i.sev >= 5).slice(0,3);
-      return issues.map(i => i.msgs[0]);
-    } catch { return []; }
-  };
+  window.summarizePoseIssues = function summarizePoseIssuesV4(shot){
+  const p = shot?.poseSnapshot || {};
+  const out = [];
+
+  // Elbow extension
+  if (Number.isFinite(p.elbowExtDeg) && p.elbowExtDeg < 150)
+    out.push(`Elbow extension ${Math.round(p.elbowExtDeg)}° — finish longer.`);
+
+  // Release height
+  if ((p.releaseAboveShoulder === false) ||
+      (Number.isFinite(p.shoulderToWristAngle) && p.shoulderToWristAngle < 52))
+    out.push(`Release height low${Number.isFinite(p.shoulderToWristAngle) ? ` (${Math.round(p.shoulderToWristAngle)}°)` : ''}.`);
+
+  // Wrist/fingers
+  if (p.fingersDown === false ||
+      (Number.isFinite(p.indexBelowWristPx) && p.indexBelowWristPx > -2))
+    out.push(`Wrist snap — finish fingers down.`);
+
+  // Follow-through hold
+  if (Number.isFinite(p.followThroughHoldFrames) && p.followThroughHoldFrames < 2)
+    out.push(`Hold the follow-through 2 counts.`);
+
+  // Lift from legs
+  if (Number.isFinite(p.kneeFlex) && p.kneeFlex < 28)
+    out.push(`Add a bit more knee load.`);
+
+  // Eyes and alignment
+  if ((p.lookingAtHoop === false) || (Number.isFinite(p.headToHoopDeg) && p.headToHoopDeg > 25))
+    out.push(`Eyes to rim earlier.`);
+
+  // Torso lean guard
+  if (Number.isFinite(p.torsoLeanAngle) && Math.abs(p.torsoLeanAngle) > 12)
+    out.push(`Torso lean ${Math.round(p.torsoLeanAngle)}° — stay taller.`);
+
+  // Foot notes are allowed but last
+  if (Number.isFinite(p.feetToHoopDeg) && p.feetToHoopDeg > 22)
+    out.push(`Square feet to rim (${Math.round(p.feetToHoopDeg)}° off).`);
+  if (Number.isFinite(p.feetAngleDiff) && p.feetAngleDiff > 10)
+    out.push(`Toes parallel (Δ ${Math.round(p.feetAngleDiff)}°).`);
+  if (Number.isFinite(p.footStagger) && p.footStagger > 8)
+    out.push(`Level base (front/back stagger ${Math.round(p.footStagger)}px).`);
+
+  // Keep it punchy
+  return out.filter(Boolean).slice(0, 3);
+};
+
 })();
 
 
@@ -328,6 +444,370 @@ window.addEventListener('hud:start-session', () => {
   try { window.__NEW_SESSION_PROMPTED = false; } catch {}
   try { window.__SESSION_REVIEW_LAST = null; } catch {}
 });
+
+
+/* ===========================================================
+   Pose Coaching V4 — broader variety, strict metric gating
+   Overrides window.composePoseFeedback + summarizePoseIssues
+   =========================================================== */
+(function(){
+  // Tunables
+  const CFG = {
+    // cooldown so we don’t spam the same category every shot
+    categoryCooldownShots: 4,
+    // foot-related notes can dominate; cap them within a sliding window
+    maxFootNotesPer8: 1,
+    // minimum “off-ness” before we even consider nagging
+    thresholds: {
+      elbowExtGood: 150,
+      elbowExtLock: 165,
+      armVertMax: 12,           // deg from vertical; greater is worse
+      relAngleMin: 52,          // shoulder-to-wrist angle target
+      followHoldMin: 2,         // frames
+      kneeFlexMin: 28,          // deg bend
+      headToHoopMax: 25,        // deg off rim
+      torsoLeanMax: 12,         // deg
+      feetToHoopMax: 22,        // deg
+      toeParallelMax: 10,       // deg difference
+      footStaggerMax: 6,        // px
+      centerOffsetMax: 140,     // px greater tollerance for wide angle
+      centerOffsetFrac: 0.08,   // of frame width
+      footLiftMin: 2            // px
+    },
+    // severity weights (higher wins)
+    weights: {
+      centering: 0.45,
+      feetToHoop: 0.55,
+      stanceNarrow: 0.60,
+      elbow: 1.00,
+      armVertical: 0.95,
+      releaseHeight: 0.90,
+      wristSnap: 0.85,
+      followHold: 0.80,
+      kneeFlex: 0.80,
+      headGaze: 0.75,
+      torsoLean: 0.70,
+      feetSquare: 0.60,
+      toesParallel: 0.55,
+      footStagger: 0.50,
+      footLift: 0.45
+    }
+  };
+
+  // Small session memory for variety rules
+  const hist = {
+    lastCats: [],           // recent categories
+    lastTexts: [],          // recent exact lines
+    footFlags: []           // recent “foot” booleans for window cap
+  };
+  function pushHist(cat, text, isFoot){
+    hist.lastCats.push(cat);          if (hist.lastCats.length > 8)  hist.lastCats.shift();
+    hist.lastTexts.push(text);        if (hist.lastTexts.length > 12) hist.lastTexts.shift();
+    hist.footFlags.push(!!isFoot);    if (hist.footFlags.length > 8)  hist.footFlags.shift();
+  }
+  function recentFootCount(){ return hist.footFlags.reduce((a,b)=>a+(b?1:0),0); }
+  function catOnCooldown(cat){
+    const cd = CFG.categoryCooldownShots;
+    if (!cd) return false;
+    const recent = hist.lastCats.slice(-cd);
+    return recent.includes(cat);
+  }
+  const isFootCat = (c)=> c === 'feetSquare' || c === 'toesParallel' || c === 'footStagger';
+
+  // --- Personalization knobs (use player's name) ---
+  try {
+    if (typeof window.PREF_COACH_NAME_PERSONAL === 'undefined') window.PREF_COACH_NAME_PERSONAL = true;
+    if (typeof window.COACH_NAME_PROB === 'undefined') window.COACH_NAME_PROB = 0.35;  // ~35% of the time
+    if (typeof window.COACH_NAME_COOLDOWN === 'undefined') window.COACH_NAME_COOLDOWN = 2; // min shots between name drops
+  } catch {}
+
+  (function(){
+    let __nameShots = [];  // recent shotIds where we used the name
+
+    function getDisplayName(){
+      try { return window.__USER_NAME || localStorage.getItem('firstname') || 'Player'; }
+      catch { return window.__USER_NAME || 'Player'; }
+    }
+
+    function shouldPersonalize(shotId){
+      if (!window.PREF_COACH_NAME_PERSONAL) return false;
+      const name = getDisplayName();
+      if (!name || name.toLowerCase() === 'player' || name.length < 2) return false;
+
+      // cooldown
+      const last = __nameShots.at?.(-1);
+      if (Number.isFinite(last) && Number.isFinite(shotId) && (shotId - last) <= window.COACH_NAME_COOLDOWN) return false;
+
+      // chance gate (stable-ish per shot)
+      const r = Math.abs(Math.sin((Number(shotId)||0) * 9301 + 49297)) % 1;
+      return r < Number(window.COACH_NAME_PROB || 0.3);
+    }
+
+    function insertName(text, shotId){
+      const name = getDisplayName();
+      if (!shouldPersonalize(shotId)) return text;
+
+      // Don’t double-insert
+      const lower = String(text).toLowerCase();
+      if (lower.startsWith((name + ',').toLowerCase())) return text;
+
+      // Prefer after "Shot X,"
+      const m = /^(\s*Shot\s+\d+,\s*)(.*)$/i.exec(text);
+      let out;
+      if (m) out = `${m[1]}${name}, ${m[2]}`;
+      else   out = `${name}, ${text}`;
+
+      // remember use
+      if (Number.isFinite(shotId)) {
+        __nameShots.push(shotId);
+        if (__nameShots.length > 10) __nameShots = __nameShots.slice(-10);
+      }
+      return out;
+    }
+
+    // expose
+    window.__coachMaybePersonalize = insertName;
+  })();
+
+  
+  // Phrase helpers
+  const rnd = (n)=> (Math.random()*n)|0;
+  const pick = (arr, keySeed=0)=> arr[(keySeed + rnd(arr.length)) % arr.length];
+  const fmt = (n, p=0)=> Number.isFinite(n) ? Number(n).toFixed(p) : '-';
+
+  // Build issue list with severity
+  function scoreIssues(p){
+    const T = CFG.thresholds, W = CFG.weights;
+    const issues = [];
+    const add = (cat, sev, lines, params={}) => {
+      if (sev <= 0) return;
+      if (!Array.isArray(lines) || !lines.length) return;
+      const weight = W[cat] || 1;
+      issues.push({ cat, sev: sev*weight, lines, params, foot: isFootCat(cat) });
+    };
+
+    // Elbow extension
+    if (Number.isFinite(p.elbowExtDeg)) {
+      const miss = Math.max(0, T.elbowExtGood - p.elbowExtDeg);
+      add('elbow', miss, [
+        `Finish with stronger arm extension (now ~${fmt(p.elbowExtDeg,0)}°).`,
+        `Straighten the elbow through the snap; aim ≥ ${T.elbowExtGood}°.`,
+        `Drive the elbow long on finish (currently ${fmt(p.elbowExtDeg,0)}°).`
+      ], {val:p.elbowExtDeg});
+    }
+
+    // Arm verticality
+    if (Number.isFinite(p.armVerticalityDeg)) {
+      const over = Math.max(0, p.armVerticalityDeg - T.armVertMax);
+      add('armVertical', over, [
+        `Get the forearm more vertical at release (${fmt(p.armVerticalityDeg,0)}° off).`,
+        `Reach up for a taller finish; trim ${fmt(over,0)}° of tilt.`,
+        `Lift the forearm closer to vertical (target ≤ ${T.armVertMax}°).`
+      ], {val:p.armVerticalityDeg});
+    }
+
+    // Release height
+    const sw = Number(p.shoulderToWristAngle);
+    if (p.releaseAboveShoulder === false || (Number.isFinite(sw) && sw < T.relAngleMin)) {
+      const sev = Number.isFinite(sw) ? Math.max(0, T.relAngleMin - sw) : 12;
+      add('releaseHeight', sev, [
+        `Release above the shoulder; lift to ≥ ${T.relAngleMin}° (now ${fmt(sw,0)}°).`,
+        `Get the wrist higher at release; finish above the shoulder.`,
+        `Raise the release point before the snap.`
+      ], {val:sw});
+    }
+
+    // Wrist snap / fingers
+    if (p.fingersDown === false) {
+      add('wristSnap', 12, [
+        `Snap the wrist so fingers point down on the finish.`,
+        `Finish with fingers down; let the wrist roll over.`,
+        `Get the index under the wrist at finish.`
+      ]);
+    } else if (Number.isFinite(p.indexBelowWristPx) && p.indexBelowWristPx <= 0) {
+      add('wristSnap', 8, [
+        `Stronger wrist snap — finish fingers down.`,
+        `Emphasize the wrist roll at the end.`,
+        `Let the ball roll off the index; fingers down.`
+      ]);
+    }
+
+    // Follow-through hold
+    if (Number.isFinite(p.followThroughHoldFrames) && p.followThroughHoldFrames < T.followHoldMin) {
+      add('followHold', (T.followHoldMin - p.followThroughHoldFrames)*6, [
+        `Hold the follow-through for a full beat.`,
+        `Freeze the finish for 2 counts; don’t drop early.`,
+        `Keep the arm up; hold your pose briefly.`
+      ], {val:p.followThroughHoldFrames});
+    }
+
+    // Lower body power
+    if (Number.isFinite(p.kneeFlex) && p.kneeFlex < T.kneeFlexMin) {
+      add('kneeFlex', (T.kneeFlexMin - p.kneeFlex), [
+        `Add more knee bend to generate power (now ~${fmt(p.kneeFlex,0)}°).`,
+        `Load the knees a touch more, then rise.`,
+        `Small extra knee load will help the lift.`
+      ], {val:p.kneeFlex});
+    }
+
+    // Head/gaze
+    if ((p.lookingAtHoop === false) || (Number.isFinite(p.headToHoopDeg) && p.headToHoopDeg > T.headToHoopMax)) {
+      const sev = Number.isFinite(p.headToHoopDeg) ? (p.headToHoopDeg - T.headToHoopMax) : 10;
+      add('headGaze', sev, [
+        `Eyes on the rim before you lift.`,
+        `Pick the target earlier — eyes to the rim.`,
+        `Lock the rim with your eyes, then lift.`
+      ], {val:p.headToHoopDeg});
+    }
+
+    // Torso lean
+    if (Number.isFinite(p.torsoLeanAngle) && Math.abs(p.torsoLeanAngle) > T.torsoLeanMax) {
+      add('torsoLean', Math.abs(p.torsoLeanAngle) - T.torsoLeanMax, [
+        `Stay taller through your lift (torso lean ${fmt(p.torsoLeanAngle,0)}°).`,
+        `Keep your torso stacked over your hips.`,
+        `Reduce the forward lean at finish.`
+      ], {val:p.torsoLeanAngle});
+    }
+
+    // Centering vs hoop (adaptive + gated by gaze/feet so we don't overfire)
+    if (Number.isFinite(p.frameOffsetX)) {
+      const vw = document.getElementById('videoPlayer')?.videoWidth || 0;
+      const adaptiveMax = Math.max(T.centerOffsetMax, Math.round(vw * (T.centerOffsetFrac || 0.08)));
+      const off = Math.max(0, Math.abs(p.frameOffsetX) - adaptiveMax);
+      // Only nag centering when eyes/feet aren't already the bigger culprit
+      const gazeOk = !Number.isFinite(p.headToHoopDeg) || p.headToHoopDeg <= (T.headToHoopMax + 6);
+      const feetOk = !Number.isFinite(p.feetToHoopDeg) || p.feetToHoopDeg <= (T.feetToHoopMax + 8);
+      if (off > 0 && gazeOk && feetOk) {
+        // gentler severity to avoid topping the chart constantly
+        add('centering', off / 3, [
+          'Center your body line with the rim before you lift.',
+          'Square your chest to the rim before you shoot.'
+        ], { val: p.frameOffsetX, adaptiveMax });
+      }
+    }
+
+    // Feet to rim
+    if (Number.isFinite(p.feetToHoopDeg) && p.feetToHoopDeg > T.feetToHoopMax) {
+      add('feetSquare', p.feetToHoopDeg - T.feetToHoopMax, [
+        `Square your feet a touch more to the rim (${fmt(p.feetToHoopDeg,0)}° off).`,
+        `Point your toes a bit more toward the basket.`,
+        `Reduce the turnout toward the sidelines.`
+      ], {val:p.feetToHoopDeg});
+    }
+
+    // Toe parallel
+    if (Number.isFinite(p.feetAngleDiff) && p.feetAngleDiff > T.toeParallelMax) {
+      add('toesParallel', p.feetAngleDiff - T.toeParallelMax, [
+        `Make your toes more parallel (Δ ${fmt(p.feetAngleDiff,0)}°).`,
+        `Match toe angles left and right.`,
+        `Line up the toes; avoid splaying.`
+      ], {val:p.feetAngleDiff});
+    }
+
+    // Foot stagger
+    if (Number.isFinite(p.footStagger) && p.footStagger > T.footStaggerMax) {
+      add('footStagger', p.footStagger - T.footStaggerMax, [
+        `Level your base — reduce front/back foot stagger (${fmt(p.footStagger,0)}px).`,
+        `Even out your stance front-to-back.`,
+        `Bring the front foot back to level the base.`
+      ], {val:p.footStagger});
+    }
+
+    // Foot pop
+    if (Number.isFinite(p.footLiftPx) && p.footLiftPx < T.footLiftMin) {
+      add('footLift', (T.footLiftMin - p.footLiftPx), [
+        `Add a little upward pop as you snap.`,
+        `Extend through the ankles for a light lift.`,
+        `Let the heels float slightly on the finish.`
+      ], {val:p.footLiftPx});
+    }
+
+    // Sort by severity (desc)
+    issues.sort((a,b)=> b.sev - a.sev);
+    return issues;
+  }
+
+  // Selection logic with variety + foot bias brake
+  function selectIssues(issues){
+    if (!issues.length) return [];
+    // deprioritize feet if we’ve already nagged too much recently
+    const footCapHit = recentFootCount() >= CFG.maxFootNotesPer8;
+    const centerSeen = (hist.lastCats || []).slice(-8).filter(c => c === 'centering').length;
+    const centerCapHit = centerSeen >= (CFG.maxCenterNotesPer8 || 1);
+
+    const pool = issues
+     .filter(i => !catOnCooldown(i.cat))
+     .filter(i => !footCapHit || !i.foot || i.sev >= 1.5 * issues[0].sev)
+     // block centering unless it's decisively the top problem
+     .filter(i => !(centerCapHit && i.cat === 'centering' && i.sev < 1.35 * issues[0].sev));
+
+    const list = pool.length ? pool : issues; // fallback if everything cooled
+
+    const first = list[0];
+    // second from different category with high enough severity
+    const second = list.find(i => i.cat !== first.cat && i.sev >= first.sev * 0.85);
+
+    return second ? [first, second] : [first];
+  }
+
+  // Render a single cue line
+  function renderCue(issue, shotSeed=0){
+    const lines = issue.lines || ['Good release — hold your follow-through.'];
+    // avoid verbatim repeats
+    let pickIdx = (shotSeed + lines.length) % lines.length;
+    let text = lines[pickIdx];
+    for (let k=0; k<lines.length && hist.lastTexts.includes(text); k++){
+      pickIdx = (pickIdx + 1) % lines.length;
+      text = lines[pickIdx];
+    }
+    return text;
+  }
+
+  // Public replacement: one or two short cues, distinct categories
+  window.composePoseFeedback = function composePoseFeedbackV4(snap){
+    try {
+      const issues = scoreIssues(snap || {});
+      if (!issues.length) return 'Good release — keep the rhythm.';
+
+      const [first, second] = selectIssues(issues);
+
+      // seed by shot number for stable variety within a run
+      const shotSeed = Number(window.__CURRENT_SHOT_ID || window.__SHOT_ID || 0);
+      const line1 = renderCue(first, shotSeed);
+      const line2 = second ? renderCue(second, shotSeed + 1) : '';
+
+      const finalText = [line1, line2].filter(Boolean).join(' ');
+      pushHist(first.cat, line1, first.foot);
+      if (second) pushHist(second.cat, line2, second.foot);
+      return finalText;
+    } catch {
+      return 'Eyes on the rim. Hold the finish.';
+    }
+  };
+
+  // Table bullets: top 2–3 different categories (no duplicates)
+  window.summarizePoseIssues = function summarizePoseIssuesV4(shot){
+    try{
+      const p = (shot && (shot.poseSnapshot || shot)) || {};
+      const issues = scoreIssues(p).filter(i => i.sev >= 5);
+      const uniq = [];
+      for (const it of issues) {
+        if (uniq.find(u => u.cat === it.cat)) continue;
+        uniq.push(it);
+        if (uniq.length >= 3) break;
+      }
+      return uniq.map(u => u.lines[0]);
+    } catch { return []; }
+  };
+})();
+
+
+// after installing the real engine:
+window.__COACH_READY = true;
+try { window.__flushCoachQueue?.(); } catch {}
+
+
+
 
 // === SNAPSHOT V2: force replace extractor + rescue bad summaries =================
 
@@ -530,6 +1010,14 @@ window.extractPoseSnapshot = function extractPoseSnapshot_v2(keypoints, hoopBox)
         lookingAtHoop = headToHoopDeg <= 25;
       }
       if (hc && shC) frameOffsetX = shC.x - hc.x;
+      // Smooth noisy offsets with a short median (last 2 + current)
+      try {
+        const prev = (window.__poseHistory || []).slice(-2).map(e => e.snap?.frameOffsetX).filter(Number.isFinite);
+        if (prev.length && Number.isFinite(frameOffsetX)) {
+          const arr = prev.concat(frameOffsetX).sort((a,b)=>a-b);
+          frameOffsetX = arr[Math.floor(arr.length/2)];
+        }
+      } catch {}
     } catch {}
 
     // ---------- export ----------
@@ -693,20 +1181,6 @@ function getPoseSnapshotFrom(s) {
   return null;
 }
 
-// Ensure every shot:summary has a poseSnapshot before anyone formats/speaks
-window.addEventListener('shot:summary', (e) => {
-  const d = e?.detail || {};
-  const shotId = Number(d.shotId || window.__SHOT_ID || 0) || null;
-  if (d.poseSnapshot) {
-    console.log('[pose:summary] pose snapshot ready', { shotId });
-    return;
-  }
-  const historyFrames = (window.playerState?.frameHistory || []).length;
-  console.error('[pose:summary] pose snapshot missing', { shotId, historyFrames });
-  window.dispatchEvent(new CustomEvent('pose:error', { detail: { shotId, reason: 'missing-summary-snapshot', historyFrames } }));
-}, { passive: true });
-
-
 
 // --- Speak once per shot summary ---
 async function finalizeCoachLine(line, provider = 'pose', model = 'pose-summary', idx0Override) {
@@ -755,13 +1229,15 @@ window.addEventListener('shot:summary', (e) => {
   if (key && __summarySeen.has(key)) return;
   if (key) __summarySeen.add(key);
 
-  // Build final line
+  // Build final line - doach assessment
   const formatted = window.formatCoachLine(s);
-  window.__lastCoachText = formatted;
+  const shotId = Number(s?.shotId) || Number(window.__CURRENT_SHOT_ID) || Number(window.__SHOT_ID) || 0;
+  const personalized = window.__coachMaybePersonalize ? window.__coachMaybePersonalize(formatted, shotId) : formatted;
+  window.__lastCoachText = personalized;
 
   // Update UI text
   try {
-    setCoachNotesContent(formatted);
+    setCoachNotesContent(personalized);
   } catch {}
 
   // Tell the frontend store (table/row) what the coach line is
@@ -772,13 +1248,13 @@ window.addEventListener('shot:summary', (e) => {
   } catch {}
 
   // Speak once, here
-  try { if (!window.__coachMuted) (window.doachSpeak || window.coachSpeak)?.(formatted); } catch {}
+  try { if (!window.__coachMuted) (window.doachSpeak || window.coachSpeak)?.(personalized); } catch {}
 
   // Persist ai_feedback with correct index (shotId-1)
   try {
     const idx0 = Number.isFinite(Number(s?.shotId)) ? (Number(s.shotId) - 1)
               : Math.max(0, (preferShotNumber(s) || 1) - 1);
-    finalizeCoachLine(formatted, 'pose', 'pose-summary', idx0);
+    finalizeCoachLine(personalized, 'pose', 'pose-summary', idx0);
   } catch {}
 });
 
@@ -965,279 +1441,10 @@ window.addEventListener('shot:feedback:request', (e) => {
   try { if (typeof window.COACH_TIP_EVERY_N === 'undefined') window.COACH_TIP_EVERY_N = 2; } catch {}
   try { if (typeof window.COACH_TIP_PROB === 'undefined') window.COACH_TIP_PROB = 0.6; } catch {}
 
-  // Pose snapshot + metrics (richer). Prefer window.extractPoseSnapshot if provided; else define here.
-function defineExtractPoseSnapshotOnce(){
-  return;
-
-  if (typeof window.extractPoseSnapshot === 'function') return;
-
-  window.extractPoseSnapshot = function extractPoseSnapshot(keypoints, hoopBox){
-    try {
-      // ---------- helpers ----------
-      const kp = Array.isArray(keypoints) ? keypoints : (window.playerState?.keypoints || []);
-      if (!Array.isArray(kp) || kp.length < 33) return null;
-
-      const k = (i)=> (kp[i] && Number.isFinite(kp[i].x) && Number.isFinite(kp[i].y)) ? kp[i] : null;
-      const v = (a,b)=> ({ x:(b.x - a.x), y:(b.y - a.y) });
-      const mag = (u)=> Math.hypot(u.x, u.y);
-      const dist = (a,b)=> (a && b) ? Math.hypot(a.x - b.x, a.y - b.y) : null;
-      const mid  = (a,b)=> (a && b) ? { x:(a.x + b.x)/2, y:(a.y + b.y)/2 } : (a || b || null);
-      const clamp = (n,a,b)=> Math.max(a, Math.min(b,n));
-      const r = (n,p=0)=> Number.isFinite(n) ? Number(n.toFixed(p)) : null;
-
-      // angle from horizontal (0..180). NOTE: screen y grows down, so use abs
-      const angleFromHorizontal = (u) => {
-        if (!u || !Number.isFinite(u.x) || !Number.isFinite(u.y)) return null;
-        return Math.abs(Math.atan2(u.y, u.x) * 180 / Math.PI);  // 0 = horizontal, 90 = vertical
-      };
-
-      // angle from vertical up (0..180). 0 = perfectly vertical up, 90 = horizontal
-      const angleFromVertical = (u) => {
-        if (!u || !Number.isFinite(u.x) || !Number.isFinite(u.y)) return null;
-        const m = mag(u) || 1e-6;
-        // vertical-up unit is (0,-1) in screen coords
-        const dot = (u.x * 0) + (u.y * -1);
-        const t = clamp(dot / m, -1, 1);
-        return Math.abs(Math.acos(t) * 180 / Math.PI);
-      };
-
-      // interior angle at joint b formed by a-b-c (0..180)
-      const angleAt = (a,b,c) => {
-        if (!(a && b && c)) return null;
-        const u = v(b,a), w = v(b,c);
-        const m = (mag(u) * mag(w)) || 1e-6;
-        const t = clamp((u.x*w.x + u.y*w.y) / m, -1, 1);
-        return Math.acos(t) * 180 / Math.PI;
-      };
-
-      // ---------- pick useful keypoints (BlazePose) ----------
-      const L = {
-        NOSE:0,  L_EYE:1,  R_EYE:2,  L_EAR:3,  R_EAR:4,
-        L_SHO:11, R_SHO:12, L_ELB:13, R_ELB:14, L_WRI:15, R_WRI:16,
-        L_HIP:23, R_HIP:24, L_KNE:25, R_KNE:26, L_ANK:27, R_ANK:28,
-        L_TOE:31, R_TOE:32, L_INDEX:19, R_INDEX:20
-      };
-
-      const pts = {
-        shL:k(L.L_SHO), shR:k(L.R_SHO), elL:k(L.L_ELB), elR:k(L.R_ELB),
-        wrL:k(L.L_WRI), wrR:k(L.R_WRI), hpL:k(L.L_HIP), hpR:k(L.R_HIP),
-        knL:k(L.L_KNE), knR:k(L.R_KNE), anL:k(L.L_ANK), anR:k(L.R_ANK),
-        toeL:k(L.L_TOE), toeR:k(L.R_TOE), lix:k(L.L_INDEX), rix:k(L.R_INDEX),
-        nose:k(L.NOSE)
-      };
-
-      if (!Object.values(pts).some(Boolean)) return null;
-
-      // ---------- centers & derived anchors ----------
-      const shC = mid(pts.shL, pts.shR);
-      const hpC = mid(pts.hpL, pts.hpR);
-      const anC = mid(pts.anL, pts.anR);
-
-      // hoop center
-      const hoop = hoopBox || window.getLockedHoopBox?.();
-      const hc = hoop
-        ? (Number.isFinite(hoop.cx) && Number.isFinite(hoop.cy)
-            ? { x: hoop.cx, y: hoop.cy }
-            : { x: hoop.x + (hoop.w||hoop.width||0)/2, y: hoop.y + (hoop.h||hoop.height||0)/2 })
-        : null;
-
-      // ---------- torso & arm lines ----------
-      const torsoVec = (hpC && shC) ? v(hpC, shC) : null;
-      const forearmR = (pts.shR && pts.wrR) ? v(pts.shR, pts.wrR) : null;
-      const forearmL = (pts.shL && pts.wrL) ? v(pts.shL, pts.wrL) : null;
-
-      // torso lean: 0 = upright, higher = more tilt
-      const torsoLeanAngle = angleFromVertical(torsoVec);
-
-      // elbow extension (bigger = straighter)
-      const elbowR = angleAt(pts.shR, pts.elR, pts.wrR);
-      const elbowL = angleAt(pts.shL, pts.elL, pts.wrL);
-      const elbowExtDeg = (Number.isFinite(elbowR) || Number.isFinite(elbowL))
-        ? Math.max(elbowR || 0, elbowL || 0)
-        : null;
-
-      // arm verticality: 0 = vertical, lower is better
-      const armVertR = angleFromVertical(forearmR);
-      const armVertL = angleFromVertical(forearmL);
-      const armVerticalityDeg = Math.min(
-        Number.isFinite(armVertR) ? Math.round(armVertR) : 90,
-        Number.isFinite(armVertL) ? Math.round(armVertL) : 90
-      );
-
-      // shoulder-to-wrist angle above horizontal (0..90). Useful for ratings expecting ~55°
-      const shWrAngR = angleFromHorizontal(forearmR);
-      const shWrAngL = angleFromHorizontal(forearmL);
-      const shoulderToWristAngle = Math.min(
-        Number.isFinite(shWrAngR) ? Math.round(shWrAngR) : 90,
-        Number.isFinite(shWrAngL) ? Math.round(shWrAngL) : 90
-      );
-
-      // release above shoulder
-      const releaseAboveShoulderR = (pts.wrR && pts.shR) ? (pts.wrR.y < pts.shR.y) : null;
-      const releaseAboveShoulderL = (pts.wrL && pts.shL) ? (pts.wrL.y < pts.shL.y) : null;
-      const releaseAboveShoulder  = (releaseAboveShoulderR === true || releaseAboveShoulderL === true);
-
-      // is elbow effectively locked
-      const elbowLock = Number.isFinite(elbowExtDeg) ? (elbowExtDeg >= 150) : null;
-
-      // ---------- stance & feet ----------
-      const hipWidthPx    = dist(pts.hpL, pts.hpR) || 1;
-      const stanceWidthPx = dist(pts.anL, pts.anR);
-      const stanceRatio   = (stanceWidthPx && hipWidthPx) ? (stanceWidthPx / hipWidthPx) : null;
-
-      // toes direction vectors
-      const dirToeL = (pts.anL && pts.toeL) ? v(pts.anL, pts.toeL) : (pts.anL && pts.lix) ? v(pts.anL, pts.lix) : null;
-      const dirToeR = (pts.anR && pts.toeR) ? v(pts.anR, pts.toeR) : (pts.anR && pts.rix) ? v(pts.anR, pts.rix) : null;
-
-      let feetAngleDiff = null, footStagger = null, toeToHoopDeg = null, feetToHoopDeg = null;
-      try {
-        // toe directions difference
-        const aL = angleFromHorizontal(dirToeL);
-        const aR = angleFromHorizontal(dirToeR);
-        if (Number.isFinite(aL) && Number.isFinite(aR)) {
-          const d = Math.abs(aL - aR);
-          feetAngleDiff = Math.min(d, 360 - d);
-        }
-        // front/back stagger (y diff in px)
-        if (Number.isFinite(pts.anL?.y) && Number.isFinite(pts.anR?.y)) {
-          footStagger = Math.abs(pts.anL.y - pts.anR.y);
-        }
-        // toe average vs hoop direction
-        if (hc && anC) {
-          const avgDir = (() => {
-            const arr = [];
-            if (dirToeL) arr.push(dirToeL);
-            if (dirToeR) arr.push(dirToeR);
-            if (!arr.length) return null;
-            return { x: arr.reduce((s,u)=>s+u.x,0)/arr.length, y: arr.reduce((s,u)=>s+u.y,0)/arr.length };
-          })();
-          if (avgDir) {
-            const feetAng = angleFromHorizontal(avgDir);
-            const hoopAng = angleFromHorizontal(v(anC, hc));
-            const d = Math.abs(feetAng - hoopAng);
-            toeToHoopDeg = Math.min(d, 360 - d);
-          }
-        }
-        // ankle-line vs hoop vector (base vs target)
-        if (hc && pts.anL && pts.anR && anC) {
-          const dirFeet = v(pts.anL, pts.anR);
-          const dirHoop = { x: hc.x - anC.x, y: hc.y - anC.y };
-          const aF = angleFromHorizontal(dirFeet);
-          const aH = angleFromHorizontal(dirHoop);
-          const d  = Math.abs(aF - aH);
-          feetToHoopDeg = Math.min(d, 180 - d);
-        }
-      } catch {}
-
-      // ---------- knee flex (power proxy) ----------
-      let kneeFlex = null;
-      try {
-        const aL = angleAt(pts.hpL, pts.knL, pts.anL);
-        const aR = angleAt(pts.hpR, pts.knR, pts.anR);
-        const kL = Number.isFinite(aL) ? Math.max(0, 180 - aL) : null;
-        const kR = Number.isFinite(aR) ? Math.max(0, 180 - aR) : null;
-        const arr = [kL, kR].filter(Number.isFinite);
-        if (arr.length) kneeFlex = arr.reduce((s,v)=>s+v,0)/arr.length;
-      } catch {}
-
-      // ---------- foot pop (lift) from recent history ----------
-      let footLiftPx = null;
-      try {
-        const hist = (window.playerState?.frameHistory || []).slice(-4, -1);
-        if (hist.length && pts.anL && pts.anR) {
-          const avg = (arr)=> arr.reduce((s,v)=>s+v,0)/arr.length;
-          const prev = hist.map(h => h.keypoints).filter(Boolean);
-          if (prev.length) {
-            const pAnL = avg(prev.map(p => (p[L.L_ANK]?.y) || 0));
-            const pAnR = avg(prev.map(p => (p[L.R_ANK]?.y) || 0));
-            const curL = pts.anL.y, curR = pts.anR.y;
-            if (Number.isFinite(curL) && Number.isFinite(curR)) {
-              // positive when current ankles are higher (smaller y) than recent average
-              footLiftPx = Math.max(pAnL - curL, pAnR - curR);
-            }
-          }
-        }
-      } catch {}
-
-      // ---------- wrist/index cues ----------
-      let indexBelowWristPx = null, fingersDown = null;
-      try {
-        const dR = (Number.isFinite(pts.rix?.y) && Number.isFinite(pts.wrR?.y)) ? (pts.rix.y - pts.wrR.y) : null;
-        const dL = (Number.isFinite(pts.lix?.y) && Number.isFinite(pts.wrL?.y)) ? (pts.lix.y - pts.wrL.y) : null;
-        const arr = [dR, dL].filter(Number.isFinite);
-        if (arr.length) { indexBelowWristPx = Math.max(...arr); fingersDown = indexBelowWristPx > 0; }
-      } catch {}
-
-      // ---------- follow-through hold frames (recent) ----------
-      let followThroughHoldFrames = null;
-      try {
-        const hist = (window.playerState?.frameHistory || []).slice(-6);
-        let cnt = 0;
-        for (const f of hist) {
-          const p = f?.keypoints; if (!p) continue;
-          const sh = p[L.R_SHO], el = p[L.R_ELB], wr = p[L.R_WRI];
-          const elAng = angleAt(sh, el, wr);
-          const wristAboveElbow = (wr?.y != null && el?.y != null) ? (wr.y < el.y) : false;
-          if (Number.isFinite(elAng) && elAng >= 150 && wristAboveElbow) cnt++;
-        }
-        followThroughHoldFrames = cnt;
-      } catch {}
-
-      // ---------- head toward hoop ----------
-      let headToHoopDeg = null, lookingAtHoop = null;
-      try {
-        if (hc && shC && pts.nose) {
-          const neckToNose = v(shC, pts.nose);
-          const neckToHoop = v(shC, hc);
-          const a = Math.abs(angleFromHorizontal(neckToNose) - angleFromHorizontal(neckToHoop));
-          headToHoopDeg = Math.min(a, 360 - a);
-          lookingAtHoop = headToHoopDeg <= 25;
-        }
-      } catch {}
-
-      // ---------- body centering vs hoop ----------
-      let frameOffsetX = null;
-      try { if (hc && shC) frameOffsetX = shC.x - hc.x; } catch {}
-
-      // ---------- export snapshot ----------
-      return {
-        // stance
-        stanceWidthPx: r(stanceWidthPx, 0),
-        stanceWidthFeet: r(stanceWidthPx, 0),  // alias for legacy “feet” naming (still pixels)
-        stanceRatio: r(stanceRatio, 2),
-
-        // torso / arm
-        torsoLeanAngle: r(torsoLeanAngle, 0),                 // 0 = upright
-        elbowExtDeg: r(elbowExtDeg, 0),
-        armVerticalityDeg,                                    // 0 = vertical (good)
-        shoulderToWristAngle,                                 // 0..90 from horizontal
-
-        releaseAboveShoulder,
-        elbowLock,
-
-        // feet alignment
-        feetAngleDiff: r(feetAngleDiff, 0),
-        footStagger: r(footStagger, 0),
-        toeToHoopDeg: r(toeToHoopDeg, 0),
-        feetToHoopDeg: r(feetToHoopDeg, 0),
-
-        // power / pop
-        kneeFlex: r(kneeFlex, 0),
-        footLiftPx: r(footLiftPx, 0),
-
-        // wrist / follow-through
-        indexBelowWristPx: r(indexBelowWristPx, 0),
-        fingersDown: (typeof fingersDown === 'boolean') ? fingersDown : null,
-        followThroughHoldFrames: Number.isFinite(followThroughHoldFrames) ? followThroughHoldFrames : null,
-
-        // head / centering
-        headToHoopDeg: r(headToHoopDeg, 0),
-        lookingAtHoop: (typeof lookingAtHoop === 'boolean') ? lookingAtHoop : null,
-        frameOffsetX: r(frameOffsetX, 0)
-      };
-    } catch { return null; }
-  };
-}
+  // Pose snapshot + metrics shim (kept for legacy callers)
+  function defineExtractPoseSnapshotOnce(){
+    /* no-op: snapshot-v2 is the authoritative extractor */
+  }
 
 // Wire quick pose tips on release - gated off by default. Enable with window.PREF_LIVE_TIPS=true
 function __getPoseSnapshot(){
@@ -2472,17 +2679,21 @@ Draft to refine (optional): '${draftLine}'` : ''}
     const poseOnly = DOACH.poseOnly === true;
 
     // Local draft (pose-only taps pose heuristics; otherwise keep legacy flow)
-    let localText;
-    if (poseOnly) {
-      const snap = shot.poseSnapshot || null;
-      const poseLine = snap && typeof composePoseFeedback === 'function' ? composePoseFeedback(snap) : null;
-      const issues = window.summarizePoseIssues?.(shot, golden) || [];
-      const fallbackPose = issues.filter(Boolean).slice(0, 3).join(' ');
-      localText = poseLine || fallbackPose || 'Pose metrics captured.';
-    } else {
-      localText = made ? craftCoachingLine(shot, golden) : craftMissLine(shot, golden);
-      localText = avoidRepeat(localText, shot, golden, made);
+    let localText = '';
+    try {
+      const poseSnap = shot?.poseSnapshot || getPoseSnapshotFrom(shot);
+      if (poseSnap && typeof window.composePoseFeedback === 'function') {
+      localText = String(window.composePoseFeedback(poseSnap) || '').trim();
     }
+    } catch {}
+
+    // Fallback to the old local composer if the engine didn’t return anything
+    if (!localText) {
+      localText = poseOnly
+        ? craftPoseLine(shot, golden, { bumpSeed: true })
+        : (made ? craftCoachingLine(shot, golden) : craftMissLine(shot, golden));
+    }
+
 
     // Choose how to use the LLM
     const mode = (window.DOACH?.llmMode || 'polish').toLowerCase();
@@ -2635,53 +2846,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
     return clamp(Math.round(score), 0, 100);
     };
 
-  window.summarizePoseIssues = function summarizePoseIssues(shot, golden){
-    const issues = [];
-    const p = shot?.poseSnapshot; if (!p) return issues;
-    const g = golden || {};
-
-  // Feet
-  if (Number.isFinite(p.stanceWidthFeet) && g.stanceWidthFeet){
-    const d = p.stanceWidthFeet - g.stanceWidthFeet;
-    if (d < -20) issues.push("Feet too narrow - widen ~2-3\".");
-    else if (d > 20) issues.push("Feet too wide - narrow slightly.");
-  }
-  if (Number.isFinite(p.feetAngleDiff) && p.feetAngleDiff > (g.feetAngleDiff||8) + 6){
-    issues.push("Feet not parallel - square both toes to the rim.");
-  }
-  if (Number.isFinite(p.feetStagger) && p.feetStagger > (g.feetStagger||6) + 10){
-    issues.push("Feet staggered - level your base.");
-  }
-
-  // Power / lower body
-  if (Number.isFinite(p.kneeFlex) && (p.kneeFlex < (g.kneeFlex||28) * 0.75)){
-    issues.push("Add more knee bend to generate power.");
-  }
-
-  // Torso
-  if (Number.isFinite(p.torsoLeanAngle) && Math.abs(p.torsoLeanAngle) > 18){
-    issues.push("Stay more upright through the lift.");
-  }
-
-  // Arm / release
-  if (Number.isFinite(p.shoulderToWristAngle) && p.shoulderToWristAngle < (g.shoulderToWristAngle||55) - 8){
-    issues.push("Get your shooting arm more vertical on release.");
-  }
-  if (p.wristY!=null && p.elbowY!=null && p.wristY > p.elbowY + 10){
-    issues.push("Finish higher - snap the wrist above the elbow.");
-  }
-  if ((g.releaseAboveShoulder ?? true) && !p.releaseAboveShoulder){
-    issues.push("Release above your shoulder line.");
-  }
-
-  // Ball metrics if present
-  if (Number.isFinite(shot.entryAngle) && g.entryAngle){
-    if (shot.entryAngle < g.entryAngle - 5) issues.push("Entry angle a bit flat - add arc.");
-    else if (shot.entryAngle > g.entryAngle + 5) issues.push("Entry angle steep - soften the arc.");
-  }
-
-  return issues;
-  };
+  
 
 // -----------------------------------------------
 // Hands-Free Doach (standalone, no global collisions)
@@ -2843,6 +3008,57 @@ function rememberKey(key) {
   }
 }
 
+// ---------- Pose snapshot chooser: prefer fresh-enough cache, else re-sample ----------
+(function(){
+  if (typeof window.SUMMARY_STALE_FRAMES === 'undefined') window.SUMMARY_STALE_FRAMES = 5; // ~5 frames tolerance
+  const STORE_KEY = '__poseStore';
+
+  window.choosePoseSnapshotForSummary = function choosePoseSnapshotForSummary(shot){
+    try {
+      const store = (window[STORE_KEY] ||= {});
+      const sid   = Number(shot?.shotId ?? shot?.id ?? 0);
+      const cached = store[sid];            // { frame, ts, snapshot }
+      const sFrame = Number(shot?.frame);   // summary frame if provided
+      const tol = Number(window.SUMMARY_STALE_FRAMES || 5);
+
+      const cachedFrame = Number(cached?.frame);
+      const hasFreshCache = cached?.snapshot && Number.isFinite(cachedFrame) && Number.isFinite(sFrame)
+                            ? Math.abs(sFrame - cachedFrame) <= tol
+                            : !!cached?.snapshot && !Number.isFinite(sFrame); // no frame to compare, accept cache
+
+      if (hasFreshCache) {
+        console.info('[pose:summary]', { shotId: sid, source: 'store', frame: sFrame, cachedFrame });
+        return cached.snapshot;
+      }
+
+      // Try a targeted re-sample near the summary frame, else fall back to a live capture
+      let fresh = window.samplePoseNearFrame?.(sFrame, window.getLockedHoopBox?.());
+      if (fresh?.snapshot) fresh = fresh.snapshot;
+      if (!fresh && window.capturePoseSnapshot && window.playerState) {
+        fresh = window.capturePoseSnapshot(window.playerState, window.getLockedHoopBox?.());
+      }
+
+      if (fresh) {
+        console.info('[pose:summary]', { shotId: sid, source: 'fresh', frame: sFrame, cachedFrame });
+        // Don’t clobber release cache if you keep that elsewhere; only seed if empty
+        if (!cached) store[sid] = { frame: sFrame, ts: performance.now(), snapshot: fresh };
+        return fresh;
+      }
+
+      // Nothing fresh? use whatever we had
+      console.info('[pose:summary]', { shotId: sid, source: 'fallback-cache', frame: sFrame, cachedFrame });
+      return cached?.snapshot || null;
+    } catch (e) {
+      console.warn('[pose:summary] choosePoseSnapshot error', e);
+      return null;
+    }
+  };
+})();
+
+// ---------- Global shot:summary handler (single, hardened instance) ----------
+// Listens for 'shot:summary' events and processes them once each
+// Expects event.detail to be the shot object
+// Adds poseSnapshot if missing, then calls DOACH_MEM.addShot() and updateCoachNotes()
 window.addEventListener('shot:summary', (e) => {
   // If we've already handled THIS object, bail (covers re-dispatch)
   if (e.detail && e.detail.__doachHandled) return;
@@ -2859,8 +3075,10 @@ window.addEventListener('shot:summary', (e) => {
 
   // proceed with your existing logic
   const cloned = { ...shot };
-  if (!cloned.poseSnapshot && window.playerState) {
-    cloned.poseSnapshot = window.capturePoseSnapshot(window.playerState, window.getLockedHoopBox?.());
+  if (!cloned.poseSnapshot) {
+    cloned.poseSnapshot =
+      window.choosePoseSnapshotForSummary?.(shot) ||
+      (window.playerState ? window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.()) : null);
   }
   window.DOACH_MEM.addShot(cloned);
   window.updateCoachNotes?.(cloned);

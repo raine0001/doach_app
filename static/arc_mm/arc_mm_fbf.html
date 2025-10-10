@@ -32,6 +32,8 @@
   <script>
     window.DETECTOR_WORKER_PATH = "/static/js/detector.worker.js";
     window.DETECTOR_MODEL_URL   = "/static/models/best.onnx";
+    window.DETECTOR_FALLBACK_MODEL_URL = "/static/models/backup_best.onnx";
+    window.DETECTOR_LABELS      = ['basketball','hoop','net','backboard','player'];
     window.SHOT_ARC_MODULE_PATH = "/static/arc_mm/shot_arc.module.js";
     window.__videoFPS           = 30;
 
@@ -50,9 +52,11 @@
       if (!window.localDetector?.enable) return;
       try {
         const ok = await window.localDetector.enable(
-          '/static/models/best.onnx',
-          null,                    // use labels.json from the model
-          { conf: 0.10, imgsz: 896 } // better small-ball recall
+          window.DETECTOR_MODEL_URL,
+          window.DETECTOR_LABELS,
+          window.DETECTOR_FALLBACK_MODEL_URL,
+          null,
+          { conf: 0.10, imgsz: 896 }
         );
         console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
         window.__DET_INIT_DONE = !!ok;
