@@ -1,430 +1,1391 @@
 <!doctype html>
 <html lang="en">
+
 <head>
-  <meta charset="utf-8" />
-  <title>Arc FBF – Results Renderer</title>
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <style>
-    :root { color-scheme: dark; }
-    body { margin:0; font-family: system-ui,-apple-system,Segoe UI,Roboto,sans-serif; background:#0b0c0e; color:#e9eef7; }
-    header { display:flex; align-items:center; gap:12px; padding:12px 16px; border-bottom:1px solid #1a1d22; position:sticky; top:0; background:#0b0c0e; z-index:5; }
-    .btn { border:1px solid #2a2f37; background:#121418; color:#e9eef7; padding:8px 12px; border-radius:10px; cursor:pointer; }
-    .btn:disabled { opacity:0.55; cursor:default; }
-    .wrap { display:grid; grid-template-columns: 1fr 420px; gap:16px; padding:16px; }
-    .stage { position:relative; background:#0e1014; border:1px solid #1a1d22; border-radius:12px; overflow:hidden; min-height:320px; }
-    video, canvas { position:absolute; inset:0; width:100%; height:100%; }
-    #exportCanvas { display:none; }
-    #shotList { display:flex; flex-direction:column; gap:10px; max-height: calc(100vh - 90px); overflow:auto; }
-    .shot { display:flex; align-items:center; gap:10px; background:#0e1014; border:1px solid #1a1d22; border-radius:10px; padding:10px; }
-    .shot .name { opacity:0.8; }
-    .shot .status { margin-left:auto; opacity:0.8; }
-    .shot video { margin-top:6px; max-width:360px; border-radius:8px; border:1px solid #1a1d22; }
-    .hud-note { opacity:0.7; font-size:12px; }
-  </style>
+    <meta charset="utf-8" />
+    <title>Arc FBF – Results Renderer</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+        :root {
+            color-scheme: dark;
+        }
+
+        /* App chrome */
+        body {
+            margin: 0;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            background: #0b0c0e;
+            color: #e9eef7;
+        }
+
+        header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-bottom: 1px solid #1a1d22;
+            position: sticky;
+            top: 0;
+            background: #0b0c0e;
+            z-index: 5;
+        }
+
+        .btn {
+            border: 1px solid #2a2f37;
+            background: #121418;
+            color: #e9eef7;
+            padding: 8px 12px;
+            border-radius: 10px;
+            cursor: pointer;
+        }
+
+        .btn:disabled {
+            opacity: 0.55;
+            cursor: default;
+        }
+
+        /* Layout */
+        .wrap {
+            display: grid;
+            grid-template-columns: 1fr 420px;
+            gap: 16px;
+            padding: 16px;
+        }
+
+        /* Stage: lock aspect to prevent layout pop. JS will update --ar when known. */
+        .stage {
+            --ar: 16/9;
+            /* safe default until metadata arrives */
+            position: relative;
+            background: #0e1014;
+            border: 1px solid #1a1d22;
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: var(--ar);
+            min-height: 320px;
+            /* guard for narrow viewports */
+            contain: layout paint;
+            /* keep reflow drama inside */
+        }
+
+        /* Pixel layers */
+        .stage>video,
+        .stage>canvas {
+            position: absolute;
+            inset: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            /* don’t stretch while we wait for sizing */
+            display: block;
+        }
+
+        /* Interaction priority: overlay gets the clicks, video stays quiet */
+        #videoPlayer {
+            pointer-events: none;
+        }
+
+        #overlay {
+            pointer-events: auto;
+            z-index: 2;
+        }
+
+        /* Keep export canvas rendered and sized for captureStream, but invisible */
+        #exportCanvas {
+            visibility: hidden;
+            pointer-events: none;
+            z-index: 1;
+        }
+
+        /* Shots list */
+        #shotList {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            max-height: calc(100vh - 90px);
+            overflow: auto;
+        }
+
+        .shot {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: #0e1014;
+            border: 1px solid #1a1d22;
+            border-radius: 10px;
+            padding: 10px;
+        }
+
+        .shot .name {
+            opacity: 0.8;
+        }
+
+        .shot .status {
+            margin-left: auto;
+            opacity: 0.8;
+        }
+
+        .shot video {
+            margin-top: 6px;
+            max-width: 360px;
+            border-radius: 8px;
+            border: 1px solid #1a1d22;
+        }
+
+        .hud-note {
+            opacity: 0.7;
+            font-size: 12px;
+        }
+    </style>
 </head>
+
 <body>
-  <header>
-    <button id="processAll" class="btn">Process All</button>
-    <span class="hud-note">Click the rim on first frame if it isn’t autolocked.</span>
-  </header>
+    <header>
+        <button id="processAll" class="btn">Process All</button>
+        <span class="hud-note">Autolocking rim; no user input required.</span>
+    </header>
 
-  <div class="wrap">
-    <div class="stage">
-      <video id="videoPlayer" playsinline muted></video>
-      <canvas id="overlay"></canvas>
-      <canvas id="exportCanvas"></canvas>
+    <div class="wrap">
+        <div class="stage" id="stage">
+            <video id="videoPlayer" playsinline muted preload="metadata"></video>
+            <canvas id="overlay"></canvas>
+            <canvas id="exportCanvas"></canvas>
+        </div>
+        <div id="shotList"></div>
     </div>
-    <div id="shotList"></div>
-  </div>
 
-  <script src="/static/js/local_detector.js"></script>
-
-  <script type="module">
-  // ====== Adjust these 5 paths if your project layout is different ======
-  import * as Analyzer   from '/static/js/analyzer.js';
-  import * as Hoop       from '/static/js/hoop_tracker.js';
-  // import * as localDet   from '/static/js/local_detector.js';       // ESM local detector
-  import * as ShotArcMod from '/static/arc_mm/shot_arc.module.js';
-  import * as ShotLogMod from '/static/js/shot_logger.js';
+    <script>
+        /* Worker + model config consumed by fix_overlay_display.js */
+        window.DETECTOR_WORKER_PATH = '/static/arc_mm/detector.worker.js';
+        window.DETECTOR_MODEL_URL = '/static/models/best.onnx';
+        window.DETECTOR_LABELS = ['basketball', 'hoop', 'net', 'backboard', 'player', 'rim'];
 
 
-  // Demo list (swap with server data)
-  const sid  = "20250930_204140_927675";
-  const base = `/static/arc_mm/sessions/${sid}/clips`;
-  window.__DEMO_SHOTS = Array.from({ length: 10 }, (_, i) => {
-    const n = i + 1;
-    return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
-  });
+        /* Defer shot_logger’s built-in FE summary so we can feed it the prox tail */
+        window.DEFER_FE_SUMMARY = true;
 
-  // =================== Bridge ES modules to window for legacy callers ===================
-  const g = window;
+        /* One-time: when metadata lands, set the CSS aspect-ratio to the real one.
+            Your JS sizing will still set canvas pixel sizes; this just prevents
+            the initial layout jump and reflows. */
+        (function lockStageAspectOnce() {
+            const v = document.getElementById('videoPlayer');
+            const stage = document.getElementById('stage');
+            if (!v || !stage) return;
+            const setAR = () => {
+                const vw = v.videoWidth | 0, vh = v.videoHeight | 0;
+                if (vw && vh) stage.style.setProperty('--ar', `${vw}/${vh}`);
+            };
+            if (v.readyState >= 1) setAR();
+            else v.addEventListener('loadedmetadata', setAR, { once: true });
+        })();
+    </script>
 
-  // Analyzer
-  g.analyzeVideoFrameByFrame = Analyzer.analyzeVideoFrameByFrame || Analyzer.default?.analyzeVideoFrameByFrame;
-  g.sendFrameToDetect        = Analyzer.sendFrameToDetect        || Analyzer.default?.sendFrameToDetect;
-  g.stopFrameAnalysis        = Analyzer.stopFrameAnalysis        || Analyzer.default?.stopFrameAnalysis;
+    <script type="module">
+        /* ---------- minimal imports ---------- */
+        import * as Analyzer from '/static/js/analyzer.js';
+        import { sendFrameToDetect as detect } from '/static/js/fix_overlay_display.js';
+        import * as Hoop from '/static/js/hoop_tracker.js';
+        import * as ShotArcMod from '/static/arc_mm/shot_arc.module.js';
+        import * as ShotLogMod from '/static/js/shot_logger.js';
 
-  // Hoop tracker
-  g.handleHoopSelection      = Hoop.handleHoopSelection          || Hoop.default?.handleHoopSelection;
-  g.getLockedHoopBox         = Hoop.getLockedHoopBox             || Hoop.default?.getLockedHoopBox;
+        /* ---------- FBF pacing config (no UI references here) ---------- */
+        // How many VIDEO FRAMES you want to step per second of WALL time.
+        // For true frame-by-frame on a 30 fps clip, set 30 so we step by 1/30s each tick.
+        const FBF_ANALYSIS_FPS = 30;     // default analysis fps if we can't detect/aren't told
+        const FBF_WALL_MS = 1000;   // 1000 = visibly 1 fps; use 333 for ~3× chew
 
-  // Shot arc (namespace on window.shotArc)
-  g.shotArc = g.shotArc || {};
-  const SA = ShotArcMod.default || ShotArcMod;
-  for (const k of ['resetShotFSM','refineBallTrajectory','updateArc','updateShotArcTick']) {
-    if (typeof SA?.[k] === 'function') g.shotArc[k] = SA[k];
-  }
-
-  // Shot logger (truth)
-  g.shotLogger = g.shotLogger || {};
-  const SL = ShotLogMod.default || ShotLogMod;
-  if (typeof SL?.summarize === 'function') g.shotLogger.summarize = SL.summarize;
-
-  // =================== Ready + seek helpers ===================
-  const HAVE_METADATA = 1;
-  async function ensureVideoReady(v) {
-    if (!v) throw new Error("no video");
-    if (v.readyState >= HAVE_METADATA && Number.isFinite(v.duration)) return v;
-    await new Promise((resolve) => {
-      const onMeta = () => { v.removeEventListener('loadedmetadata', onMeta); resolve(); };
-      v.addEventListener('loadedmetadata', onMeta, { once:true });
-      const id = setInterval(() => {
-        if (v.readyState >= HAVE_METADATA && Number.isFinite(v.duration)) {
-          clearInterval(id); v.removeEventListener('loadedmetadata', onMeta); resolve();
+        // Derive seconds of VIDEO advanced per tick.
+        // If you know the clip fps, set video.dataset.fps = "30" in the pipeline.
+        // Otherwise we use FBF_ANALYSIS_FPS.
+        function getStepSec(videoEl) {
+            const hinted = Number(videoEl?.dataset?.fps);
+            const fps = Number.isFinite(hinted) && hinted > 0 ? hinted : FBF_ANALYSIS_FPS;
+            return 1 / fps;
         }
-      }, 50);
-      setTimeout(() => { clearInterval(id); v.removeEventListener('loadedmetadata', onMeta); resolve(); }, 1500);
-    });
-    return v;
-  }
-  async function seekVideoTime(v, t, { tolerance=0.015, timeout=2500 }={}) {
-    await ensureVideoReady(v);
-    t = Number.isFinite(t) ? Math.max(0, Math.min(v.duration - 0.001, t)) : 0;
-    return new Promise((resolve) => {
-      let done=false;
-      const finish=()=>{ if (done) return; done=true; cleanup(); resolve(v.currentTime); };
-      const cleanup=()=>{ v.removeEventListener('seeked', onSeeked); v.removeEventListener('timeupdate', onTime); v.removeEventListener('loadeddata', onLoad); };
-      const good=()=> Math.abs(v.currentTime - t) <= tolerance;
-      const onSeeked = () => { if (good()) finish(); };
-      const onTime   = () => { if (good()) finish(); };
-      const onLoad   = onSeeked;
-      v.addEventListener('seeked', onSeeked);
-      v.addEventListener('timeupdate', onTime);
-      v.addEventListener('loadeddata', onLoad);
-      if (good()) v.currentTime = Math.max(0, t + 0.000001); else v.currentTime = t;
-      setTimeout(finish, timeout);
-    });
-  }
 
-  // =================== Detector bootstrap (local first, analyzer fallback) ===================
-  const DET_WORKER_URL  = '/static/arc_mm/detector.worker.js';
-  const DET_WORKER_TYPE = 'classic'; // or 'module' if your worker uses import
 
-  async function initDetector() {
-    try {
-      const LD = window.localDetector || window.LocalDetector; // accept either casing
-      const enable = LD?.enable;
-      if (typeof enable === 'function') {
-        await enable({
-          worker: DET_WORKER_URL,
-          workerType: DET_WORKER_TYPE,
-          labels: ['basketball','hoop','net','backboard','player']
+        /* ---------- demo list (replace with server later) ---------- */
+        const sid = "20250930_204140_927675";
+        const base = `/static/arc_mm/sessions/${sid}/clips`;
+        const SHOTS = Array.from({ length: 10 }, (_, i) => {
+            const n = i + 1;
+            return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
         });
-        window.sendFrameToDetect =
-          LD.sendFrameToDetect || LD.detect || window.sendFrameToDetect;
-        if (typeof window.sendFrameToDetect === 'function') {
-          console.log('✅ Local detector enabled');
-          return true;
+
+        /* ---------- bridge to window (idempotent, no clobbering) ---------- */
+        const g = window;
+
+        // Helper: pick first defined function from a list
+        const pickFn = (...fns) => fns.find(fn => typeof fn === 'function') || null;
+
+        // Resolve module exports exactly once
+        const analyzeFrames = pickFn(
+            Analyzer?.analyzeVideoFrameByFrame,
+            Analyzer?.default?.analyzeVideoFrameByFrame
+        );
+        const stopAnalysis = pickFn(
+            Analyzer?.stopFrameAnalysis,
+            Analyzer?.default?.stopFrameAnalysis
+        );
+        const detectFrame = detect || null;
+
+        const hoopPick = pickFn(Hoop?.handleHoopSelection, Hoop?.default?.handleHoopSelection);
+        const hoopLocked = pickFn(Hoop?.getLockedHoopBox, Hoop?.default?.getLockedHoopBox);
+
+        // shot arc tools (may be a default export namespace or named exports)
+        const SA = ShotArcMod?.default || ShotArcMod || {};
+        const arcAPI = {
+            resetShotFSM: pickFn(SA.resetShotFSM),
+            refineBallTrajectory: pickFn(SA.refineBallTrajectory),
+            updateArc: pickFn(SA.updateArc),
+            updateShotArcTick: pickFn(SA.updateShotArcTick)
+        };
+
+        // shot logger (handle default function export or namespace)
+        const summarize = pickFn(
+            ShotLogMod?.summarize,
+            ShotLogMod?.summarizeShot,
+            ShotLogMod?.default?.summarize,
+            ShotLogMod?.default?.summarizeShot,
+            ShotLogMod?.results,
+            ShotLogMod?.default?.results,
+            (typeof ShotLogMod === 'function') ? ShotLogMod : null,
+            (typeof ShotLogMod?.default === 'function') ? ShotLogMod.default : null
+        );
+
+        // Only set on window if not already set (no clobber)
+        if (!g.analyzeVideoFrameByFrame && analyzeFrames) g.analyzeVideoFrameByFrame = analyzeFrames;
+        if (!g.stopFrameAnalysis && stopAnalysis) g.stopFrameAnalysis = stopAnalysis;
+        if (!g.sendFrameToDetect && detectFrame) g.sendFrameToDetect = detectFrame;
+
+        if (!g.handleHoopSelection && hoopPick) g.handleHoopSelection = hoopPick;
+        if (!g.getLockedHoopBox && hoopLocked) g.getLockedHoopBox = hoopLocked;
+
+        // shotArc namespace: create once, fill missing methods only
+        g.shotArc = g.shotArc || Object.create(null);
+        for (const [k, fn] of Object.entries(arcAPI)) {
+            if (fn && !g.shotArc[k]) g.shotArc[k] = fn;
         }
-        console.warn('⚠️ Local detector enabled but no sendFrameToDetect export found.');
-      }
-    } catch (e) { console.warn('⚠️ Local detector init failed', e); }
 
-    // Analyzer fallback
-    const maybe = Analyzer?.sendFrameToDetect || Analyzer?.default?.sendFrameToDetect;
-    if (typeof maybe === 'function') {
-      window.sendFrameToDetect = maybe;
-      console.log('⚠️ Using Analyzer detect');
-      return true;
-    }
+        // shotLogger namespace: create once, set summarize if absent
+        g.shotLogger = g.shotLogger || Object.create(null);
+        if (summarize && !g.shotLogger.summarize) g.shotLogger.summarize = summarize;
+        const summarizeAndLog = pickFn(
+            ShotLogMod?.results,
+            ShotLogMod?.default?.results,
+            (typeof ShotLogMod === 'function') ? ShotLogMod : null,
+            (typeof ShotLogMod?.default === 'function') ? ShotLogMod.default : null
+        );
+        if (summarizeAndLog && !g.shotLogger.results) g.shotLogger.results = summarizeAndLog;
+        try {
+            console.log('[bridge] shotLogger wired', {
+                summarize: !!g.shotLogger?.summarize,
+                results: !!g.shotLogger?.results
+            });
+        } catch {}
 
-    console.warn('❌ No detector wired.');
-    return false;
-  }
-
-  // optional: make callable from console for quick tests
-  window.initDetector = initDetector;
-
-
-
-  // =================== UI + sizing ===================
-  const ui = {
-    list: document.getElementById('shotList'),
-    video: document.getElementById('videoPlayer'),
-    overlay: document.getElementById('overlay'),
-    exportCan: document.getElementById('exportCanvas'),
-    processAllBtn: document.getElementById('processAll')
-  };
-  function syncSizes(){
-    const vw = ui.video.videoWidth||0, vh = ui.video.videoHeight||0;
-    if (!vw || !vh) return false;
-    [ui.overlay, ui.exportCan].forEach(c => { c.width = vw; c.height = vh; c.style.width='100%'; c.style.height='100%'; });
-    return true;
-  }
-  function lockOverlayToVideo(){ try { syncSizes(); } catch {} }
-  ui.video.addEventListener('loadedmetadata', lockOverlayToVideo, { once:true });
-
-  // Normalize detector outputs -> [{label, confidence, box:[x1,y1,x2,y2]}]
-  function normalizeDetections(res) {
-    const raw = res?.objects || res?.detections || res?.boxes || res || [];
-    const out = [];
-    for (const o of raw) {
-      const label = (o.label || o.class || o.name || '').toString().toLowerCase();
-      const conf  = Number(o.confidence ?? o.score ?? o.prob ?? o.probability ?? 0);
-      let box = o.box || o.bbox || o.rect || null;
-
-      if (Array.isArray(box)) {
-        if (box.length === 4) {
-          const [a,b,c,d] = box;
-          // If it looks like [x,y,w,h], convert to [x1,y1,x2,y2]
-          box = (c < a || d < b) ? [a, b, a + c, b + d] : [a, b, c, d];
-        } else continue;
-      } else if (box && typeof box === 'object') {
-        const x = box.x ?? box.left ?? 0, y = box.y ?? box.top ?? 0;
-        const w = box.w ?? box.width ?? ((box.right ?? 0) - x);
-        const h = box.h ?? box.height ?? ((box.bottom ?? 0) - y);
-        box = [x, y, x + w, y + h];
-      } else {
-        const x = o.x ?? o.cx, y = o.y ?? o.cy, w = o.w ?? o.width, h = o.h ?? o.height;
-        if ([x,y,w,h].every(n => Number.isFinite(n))) box = [x - w/2, y - h/2, x + w/2, y + h/2];
-        else continue;
-      }
-
-      out.push({ label, confidence: conf, box });
-    }
-    return out;
-  }
-  window.normalizeDetections = normalizeDetections;
+        // Minimal sanity logs (quiet unless something’s missing)
+        if (!g.analyzeVideoFrameByFrame) console.warn('[bridge] analyzeVideoFrameByFrame not available');
+        if (!g.sendFrameToDetect) console.warn('[bridge] detector not available');
+        if (!g.handleHoopSelection) console.warn('[bridge] handleHoopSelection not available');
+        if (!g.getLockedHoopBox) console.warn('[bridge] getLockedHoopBox not available');
+        if (!g.shotLogger?.summarize) console.warn('[bridge] shotLogger.summarize not available');
 
 
-  
-  
-  
-  // =================== Detector warm + autolock rim ===================
-  async function warmAndAutolockROI({ sampleCount = 6, spanSec = 0.8 } = {}) {
-    const v = ui.video, ov = ui.overlay;
-    const det = window.sendFrameToDetect;
-    if (!det || !ov || !v.duration) return;
+        /* ---------- dom (strict, idempotent) ---------- */
+        function must(id) {
+            const el = document.getElementById(id);
+            if (!el) throw new Error(`Missing required element #${id}`);
+            return el;
+        }
 
-    // ensure overlay sized
-    if (!ov.width || !ov.height) {
-      await new Promise(r=>requestAnimationFrame(r));
-      if (!ov.width || !ov.height) { try { lockOverlayToVideo(); } catch {} }
-    }
-    if (!ov.width || !ov.height) return; // still not ready; bail quietly
+        const ui = (window.__uiRefs) || Object.freeze({
+            stage: document.getElementById('stage') || null, // optional, used for aspect CSS
+            list: must('shotList'),
+            video: must('videoPlayer'),
+            overlay: must('overlay'),
+            exportCan: must('exportCanvas'),
+            processAllBtn: must('processAll'),
+        });
+        window.__uiRefs = ui; // cache so hot-reloads don’t reallocate
 
-    // scratch canvas
-    if (!ov.width || !ov.height) { lockOverlayToVideo?.(); await new Promise(r=>requestAnimationFrame(r)); }
-    if (!ov.width || !ov.height) return; // still not ready
-    const tap = (warmAndAutolockROI.tap ||= document.createElement('canvas'));
-    tap.width = ov.width; tap.height = ov.height;
-    const ctx = tap.getContext('2d', { willReadFrequently:true });
+        /* ---------- canvas sizing helpers ---------- */
+        function sizeCanvasesToVideo(v = ui.video) {
+            const vw = v.videoWidth | 0, vh = v.videoHeight | 0;
+            if (!vw || !vh) return false;
 
-    const picks = [];
-    const step = Math.min(spanSec / Math.max(1, sampleCount - 1), 0.2);
-    let t = Math.min(0.10, v.duration * 0.05);
-    for (let i=0;i<sampleCount;i++){
-      await seekVideoTime(v, t);
-      ctx.drawImage(v, 0, 0, ov.width, ov.height);
-      let res = await det(tap, (window.fidx = (window.fidx|0)+1));
-      const objs = normalizeDetections(res).filter(o => (
-        o.label.includes('hoop')     ||
-        o.label.includes('net')      ||
-        o.label === 'basket'         ||   // add your model’s actual strings here
-        o.label === 'rim'
-      ));
-      if (objs.length) picks.push(...objs);
-      t += step;
-    }
+            // Slight DPR bump for sharper lines without going overboard
+            const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
 
-    const best = picks.sort((a,b)=>(b.confidence||0)-(a.confidence||0))[0];
-    if (best) {
-      const [x1,y1,x2,y2] = best.box;
-      const cx = Math.round((x1 + x2)/2), cy = Math.round((y1 + y2)/2);
-      try { window.handleHoopSelection?.({ clientX: 0, clientY: 0, videoXY: { x: cx, y: cy } }, ov, { objects:[best] }, null); } catch {}
-    } else {
-      console.info('[autolock] no hoop/net found during warm-up; click to pick.');
-    }
-  }
+            [ui.overlay, ui.exportCan].forEach(c => {
+                const pw = Math.round(vw * dpr);
+                const ph = Math.round(vh * dpr);
+                if (c.width !== pw || c.height !== ph) {
+                    c.width = pw; c.height = ph;
+                }
+                c.style.width = '100%';
+                c.style.height = '100%';
+                // prime context once so later getContext calls don’t allocate repeatedly
+                c.getContext('2d', { willReadFrequently: true });
+            });
 
+            // Optional: lock CSS aspect so layout doesn’t jump (if you have #stage)
+            try { ui.stage?.style?.setProperty?.('--ar', `${vw}/${vh}`); } catch { }
 
-  // =================== Manual rim pick ===================
-  function enableHoopPickOnce(){
-    const ov = ui.overlay; if (!ov || g.__pickingHoop) return;
-    g.__pickingHoop = true; ov.style.cursor='crosshair';
-    const pickOnce = (e) => {
-      try { g.handleHoopSelection?.(e, ov, g.lastDetectedFrame || {objects:[]}, null); } catch {}
-      ov.style.cursor='default'; ov.removeEventListener('pointerdown', pickOnce); ov.removeEventListener('click', pickOnce); g.__pickingHoop = false;
-    };
-    ov.addEventListener('pointerdown', pickOnce, { passive:false });
-    ov.addEventListener('click',        pickOnce, { passive:false });
-  }
+            return true;
+        }
 
-  // =================== HUD + overlay ===================
-  function drawHUD(ctx){
-    const s = g.__lastSummary || {};
-    const line1 = `Result: ${s.result ? String(s.result).toUpperCase()
-                     : (s.made===true?'MAKE':s.made===false?'MISS':'—')}`;
-    const deg = n => typeof n==='number' ? `${Math.round(n)}°` : '—';
-    const num = n => (typeof n==='number' && isFinite(n)) ? Math.round(n) : '—';
-    const line2 = `Release ${deg(s.releaseAngle)}  •  Entry ${deg(s.entryAngle)}  •  Apex ${num(s.apexHeight)}`;
-    const pad=10, fs=16;
-    ctx.save();
-    ctx.font=`600 ${fs}px system-ui,sans-serif`;
-    const w1=ctx.measureText(line1).width, w2=ctx.measureText(line2).width;
-    const boxW=Math.max(w1,w2)+pad*2, boxH=fs*2+pad*3;
-    ctx.fillStyle='rgba(0,0,0,0.55)'; ctx.fillRect(pad,pad,boxW,boxH);
-    ctx.fillStyle='#fff'; ctx.fillText(line1, pad*1.6, pad*1.8+fs*0.1);
-    ctx.fillText(line2, pad*1.6, pad*2.6+fs);
-    ctx.restore();
-  }
-  function drawArcOverlay(ctx){
-    const arc = g.ballArc || {};
-    const trail = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
-    if (!trail.length) return;
-    ctx.save();
-    ctx.lineWidth = 4;
-    ctx.strokeStyle = 'rgba(255,165,0,0.95)';
-    ctx.beginPath(); ctx.moveTo(trail[0].x, trail[0].y);
-    for (let i=1;i<trail.length;i++) ctx.lineTo(trail[i].x, trail[i].y);
-    ctx.stroke();
-    ctx.restore();
-  }
-  function compositeFrame(){
-    const w=ui.exportCan.width,h=ui.exportCan.height; if(!w||!h) return;
-    const ctx=ui.exportCan.getContext('2d');
-    ctx.clearRect(0,0,w,h);
-    ctx.drawImage(ui.video,0,0,w,h);
-    ctx.drawImage(ui.overlay,0,0,w,h);
-    drawArcOverlay(ctx);
-    drawHUD(ctx);
-  }
-
-  // =================== Recorder ===================
-  function startCompositeRecorder(canvas, { fps=30 } = {}) {
-    const stream = canvas.captureStream(fps);
-    const mime = (MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9' : 'video/webm');
-    const rec = new MediaRecorder(stream, { mimeType:mime, videoBitsPerSecond: 4_000_000 });
-    const chunks = [];
-    rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
-    const done = new Promise(resolve => rec.onstop = () => resolve(new Blob(chunks, { type:mime })));
-    rec.start(100);
-    return { rec, done };
-  }
-  function downloadBlob(blob, name){
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = name;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(()=> { URL.revokeObjectURL(a.href); a.remove(); }, 0);
-  }
-
-  // =================== Results pipeline (per clip) ===================
-  async function renderResultsClip({ id, url, outBasename }) {
-    try { g.stopFrameAnalysis?.(); } catch {}
-    try { g.resetAll?.(); } catch {}
-    try { g.shotArc?.resetShotFSM?.(); } catch {}
-
-    ui.video.srcObject = null;
-    ui.video.removeAttribute('src');
-    ui.video.src = url; ui.video.preload='auto';
-    await ensureVideoReady(ui.video);
-    lockOverlayToVideo();
-
-    // Detector must exist before autolock & analysis
-    await initDetector(); // must succeed or you’ll detect nothing
-    await warmAndAutolockROI({ sampleCount: 6, spanSec: 0.8 });
-
-    analyzeVideoFrameByFrame(ui.video, ui.overlay);
+        // Call exactly once when metadata lands (no duplicate listeners)
+        (function bindMetaOnce() {
+            if (ui.video.__metaBound) return; ui.video.__metaBound = true;
+            const onMeta = () => { sizeCanvasesToVideo(ui.video); };
+            if (ui.video.readyState >= 1) onMeta();
+            else ui.video.addEventListener('loadedmetadata', onMeta, { once: true });
+        })();
 
 
-    // strict pre-prox / relaxed in-prox
-    g.FBF_RATE = 1.0;
-    g.BALL_MIN_CONF_PRE  = 0.45;
-    g.BALL_MAX_STEP_PRE  = 55;
-    g.BALL_MIN_CONF      = 0.26;
-    g.BALL_MAX_STEP      = 85;
-    g.setBallOptions?.({ KF_PROCESS_NOISE: 1.0, KF_MEASURE_NOISE: 3.0, MAX_STEP: g.BALL_MAX_STEP, GAP_FILL_MAX: 3 });
-    g.BALL_MAX_DEV_PX   = 70;
-    g.BALL_MAX_TURN_DEG = 60;
+        /* ---------- utils ---------- */
+        function normalizeDetections(res) {
+            const raw = res?.objects || res?.detections || res?.boxes || res || [];
+            const out = [];
+            for (const o of raw) {
+                const label = (o.label || o.class || o.name || '').toString().toLowerCase();
+                const conf = Number(o.confidence ?? o.score ?? o.prob ?? o.probability ?? 0);
+                let box = o.box || o.bbox || o.rect || null;
+                if (Array.isArray(box) && box.length === 4) {
+                    const [a, b, c, d] = box; box = (c < a || d < b) ? [a, b, a + c, b + d] : [a, b, c, d];
+                } else if (box && typeof box === 'object') {
+                    const x = box.x ?? box.left ?? 0, y = box.y ?? box.top ?? 0;
+                    const w = box.w ?? box.width ?? ((box.right ?? 0) - x);
+                    const h = box.h ?? box.height ?? ((box.bottom ?? 0) - y);
+                    box = [x, y, x + w, y + h];
+                } else {
+                    const x = o.x ?? o.cx, y = o.y ?? o.cy, w = o.w ?? o.width, h = o.h ?? o.height;
+                    if ([x, y, w, h].every(Number.isFinite)) box = [x - w / 2, y - h / 2, x + w / 2, y + h / 2];
+                    else continue;
+                }
+                out.push({ label, confidence: conf, box });
+            }
+            return out;
+        }
 
-    const { rec, done } = startCompositeRecorder(ui.exportCan, { fps: 30 });
-    const onFrame = () => compositeFrame();
-    g.addEventListener('analyzer:frame-done', onFrame);
+        async function ensureVideoReady(v) {
+            if (!v) throw new Error('no video');
+            if (v.readyState >= 1 && Number.isFinite(v.duration)) return v;
 
-    const finishNow = async () => {
-      try { g.removeEventListener('analyzer:frame-done', onFrame); } catch {}
-      try { g.shotArc?.refineBallTrajectory?.(); } catch {}
+            await new Promise((resolve) => {
+                let done = false;
+                const finish = () => { if (done) return; done = true; cleanup(); resolve(); };
+                const cleanup = () => {
+                    v.removeEventListener('loadedmetadata', onMeta);
+                    v.removeEventListener('loadeddata', onData);
+                };
+                const onMeta = () => finish();
+                const onData = () => finish();
 
-      const hoop = g.getLockedHoopBox?.();
-      const summary = g.shotLogger?.summarize?.(g.ballArc, hoop) || { made:null };
-      g.__lastSummary = summary;
+                v.addEventListener('loadedmetadata', onMeta, { once: true });
+                v.addEventListener('loadeddata', onData, { once: true });
 
-      for (let i=0;i<24;i++) { compositeFrame(); await new Promise(r=>requestAnimationFrame(r)); }
+                // hard ceiling; we’ll proceed even if the browser is sulking
+                setTimeout(finish, 2000);
+            });
 
-      try { rec.requestData?.(); rec.stop(); } catch {}
-      const blob = await done;
+            return v;
+        }
 
-      const row = document.querySelector(`[data-shot="${id}"]`);
-      const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-      a.download = `${outBasename || id || 'shot'}.results.webm`; a.textContent = 'Download';
-      const v = document.createElement('video'); v.src = a.href; v.controls = true; v.muted = true; v.style.maxWidth='360px'; v.style.display='block';
-      row?.appendChild(document.createTextNode(' · '));
-      row?.appendChild(a);
-      row?.appendChild(document.createElement('br'));
-      row?.appendChild(v);
-      const st = row?.querySelector('.status'); if (st) st.textContent = summary?.made===true ? '✓ MAKE' : summary?.made===false ? '✗ MISS' : '—';
-    };
 
-    g.addEventListener('shot:summary', finishNow, { once:true });
-    g.addEventListener('shot:end',     finishNow, { once:true });
+        async function seekVideoTime(v, t, tol = 0.015, timeout = 2500) {
+            await ensureVideoReady(v);
+            try { v.pause?.(); } catch { }
 
-    enableHoopPickOnce();
+            t = Number.isFinite(t) ? Math.max(0, Math.min(v.duration - 0.001, t)) : 0;
 
-    if (typeof g.analyzeVideoFrameByFrame === 'function') {
-      g.analyzeVideoFrameByFrame(ui.video, ui.overlay);
-    } else {
-      console.warn('[FBF] analyzer missing (check module exports)');
-    }
-  }
+            await new Promise((resolve) => {
+                let done = false;
+                const good = () => Math.abs(v.currentTime - t) <= tol;
 
-  // =================== Demo list + batch ===================
-  function boot(){
-    const shots = g.__DEMO_SHOTS || [];
-    const list = document.getElementById('shotList');
-    list.innerHTML = shots.map(s => `
-      <div class="shot" data-shot="${s.id}">
-        <button class="btn go" data-id="${s.id}">Process</button>
-        <span class="status">waiting…</span>
-        <span class="name">${s.name || s.url}</span>
-      </div>
-    `).join('');
-    list.addEventListener('click', async (e) => {
-      const b = e.target.closest('button.go'); if (!b) return;
-      b.disabled = true;
-      const id = b.dataset.id;
-      const shot = shots.find(x => String(x.id) === String(id));
-      await renderResultsClip({ id: shot.id, url: shot.url, outBasename: `shot-${shot.id}` });
-    });
-    document.getElementById('processAll').onclick = async () => {
-      for (const b of [...list.querySelectorAll('.shot button.go')]) {
-        b.click();
-        await new Promise(r=>setTimeout(r, 250));
-      }
-    };
-  }
-  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot, { once:true }); else boot();
-  </script>
+                const finish = () => {
+                    if (done) return; done = true;
+                    v.removeEventListener('seeked', on);
+                    v.removeEventListener('timeupdate', on);
+                    resolve();
+                };
+
+                const on = () => { if (good()) finish(); };
+
+                v.addEventListener('seeked', on);
+                v.addEventListener('timeupdate', on);
+
+                v.__setCurrentTimeSafely ? v.__setCurrentTimeSafely(t) : (v.currentTime = t);
+                setTimeout(finish, timeout);
+            });
+
+            // settle the frame into the compositor
+            await new Promise(r => requestAnimationFrame(r));
+            await new Promise(r => requestAnimationFrame(r));
+            return v.currentTime;
+        }
+
+
+        function syncSizesOnce() {
+            const vw = ui.video.videoWidth | 0, vh = ui.video.videoHeight | 0;
+            if (!vw || !vh) return false;
+
+            const dpr = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+            [ui.overlay, ui.exportCan].forEach(c => {
+                const pw = Math.round(vw * dpr);
+                const ph = Math.round(vh * dpr);
+                if (c.width !== pw || c.height !== ph) {
+                    c.width = pw; c.height = ph;
+                }
+                c.style.width = '100%';
+                c.style.height = '100%';
+                // prime once to avoid reallocation churn later
+                c.getContext('2d', { willReadFrequently: true });
+            });
+
+            return true;
+        }
+
+
+        function getHoopInVideoSpace() {
+            const H = g.getLockedHoopBox?.(); if (!H) return null;
+            const ov = ui.overlay, rect = ov.getBoundingClientRect();
+            const sx = ov.width / rect.width, sy = ov.height / rect.height;
+            const needs = (H.x != null && H.w != null && H.x + H.w > ov.width * 1.05) || (H.y != null && H.h != null && H.y + H.h > ov.height * 1.05);
+            if (!needs) return H;
+            const N = { ...H };
+            ['x', 'w', 'cx'].forEach(k => { if (N[k] != null) N[k] *= sx; });
+            ['y', 'h', 'cy', 'rimY'].forEach(k => { if (N[k] != null) N[k] *= sy; });
+            if (N.netBox) {
+                const n = { ...N.netBox };
+                ['x', 'w', 'cx'].forEach(k => { if (n[k] != null) n[k] *= sx; });
+                ['y', 'h', 'cy'].forEach(k => { if (n[k] != null) n[k] *= sy; });
+                N.netBox = n;
+            }
+            return N;
+        }
+
+        function drawHoopBox(ctx) {
+            const H = getHoopInVideoSpace(); if (!H) return;
+            const x = H.x ?? (H.cx - H.w / 2), y = H.y ?? (H.cy - H.h / 2);
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,60,60,0.9)'; ctx.lineWidth = 2; ctx.strokeRect(x, y, H.w, H.h);
+            if (H.netBox) {
+                const n = H.netBox, nx = n.x ?? (n.cx - n.w / 2), ny = n.y ?? (n.cy - n.h / 2);
+                ctx.strokeStyle = 'rgba(0,180,255,0.9)'; ctx.lineWidth = 1.5; ctx.strokeRect(nx, ny, n.w, n.h);
+            }
+            ctx.restore();
+        }
+
+        function drawHoopTube(ctx) {
+            const H = getHoopInVideoSpace(); if (!H) return;
+            const cx = H.cx ?? (H.x + H.w / 2), cy = H.cy ?? (H.y + H.h / 2);
+            const rimY = H.rimY ?? cy;
+            const tubeW = Math.max(24, Math.round((H.w ?? 80) * 0.45));
+            const tubeH = Math.max(40, Math.round((H.h ?? 80) * 1.10));
+            const x = Math.round(cx - tubeW / 2), y = Math.round(rimY);
+            ctx.save(); ctx.strokeStyle = 'rgba(0,180,255,0.9)'; ctx.lineWidth = 2; ctx.strokeRect(x, y, tubeW, tubeH); ctx.restore();
+        }
+
+        function drawArcOverlay(ctx) {
+        const arc = window.ballArc || {};
+        const frozen  = arc.refinedTrailFrozen;
+        const current = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+        const trail = (frozen && frozen.length) ? frozen : current;
+        if (!trail || !trail.length) return;
+
+        ctx.save();
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = 'rgba(255,165,0,0.95)';
+        ctx.beginPath(); ctx.moveTo(trail[0].x, trail[0].y);
+        for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
+        ctx.stroke();
+        ctx.restore();
+        }
+
+
+        function drawHUD(ctx) {
+            const s = g.__lastSummary || {};
+            const deg = n => typeof n === 'number' ? `${Math.round(n)}°` : '—';
+            const num = n => (typeof n === 'number' && isFinite(n)) ? Math.round(n) : '—';
+            const line1 = `Result: ${s.made === true ? 'MAKE' : s.made === false ? 'MISS' : '—'}`;
+            const line2 = `Release ${deg(s.releaseAngle)}  •  Entry ${deg(s.entryAngle)}  •  Apex ${num(s.apexHeight)}`;
+            const pad = 10, fs = 16, ctxFont = `600 ${fs}px system-ui,sans-serif`;
+            ctx.save(); ctx.font = ctxFont;
+            const w1 = ctx.measureText(line1).width, w2 = ctx.measureText(line2).width;
+            const boxW = Math.max(w1, w2) + pad * 2, boxH = fs * 2 + pad * 3;
+            ctx.fillStyle = 'rgba(0,0,0,0.55)'; ctx.fillRect(pad, pad, boxW, boxH);
+            ctx.fillStyle = '#fff'; ctx.fillText(line1, pad * 1.6, pad * 1.8 + fs * 0.1); ctx.fillText(line2, pad * 1.6, pad * 2.6 + fs);
+            ctx.restore();
+        }
+
+        (function freezeOnEnd(){
+        if (window.__freezeOnEndWired) return; window.__freezeOnEndWired = true;
+        function snap(){ try { freezeArcTrail(); } catch {} }
+        window.addEventListener('shot:end',     snap, { once: false });
+        window.addEventListener('shot:summary', snap, { once: false });
+        })();
+
+
+
+
+        let __exportCtx = null;
+        function compositeFrame() {
+            const w = ui.exportCan.width, h = ui.exportCan.height; if (!w || !h) return;
+            const ctx = (__exportCtx ||= ui.exportCan.getContext('2d'));
+            ctx.clearRect(0, 0, w, h);
+            ctx.drawImage(ui.video, 0, 0, w, h);
+            drawHoopBox(ctx);
+            drawHoopTube(ctx);
+            ctx.drawImage(ui.overlay, 0, 0, w, h);
+            drawArcOverlay(ctx);
+            drawHUD(ctx);
+        }
+
+        // Known clip length: 3s @ 30 fps = 90 frames
+        const FBF_KNOWN_TOTAL_FRAMES = 90;
+
+        // deep clone utility for trails
+        function cloneTrail(trail) {
+        return Array.isArray(trail) ? trail.map(p => ({...p})) : [];
+        }
+
+        // freeze the currently best trail for rendering
+        function freezeArcTrail() {
+        const arc = (window.ballArc ||= {});
+        let live = (Array.isArray(arc.refinedTrail) && arc.refinedTrail.length)
+            ? arc.refinedTrail
+            : (Array.isArray(arc.trail) ? arc.trail : []);
+
+        if (!live.length && Array.isArray(window.ballState?.trail) && window.ballState.trail.length) {
+            live = window.ballState.trail.map((p, idx) => ({
+                x: p.x,
+                y: p.y,
+                frame: Number.isFinite(p.frame) ? p.frame : idx
+            }));
+        }
+
+        if (live && live.length) {
+            arc.refinedTrailFrozen = cloneTrail(live);
+        }
+        }
+
+
+
+
+        /* ---------- recorder (robust) ---------- */
+        function startCompositeRecorder(canvas, { fps = 30, timesliceMs = 250, videoBitsPerSecond = 4_000_000 } = {}) {
+            // 1) Basic capability checks
+            if (!canvas || typeof canvas.captureStream !== 'function') {
+                console.warn('[rec] canvas.captureStream not supported');
+                return { rec: null, done: Promise.resolve(null), stop: async () => null, url: null };
+            }
+            if (!canvas.width || !canvas.height) {
+                console.warn('[rec] canvas has zero size; refusing to record');
+                return { rec: null, done: Promise.resolve(null), stop: async () => null, url: null };
+            }
+
+            // 2) Pick a sane mime
+            const mimeCandidates = [
+                'video/webm;codecs=vp9',
+                'video/webm;codecs=vp8',
+                'video/webm'
+            ];
+            const mime = mimeCandidates.find(m => MediaRecorder.isTypeSupported?.(m)) || 'video/webm';
+
+            // 3) Build stream and try to set requested FPS on the track
+            const stream = canvas.captureStream(Math.max(1, Math.round(fps)));
+            try {
+                const [track] = stream.getVideoTracks();
+                const supported = track?.getCapabilities?.() || {};
+                if (track?.applyConstraints && supported.frameRate) {
+                    const desired = Math.min(Math.max(supported.frameRate.min || 1, fps), supported.frameRate.max || fps);
+                    (async () => {
+                        try {
+                            await track.applyConstraints({ frameRate: desired });
+                        } catch (e) {
+                            // Non-fatal; some browsers don’t allow changing frameRate
+                            // console.debug('[rec] applyConstraints frameRate failed:', e);
+                        }
+                    })();
+                }
+            } catch (e) {
+                // Non-fatal; some browsers don’t allow changing frameRate
+                // console.debug('[rec] applyConstraints frameRate failed:', e);
+            }
+
+            // 4) Create recorder
+            let rec;
+            try {
+                rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond });
+            } catch (e) {
+                console.error('[rec] MediaRecorder ctor failed:', e);
+                return { rec: null, done: Promise.resolve(null), stop: async () => null, url: null };
+            }
+
+            // 5) Collect chunks
+            const chunks = [];
+            rec.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+
+            // 6) Done promise resolves to a Blob and object URL
+            const done = new Promise((resolve) => {
+                rec.onstop = () => {
+                    try {
+                        const blob = chunks.length ? new Blob(chunks, { type: mime }) : null;
+                        resolve(blob);
+                    } catch (e) {
+                        console.error('[rec] build blob failed:', e);
+                        resolve(null);
+                    }
+                };
+            });
+
+            // 7) Start with timeslice so we don’t buffer forever
+            try { rec.start(Math.max(0, timesliceMs | 0)); } catch (e) {
+                console.error('[rec] start failed:', e);
+                return { rec: null, done: Promise.resolve(null), stop: async () => null, url: null };
+            }
+
+            // 8) Provide a polite stop that returns { blob, url }
+            async function stop() {
+                try {
+                    if (rec && rec.state !== 'inactive') rec.stop();
+                } catch { }
+                const blob = await done;
+                if (!blob) return { blob: null, url: null };
+                const url = URL.createObjectURL(blob);
+                return {
+                    blob,
+                    url,
+                    // helper to free when you’ve attached it to a video or link
+                    revoke() { try { URL.revokeObjectURL(url); } catch { } }
+                };
+            }
+
+            return { rec, done, stop, url: null };
+        }
+
+
+        /* ---------- rim lock from t=0 using detector on first frames (robust) ---------- */
+        async function lockHoopFromFirstFrame() {
+            const v = ui.video, ov = ui.overlay, det = g.sendFrameToDetect;
+            if (!det || !ov) return false;
+
+            // Make sure canvases match the video pixels
+            await ensureVideoReady(v);
+            syncSizesOnce();
+
+            // Small helper: seek -> settle -> draw to temp canvas -> detect
+            const tap = (lockHoopFromFirstFrame.__tap ||= document.createElement('canvas'));
+            const tctx = (lockHoopFromFirstFrame.__ctx ||= tap.getContext('2d', { willReadFrequently: true }));
+
+            async function detectAt(timeSec) {
+                await seekVideoTime(v, Math.max(0, Math.min(v.duration - 0.001, timeSec)));
+                // settle pixels into compositor
+                await new Promise(r => requestAnimationFrame(r));
+                await new Promise(r => requestAnimationFrame(r));
+
+                // ensure temp canvas matches overlay pixels
+                tap.width = ov.width; tap.height = ov.height;
+                tctx.clearRect(0, 0, tap.width, tap.height);
+                tctx.drawImage(v, 0, 0, tap.width, tap.height);
+
+                const res = await det(tap, Math.round(timeSec * 1000) | 0);
+                const objs = normalizeDetections(res).filter(o =>
+                    o.label.includes('hoop') || o.label.includes('net') || o.label === 'rim' || o.label === 'basket' || o.label === 'backboard'
+                );
+                if (!objs.length) return null;
+
+                // pick highest confidence
+                const top = objs.sort((a, b) => (b.confidence || 0) - (a.confidence || 0))[0];
+                return top || null;
+            }
+
+            // Try t=0, then a couple of early frames (helps when the first frame is blurry)
+            const probes = [0, 1 / 30, 0.12, 0.25];
+            let best = null;
+            for (const t of probes) {
+                const hit = await detectAt(t);
+                if (hit && (!best || (hit.confidence || 0) > (best.confidence || 0))) best = hit;
+                if (best && (best.confidence || 0) >= 0.6) break; // good enough, stop early
+            }
+            if (!best) return false;
+
+            // Compute click position in client coords
+            const [x1, y1, x2, y2] = best.box;
+            const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+            const rect = ov.getBoundingClientRect();
+            const sx = rect.width / ov.width, sy = rect.height / ov.height;
+            const evt = { clientX: rect.left + cx * sx, clientY: rect.top + cy * sy };
+
+            // Use a stable rimY slightly below the rim box center
+            const rimY = y2 - (y2 - y1) * 0.10;
+
+            try {
+                g.handleHoopSelection?.(evt, ov, { objects: [{ label: best.label, box: best.box, confidence: best.confidence, rimY }] }, { via: 'detect' });
+                window.__rimLockedOnce = true;
+                window.dispatchEvent(new CustomEvent('hoop:locked', { detail: { via: 'initial' } }));
+
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+
+        /* ---------- Auto one-time hoop pic ---------- */
+
+        // Score hoop-like objects: bigger + more confident + nearer to frame center
+        function scoreHoopCandidate(obj, W, H) {
+            if (!obj?.box) return -Infinity;
+            const [x1, y1, x2, y2] = obj.box;
+            const w = Math.max(0, x2 - x1), h = Math.max(0, y2 - y1);
+            const area = w * h;
+            const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+            const dx = (cx - W / 2) / (W / 2), dy = (cy - H / 2) / (H / 2);
+            const prox = 1 - Math.min(1, Math.hypot(dx, dy)); // 1 = center, 0 = corner
+            const conf = Math.max(0, Number(obj.confidence ?? 0));
+            return area * (0.6 + 0.4 * prox) * (0.5 + 0.5 * conf); // tuned bias toward center and confidence
+        }
+
+        function filterHoopLabels(list) {
+            const L = normalizeDetections(list);
+            return L.filter(o => {
+                const lab = String(o.label || '').toLowerCase();
+                return lab.includes('hoop') || lab.includes('net') || lab === 'rim' || lab === 'basket' || lab === 'backboard';
+            });
+        }
+
+        /* ---- Auto-lock rim by scanning early frames; no user input ---- */
+        async function autoLockHoopInitial() {
+            const v = ui.video, ov = ui.overlay, det = window.sendFrameToDetect;
+            if (!det || !ov) return false;
+
+            await ensureVideoReady(v);
+            syncSizesOnce();
+
+            // temp canvas cache
+            const tap = (autoLockHoopInitial.__tap ||= document.createElement('canvas'));
+            const tctx = (autoLockHoopInitial.__ctx ||= tap.getContext('2d', { willReadFrequently: true }));
+            tap.width = ov.width; tap.height = ov.height;
+
+            async function detectAt(timeSec) {
+                await seekVideoTime(v, Math.max(0, Math.min(v.duration - 0.001, timeSec)));
+                // double rAF to ensure pixels are composited
+                await new Promise(r => requestAnimationFrame(r));
+                await new Promise(r => requestAnimationFrame(r));
+                tctx.clearRect(0, 0, tap.width, tap.height);
+                tctx.drawImage(v, 0, 0, tap.width, tap.height);
+                const res = await det(tap, Math.round(timeSec * 1000) | 0);
+                return filterHoopLabels(res);
+            }
+
+            // Probe a few early timestamps; t=0 often works but not always
+            const probes = [0, 1 / 30, 0.12, 0.25];
+            let best = null, bestScore = -Infinity;
+
+            for (const t of probes) {
+                const objs = await detectAt(t);
+                for (const o of objs) {
+                    const s = scoreHoopCandidate(o, tap.width, tap.height);
+                    if (s > bestScore) { bestScore = s; best = o; }
+                }
+                if (best && (best.confidence ?? 0) >= 0.60) break; // good enough
+            }
+
+            if (!best) return false;
+
+            // Compute client click for your existing selector
+            const [x1, y1, x2, y2] = best.box;
+            const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+            const rect = ov.getBoundingClientRect();
+            const sx = rect.width / ov.width, sy = rect.height / ov.height;
+            const evt = { clientX: rect.left + cx * sx, clientY: rect.top + cy * sy };
+
+            // rimY slightly below rim box top to bias the tube
+            const rimY = y2 - (y2 - y1) * 0.10;
+
+            try {
+                window.handleHoopSelection?.(evt, ov, { objects: [{ label: best.label, box: best.box, confidence: best.confidence, rimY }] }, { viaDetect: true });
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        // ---- If not locked yet, keep trying on early analyzer frames ----
+        function installAutolockFallback({ maxTicks = 240 } = {}) { // ~8s if analyzer ticks ~30fps
+            if (window.__autolockFallbackWired) return;
+            window.__autolockFallbackWired = true;
+
+            let ticks = 0;
+            let locked = false;
+
+            function stopFallback() {
+                if (locked) return;
+                locked = true;
+                window.removeEventListener('analyzer:frame-done', onTick);
+            }
+
+            // If something else locks first, bail immediately
+            window.addEventListener('hoop:locked', stopFallback, { once: true });
+
+            async function onTick(e) {
+                // hard guards: already locked by us or anyone else
+                if (locked || window.__rimLockedOnce) return;
+                if (typeof window.getLockedHoopBox === 'function' && window.getLockedHoopBox()) {
+                    stopFallback(); return;
+                }
+                if (++ticks > maxTicks) { stopFallback(); return; }
+
+                try {
+                    const det = window.sendFrameToDetect;
+                    const ov = ui.overlay;
+                    if (!det || !ov) return;
+
+                    const fcan = e?.detail?.frameCanvas;
+                    const can = fcan || ov;
+
+                    const res = await det(can, ticks);
+                    const candidates = filterHoopLabels(res);
+                    if (!candidates.length) return;
+
+                    // score using the canvas we detected against
+                    const W = can.width || ov.width, H = can.height || ov.height;
+                    let best = null, bestScore = -Infinity;
+                    for (const o of candidates) {
+                        const s = scoreHoopCandidate(o, W, H);
+                        if (s > bestScore) { bestScore = s; best = o; }
+                    }
+                    if (!best) return;
+
+                    // convert to client coords against the overlay
+                    const [x1, y1, x2, y2] = best.box;
+                    const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
+                    const rect = ov.getBoundingClientRect();
+                    const sx = rect.width / ov.width, sy = rect.height / ov.height;
+                    const evt = { clientX: rect.left + cx * sx, clientY: rect.top + cy * sy };
+                    const rimY = y2 - (y2 - y1) * 0.10;
+
+                    // tell the tracker this is an auto detect pick
+                    window.handleHoopSelection?.(
+                        evt,
+                        ov,
+                        { objects: [{ label: best.label, box: best.box, confidence: best.confidence, rimY }] },
+                        { via: 'detect' }
+                    );
+
+                    // mark and broadcast once so everyone else shuts up
+                    window.__rimLockedOnce = true;
+                    window.dispatchEvent(new CustomEvent('hoop:locked', { detail: { via: 'fallback' } }));
+
+                    stopFallback();
+                } catch {
+                    // ignore tick errors; we’ll try again until maxTicks or someone else locks
+                }
+            }
+
+            window.addEventListener('analyzer:frame-done', onTick);
+
+            // Stop trying once the shot ends or is summarized
+            const hardStop = () => stopFallback();
+            window.addEventListener('shot:end', hardStop, { once: true });
+            window.addEventListener('shot:summary', hardStop, { once: true });
+        }
+
+
+
+
+
+        // Deterministic driver: seek -> settle -> draw -> emit, @ 1/fps video-time per tick
+        function makeFbfDriver(v, overlay, { wallMs = FBF_WALL_MS } = {}) {
+            // hard block native playback during FBF
+            v.autoplay = false; v.loop = false; v.muted = true;
+            v.play = () => Promise.resolve();
+
+            let abort = false;
+
+            // global loop token to prevent concurrent loops on the same element
+            const token = (v.__fbfToken = (v.__fbfToken || 0) + 1);
+
+            const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+            const rAF = () => new Promise(r => requestAnimationFrame(r));
+
+            // cache context once
+            const ctx = overlay.getContext('2d', { willReadFrequently: true });
+
+            async function loop() {
+            let t = 0;
+            const stepSec = getStepSec(v);        // ≈ 1/30
+            const margin  = stepSec + 0.0005;
+            let nextWall  = performance.now() + wallMs;
+
+            // NEW: logical frame counter to enforce 90 ticks
+            let frameIdx = 0;
+
+            while (!abort && v.__fbfToken === token) {
+                if (!Number.isFinite(v.duration)) break;
+
+                await seekVideoTime(v, t);
+                await rAF(); await rAF();
+
+                // draw
+                try {
+                const w = overlay.width, h = overlay.height;
+                if (w && h && ctx) { ctx.clearRect(0, 0, w, h); ctx.drawImage(v, 0, 0, w, h); }
+                } catch {}
+
+                const detail = { via: 'fbf', t, frameCanvas: overlay, frameIdx };
+                window.dispatchEvent(new CustomEvent('video:frame',        { detail }));
+                window.dispatchEvent(new CustomEvent('analyzer:frame-done',{ detail }));
+
+                // === NEW: end when we've processed exactly 90 frames ===
+                frameIdx += 1;
+                if (frameIdx >= FBF_KNOWN_TOTAL_FRAMES || t >= (v.duration - margin)) {
+                // freeze trail before we end, so nothing decays
+                freezeArcTrail();
+                window.dispatchEvent(new CustomEvent('shot:end', { detail: { via: 'fbf-90' } }));
+                break;
+                }
+
+                const now = performance.now();
+                let delay = nextWall - now;
+                if (delay < 0 || document.hidden) { nextWall = now + wallMs; delay = wallMs; }
+                if (delay > 0) await sleep(delay);
+                nextWall += wallMs;
+
+                t = Math.min(v.duration - 0.001, t + stepSec);
+            }
+            }
+
+
+            return {
+                start() { abort = false; try { v.pause(); } catch { }; loop(); },
+                stop() { abort = true; }
+            };
+        }
+
+
+
+
+        /* ---------- results pipeline (headless, deterministic FBF) ---------- */
+        async function renderResultsClip({ id, url, outBasename }) {
+            // 0) kill any previous run cleanly
+            try { window.removeEventListener('analyzer:frame-done', window.__onFrameOnce); } catch { }
+            try { window.__fbfDriver?.stop(); } catch { }
+        try { window.stopFrameAnalysis?.(); } catch { }
+        try { window.shotArc?.resetShotFSM?.(); } catch { }
+        window.__onFrameOnce = null;
+
+        // reset prox tail for this clip
+        window.__resetProxTail?.();
+        try { window.__lastSummaryEventSent = false; } catch {}
+        try { window.__lastSummaryEmitted = new WeakSet(); } catch {}
+
+        // 1) prep video element (no native playback allowed during FBF)
+        const v = ui.video;
+            v.srcObject = null;
+            v.removeAttribute('src');
+            Object.assign(v, { autoplay: false, loop: false, muted: true, controls: false });
+            v.play = () => Promise.resolve(); // hard-block native play during analysis
+            v.src = url;
+            v.preload = 'auto';
+
+            // 2) wait for metadata, then size canvases exactly once
+            await ensureVideoReady(v);
+            // enable guarded currentTime writes
+            (function guardSeeks(el) {
+                if (!el || el.__seekGuard) return;
+                const proto = (typeof HTMLMediaElement !== 'undefined') ? HTMLMediaElement.prototype : null;
+                if (!proto) return;
+                const desc = Object.getOwnPropertyDescriptor(proto, 'currentTime');
+                if (!desc || typeof desc.get !== 'function' || typeof desc.set !== 'function') return;
+                const SEEK_OK = Symbol('seek-ok');
+                const _get = desc.get;
+                const _set = desc.set;
+                el.__seekGuard = true;
+                el[SEEK_OK] = false;
+                Object.defineProperty(el, 'currentTime', {
+                    configurable: true, enumerable: true,
+                    get() { return _get.call(this); },
+                    set(t) {
+                        if (this[SEEK_OK]) return _set.call(this, t);
+                        // ignore illegal writes during FBF
+                    }
+                });
+                // our safe setter used by seekVideoTime
+                el.__setCurrentTimeSafely = (t) => { try { el[SEEK_OK] = true; _set.call(el, t); } finally { el[SEEK_OK] = false; } };
+            })(v);
+            syncSizesOnce?.();
+            // If you know the clip’s FPS, tag it now for precise step sizing
+            v.dataset.fps = "30";
+
+            try { v.pause(); } catch { }
+
+            // 3) park at t=0 and attempt autonomous rim lock
+            await seekVideoTime(v, 0);
+            try { await autoLockHoopInitial?.(); } catch { }
+
+            // 4) start analyzer (it will react to our FBF ticks)
+            if (typeof window.analyzeVideoFrameByFrame === 'function') {
+                window.analyzeVideoFrameByFrame(v, ui.overlay);
+            }
+
+            // 5) if not locked yet, keep trying briefly using analyzer frames
+            installAutolockFallback?.({ maxTicks: 240 });
+
+            // 6) recorder: start on first analyzed frame to avoid blank lead-in
+            let recHandle = null;
+            let started = false;
+
+            const onFrame = () => {
+                if (!started) {
+                    recHandle = startCompositeRecorder(ui.exportCan, { fps: 30, timesliceMs: 200 });
+                    started = true;
+                }
+                compositeFrame();
+            };
+            // keep a reference so we can unhook across runs
+            window.__onFrameOnce = onFrame;
+            window.addEventListener('analyzer:frame-done', onFrame);
+
+            // 7) finalize exactly once (freeze trail, force MAKE/MISS, clean up)
+            let finished = false;
+
+            // tiny helper: freeze best available trail so it can't decay post-end
+            function freezeArcTrail() {
+            const arc = (window.ballArc ||= {});
+            const live = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+            if (live && live.length) {
+                arc.refinedTrailFrozen = live.map(p => ({ ...p }));
+            }
+            }
+
+            function computeMakeMiss(arc, hoop) {
+            const trail = (arc?.refinedTrailFrozen?.length ? arc.refinedTrailFrozen
+                        : (arc?.refinedTrail?.length ? arc.refinedTrail : arc?.trail)) || [];
+            if (!trail.length || !hoop) return null;
+
+            const H  = hoop;
+            const hx = H.x ?? (H.cx - H.w/2);
+            const hy = H.rimY ?? (H.y ?? (H.cy - H.h/2));
+            const hw = H.w ?? 80, hh = H.h ?? 80;
+
+            const tubeW = Math.max(24, Math.round(hw * 0.45));
+            const tubeH = Math.max(40, Math.round(hh * 1.10));
+            const cx    = H.cx ?? (hx + hw/2);
+
+            const tx1 = Math.round(cx - tubeW/2), ty1 = Math.round(hy);
+            const tx2 = tx1 + tubeW,              ty2 = ty1 + tubeH;
+
+            const hits = trail.some(p => p.x >= tx1 && p.x <= tx2 && p.y >= ty1 && p.y <= ty2);
+            return hits ? true : false;
+            }
+
+            async function finishNow(via = 'unknown') {
+            if (finished) return; finished = true;
+
+            // unhook frame compositor first so nothing else draws
+            try { window.removeEventListener('analyzer:frame-done', onFrame); } catch {}
+            try { window.__fbfDriver?.stop(); } catch {}
+            try { window.shotArc?.refineBallTrajectory?.(); } catch {}
+
+            // restore seek guard if we installed it
+            try {
+                const proto = (typeof HTMLMediaElement !== 'undefined') ? HTMLMediaElement.prototype : null;
+                const d = proto ? Object.getOwnPropertyDescriptor(proto, 'currentTime') : null;
+                if (v.__seekGuard && d && d.configurable) {
+                delete v.currentTime; // restores prototype accessor
+                v.__seekGuard = false;
+                try { delete v.__setCurrentTimeSafely; } catch {}
+                }
+            } catch {}
+
+            // freeze trail BEFORE summarizing to stop any post-end decay
+            freezeArcTrail();
+
+            const hoop = getHoopInVideoSpace() || window.getLockedHoopBox?.();
+            const proxTail = Array.isArray(window.__proxTail) ? window.__proxTail : undefined;
+
+            const arc = window.ballArc || {};
+            const trail = Array.isArray(arc.refinedTrailFrozen) && arc.refinedTrailFrozen.length ? arc.refinedTrailFrozen
+                        : Array.isArray(arc.refinedTrail) && arc.refinedTrail.length ? arc.refinedTrail
+                        : Array.isArray(arc.trail) ? arc.trail
+                        : [];
+            const stateTrail = Array.isArray(window.ballState?.trail) ? window.ballState.trail.map((p, idx) => ({
+                x: p?.x,
+                y: p?.y,
+                frame: Number.isFinite(p?.frame) ? Number(p.frame) : idx
+            })) : [];
+            const shotTrail = trail.length ? trail : stateTrail;
+            if (!trail.length && shotTrail.length) {
+                try { arc.refinedTrailFrozen = cloneTrail(shotTrail); } catch {}
+            }
+            const lastTrailFrame = (() => {
+                if (!shotTrail.length) return Number(window.ballState?.trail?.at?.(-1)?.frame) || 0;
+                const last = shotTrail[shotTrail.length - 1];
+                if (Number.isFinite(last?.frame)) return Number(last.frame);
+                const bsLast = window.ballState?.trail?.at?.(-1);
+                if (Number.isFinite(bsLast?.frame)) return Number(bsLast.frame);
+                return shotTrail.length;
+            })();
+            const frameIndexForSummary = Math.max(lastTrailFrame || 0, FBF_KNOWN_TOTAL_FRAMES);
+
+            // try module summary, then force MAKE/MISS if needed
+            let summary = null;
+            let summaryFromShotLogger = null;
+            const logger = window.shotLogger || {};
+            try {
+                if (hoop && shotTrail.length) {
+                    const opts = { force: true, proxTail };
+                    if (typeof logger.results === 'function') {
+                        summary = logger.results(shotTrail, frameIndexForSummary, hoop, opts) || null;
+                    } else if (typeof logger.summarize === 'function') {
+                        summary = logger.summarize(shotTrail, frameIndexForSummary, hoop, opts) || null;
+                    }
+                    summaryFromShotLogger = summary ? { ...summary } : null;
+                    try {
+                        console.log('[arc-mm] shot_logger returned', { hasSummary: !!summary, fromResults: typeof logger.results === 'function' });
+                    } catch {}
+                }
+            } catch (err) {
+                console.warn('[arc-mm] shot_logger call failed', err);
+            }
+            if (!summary) summary = { made: null };
+
+            if (typeof summary.made !== 'boolean') {
+                const arcForDecision = shotTrail.length
+                    ? { refinedTrailFrozen: shotTrail, refinedTrail: shotTrail, trail: shotTrail }
+                    : window.ballArc;
+                summary.made = computeMakeMiss(arcForDecision, hoop);
+            }
+            summary.result = summary.made === true ? 'MAKE' : summary.made === false ? 'MISS' : null;
+
+            try {
+                const hoopDebug = hoop ? {
+                    x: hoop.x ?? null,
+                    y: hoop.y ?? null,
+                    w: hoop.w ?? null,
+                    h: hoop.h ?? null,
+                    cx: hoop.cx ?? null,
+                    cy: hoop.cy ?? null,
+                    rimY: hoop.rimY ?? null
+                } : null;
+                console.log('[arc-mm] shot summary', {
+                    shotId: id,
+                    via: summaryFromShotLogger ? 'shot_logger' : 'fallback',
+                    summaryFromShotLogger,
+                    appliedSummary: summary,
+                    trailPoints: shotTrail.length,
+                    lastTrailFrame,
+                    frameIndexForSummary,
+                    hoopROI: hoopDebug,
+                    proxTailFrames: Array.isArray(proxTail) ? proxTail.length : 0
+                });
+            } catch {}
+
+            window.__lastSummary = summary;
+
+            // render a few final HUD frames with the frozen trail
+            for (let i = 0; i < 8; i++) { compositeFrame(); await new Promise(r => requestAnimationFrame(r)); }
+
+            // if shot_logger didn't emit an event, broadcast once here
+            try {
+                if (!window.__lastSummaryEmitted) window.__lastSummaryEmitted = new WeakSet();
+            } catch {}
+            const needsSummaryEvent = (() => {
+                try {
+                    const lock = window.__lastSummaryEmitted;
+                    if (!lock || typeof lock.has !== 'function' || typeof lock.add !== 'function') return !window.__lastSummaryEventSent;
+                    if (summary && !lock.has(summary)) {
+                    lock.add(summary);
+                    return true;
+                    }
+                    return false;
+                } catch { return !window.__lastSummaryEventSent; }
+            })();
+            if (summary && needsSummaryEvent) {
+                try {
+                    window.__lastSummaryEventSent = true;
+                    window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
+                } catch {}
+            }
+
+            // stop recorder and attach preview + status
+            try {
+                const { blob, url, revoke } = await (recHandle?.stop?.() || Promise.resolve({}));
+                const row = document.querySelector(`[data-shot="${id}"]`);
+                if (url && row) {
+                const a  = document.createElement('a'); a.href = url;
+                a.download = `${outBasename || id || 'shot'}.results.webm`; a.textContent = 'Download';
+                const pv = document.createElement('video');
+                pv.src = url; pv.controls = true; pv.muted = true; pv.style.maxWidth = '360px'; pv.style.display = 'block';
+                row.appendChild(document.createTextNode(' · '));
+                row.appendChild(a); row.appendChild(document.createElement('br')); row.appendChild(pv);
+                pv.addEventListener('loadeddata', () => revoke?.(), { once: true });
+                }
+                const st = document.querySelector(`[data-shot="${id}"] .status`);
+                if (st) st.textContent = summary.made === true ? '✓ MAKE' : summary.made === false ? '✗ MISS' : '—';
+            } catch {}
+            }
+
+            // fire exactly once
+            window.addEventListener('shot:summary', () => finishNow('summary'), { once: true });
+            window.addEventListener('shot:end',     () => finishNow('end'),     { once: true });
+
+            // 8) run deterministic FBF driver (uses getStepSec(video) internally)
+            window.__fbfDriver = makeFbfDriver(v, ui.overlay, { wallMs: FBF_WALL_MS });
+            window.__fbfDriver.start();
+
+        }
+
+        /* ---------- boot UI (idempotent, sequential, sane) ---------- */
+        (function bootOnce() {
+            if (window.__bootWired) return; window.__bootWired = true;
+
+            // tiny helper: wait for this shot to complete (summary or end)
+            function waitForShotDone() {
+                return new Promise(resolve => {
+                    const done = (e) => { cleanup(); resolve(e?.type || 'shot:end'); };
+                    const cleanup = () => {
+                        window.removeEventListener('shot:summary', done);
+                        window.removeEventListener('shot:end', done);
+                    };
+                    window.addEventListener('shot:summary', done, { once: true });
+                    window.addEventListener('shot:end', done, { once: true });
+                });
+            }
+
+            function renderList() {
+                const shots = (typeof SHOTS !== 'undefined' && Array.isArray(SHOTS)) ? SHOTS : [];
+                ui.list.innerHTML = shots.map(s => `
+        <div class="shot" data-shot="${s.id}">
+            <button class="btn go" data-id="${s.id}">Process</button>
+            <span class="status">waiting…</span>
+            <span class="name">${s.name || s.url}</span>
+        </div>
+        `).join('');
+            }
+
+            async function handleOneButtonClick(b) {
+                if (!b || b.disabled) return;
+                b.disabled = true; b.textContent = 'Processing…';
+                const row = b.closest('.shot');
+                const id = b.dataset.id;
+                const shot = SHOTS.find(x => String(x.id) === String(id));
+                const st = row?.querySelector('.status');
+
+                try {
+                    st && (st.textContent = 'running…');
+                    // headless deterministic pipeline; returns once driver is started
+                    await renderResultsClip({ id: shot.id, url: shot.url, outBasename: `shot-${shot.id}` });
+                    // now wait for this shot to actually finish (summary or end)
+                    await waitForShotDone();
+                } catch (err) {
+                    console.error('[boot] clip failed:', err);
+                    st && (st.textContent = 'error');
+                } finally {
+                    // button stays disabled after run; status will be set by finishNow()
+                    b.textContent = 'Done';
+                }
+            }
+
+            // Wire per-row clicks once
+            ui.list.addEventListener('click', (e) => {
+                const b = e.target.closest('button.go');
+                if (!b || b.disabled) return;
+                handleOneButtonClick(b);
+            });
+
+            // Process all, sequentially, with progress
+            let processingAll = false;
+            ui.processAllBtn.onclick = async () => {
+                if (processingAll) return;
+                processingAll = true;
+                const orig = ui.processAllBtn.textContent;
+                ui.processAllBtn.disabled = true;
+
+                try {
+                    const buttons = [...ui.list.querySelectorAll('.shot button.go')];
+                    const total = buttons.length;
+                    for (let i = 0; i < total; i++) {
+                        const b = buttons[i];
+                        ui.processAllBtn.textContent = `Processing ${i + 1} / ${total}…`;
+                        if (!b.disabled) {
+                            await handleOneButtonClick(b);
+                        }
+                    }
+                    ui.processAllBtn.textContent = 'All done';
+                } catch (e) {
+                    console.error('[boot] process all failed:', e);
+                    ui.processAllBtn.textContent = 'Error – retry';
+                } finally {
+                    setTimeout(() => {
+                        ui.processAllBtn.disabled = false;
+                        ui.processAllBtn.textContent = orig;
+                        processingAll = false;
+                    }, 1000);
+                }
+            };
+
+            function boot() { renderList(); }
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', boot, { once: true });
+            } else {
+                boot();
+            }
+        })();
+
+    </script>
+
+
+    <script>
+        /* ---------- prox tail freezer (stable, resets per clip) ---------- */
+        (function wireProxTail() {
+            if (window.__proxTailWired) return; window.__proxTailWired = true;
+
+            window.__resetProxTail = function __resetProxTail() {
+                window.__proxTail = [];
+                ended = false;
+            };
+
+            let ended = false;
+            window.__resetProxTail();
+
+            const stop = () => { ended = true; };
+            window.addEventListener('shot:end', stop, { once: true });
+            window.addEventListener('shot:summary', stop, { once: true });
+
+            function onAnyFrame() {
+                if (ended) return;
+                try {
+                    const bs = window.ballState || {};
+                    const trail = Array.isArray(bs.trail) ? bs.trail : [];
+                    const last = trail.length ? trail[trail.length - 1] : null;
+                    if (!last || !Number.isFinite(last.frame)) return;
+
+                    const enter = Number(bs.proxEnterFrame);
+                    const exit = (bs.proxExitFrame == null) ? null : Number(bs.proxExitFrame);
+
+                    const inWindow = Number.isFinite(enter)
+                        && last.frame >= enter
+                        && (exit == null || last.frame <= exit + 2);
+
+                    if (!inWindow) return;
+
+                    const buf = (window.__proxTail ||= []);
+                    if (!buf.length || buf[buf.length - 1].frame !== last.frame) buf.push(last);
+                } catch { }
+            }
+
+            // listen to both, some paths emit only one
+            window.addEventListener('video:frame', onAnyFrame, { passive: true });
+            window.addEventListener('analyzer:frame-done', onAnyFrame, { passive: true });
+        })();
+
+    </script>
+
 </body>
+
 </html>

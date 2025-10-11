@@ -2783,7 +2783,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
     const rating = window.computeShotRating?.(shot.poseSnapshot, golden) ?? 50;
 
     let html = `
-      <strong>🤖 Coach Feedback</strong><br>
+      <strong> Doach Feedback</strong><br>
       <div style="font-size: 18px; margin-bottom: 6px;">
         🏅 Shot Rating: <strong style="color:${rating >= 80 ? 'lightgreen' : rating >= 50 ? 'orange' : 'red'}">${rating}/100</strong>
         ${golden ? `<span style="opacity:.7;">(vs ${golden.count} reference shots)</span>` : ``}

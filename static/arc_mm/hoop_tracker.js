@@ -4,7 +4,8 @@ export let stats = { hoopDropouts: 0, syntheticHoops: 0 };
 
 // Internal state (VIDEO‑pixel space)
 let selectedHoop = null;
-let lockedHoopBox = null;      // {x,y,w,h} — center form (mirrored to window.__lockedHoopBox)
+let lockedHoopBox = null;      // {x,y,w,h} - center form (mirrored to window.__lockedHoopBox)
+let lockedHoopObject = null;   // last matched hoop detection backing the lock
 let manualHoopLocked = false;
 let anchorLockActive = false;
 
@@ -60,6 +61,53 @@ function _sanitizeHoopCenter(cx, cy, w, h) {
     }
   } catch {}
   return { x: cx, y: cy, w: Math.max(1,w), h: Math.max(1,h) };
+}
+
+function _deriveBoxFromLock() {
+  if (!lockedHoopBox) return null;
+  const x1 = Math.round(lockedHoopBox.x - lockedHoopBox.w / 2);
+  const y1 = Math.round(lockedHoopBox.y - lockedHoopBox.h / 2);
+  const x2 = x1 + Math.round(lockedHoopBox.w);
+  const y2 = y1 + Math.round(lockedHoopBox.h);
+  return [x1, y1, x2, y2];
+}
+
+function _storeLockedHoopObject(candidate, frameIdx = 0, { syntheticFallback = false } = {}) {
+  if (!candidate) {
+    lockedHoopObject = null;
+    try { window.__lockedHoopObject = null; } catch {}
+    return;
+  }
+
+  let box = null;
+  if (Array.isArray(candidate.box) && candidate.box.length === 4) {
+    box = candidate.box.map(v => Math.round(Number(v)));
+  } else if (syntheticFallback) {
+    box = _deriveBoxFromLock();
+  }
+  if (!box || box.length !== 4 || box.some(v => !Number.isFinite(v))) return;
+
+  const cx = (box[0] + box[2]) / 2;
+  const cy = (box[1] + box[3]) / 2;
+  const w = box[2] - box[0];
+  const h = box[3] - box[1];
+  lockedHoopObject = {
+    label: 'hoop',
+    confidence: Number(candidate.confidence ?? candidate.score ?? 0.5),
+    synthetic: candidate.synthetic === true,
+    box,
+    cx,
+    cy,
+    w,
+    h,
+    lastFrame: Number.isFinite(frameIdx) ? frameIdx : ((window.lastDetectedFrame && window.lastDetectedFrame.__frameIdx) || null)
+  };
+  try { window.__lockedHoopObject = { ...lockedHoopObject, box: box.slice() }; } catch {}
+}
+
+function _storeLockedHoopFromBox(frameIdx = 0, reason = 'fallback') {
+  if (!lockedHoopBox) return;
+  _storeLockedHoopObject({ box: _deriveBoxFromLock(), confidence: 0.5, synthetic: true, reason }, frameIdx, { syntheticFallback: true });
 }
 
 /* ──────────────────────────────────────────────
@@ -144,23 +192,25 @@ export function handleHoopSelection(e, overlay, lastFrame, promptBar) {
   const hoops = objs.filter(o => o.label === 'hoop' && Array.isArray(o.box));
 
   let pick = { x: clickX, y: clickY, rw: DEFAULT_RIM_W, rh: DEFAULT_RIM_H };
+  let pickObj = null;
   if (hoops.length) {
     let best = null, bestD = Infinity;
     for (const o of hoops) {
       const [x1,y1,x2,y2] = o.box;
       const cx = (x1+x2)/2, cy = (y1+y2)/2;
       const d  = Math.hypot(cx - clickX, cy - clickY);
-      if (d < bestD) { bestD = d; best = { cx, cy, rw: x2-x1, rh: y2-y1 }; }
+      if (d < bestD) { bestD = d; best = { cx, cy, rw: x2-x1, rh: y2-y1, obj: o }; }
     }
     // Only snap to detected hoop if reasonably near the user's tap; else use the tap
     const MAX_SNAP_DIST = Math.max(120, (V.vw || overlay.width) * 0.08);
     if (best && bestD <= MAX_SNAP_DIST) {
       pick = { x: best.cx, y: best.cy, rw: best.rw, rh: best.rh };
+      pickObj = best.obj || null;
     }
   }
   try { console.log('[pick]', { click:{x:clickX,y:clickY}, snap: pick, viaDetect: (pick.x!==clickX||pick.y!==clickY) }); } catch {}
 
-  lockHoopToSelected(pick.x, pick.y);
+  lockHoopToSelected(pick.x, pick.y, pickObj);
   // grow toward observed size
   lockedHoopBox.w = Math.max(lockedHoopBox.w, pick.rw || DEFAULT_RIM_W);
   lockedHoopBox.h = Math.max(lockedHoopBox.h, pick.rh || DEFAULT_RIM_H);
@@ -193,18 +243,40 @@ export function handleHoopSelection(e, overlay, lastFrame, promptBar) {
 /* ──────────────────────────────────────────────
  *  LOCK + ACCESSORS
  * ────────────────────────────────────────────── */
-export function lockHoopToSelected(x, y) {
+export function lockHoopToSelected(x, y, detectedObj = null) {
   anchorLockActive = true;
   manualHoopLocked = true;
-  selectedHoop     = { x, y };
-  recentHoopMidpoints = [{ x, y }];
-  lockedHoopBox = _writeLock(x, y, DEFAULT_RIM_W, DEFAULT_RIM_H);
+
+  let centerX = x;
+  let centerY = y;
+  let rimW = DEFAULT_RIM_W;
+  let rimH = DEFAULT_RIM_H;
+  if (detectedObj && Array.isArray(detectedObj.box) && detectedObj.box.length === 4) {
+    const [x1, y1, x2, y2] = detectedObj.box.map(Number);
+    if ([x1, y1, x2, y2].every(Number.isFinite) && x2 > x1 && y2 > y1) {
+      centerX = (x1 + x2) / 2;
+      centerY = (y1 + y2) / 2;
+      rimW = Math.max(1, x2 - x1);
+      rimH = Math.max(1, y2 - y1);
+    }
+  }
+
+  selectedHoop     = { x: centerX, y: centerY };
+  recentHoopMidpoints = [{ x: centerX, y: centerY }];
+  lockedHoopBox = _writeLock(centerX, centerY, rimW, rimH);
   window.lockedHoopBox  = lockedHoopBox;
+  const frameIdx = (window.lastDetectedFrame && window.lastDetectedFrame.__frameIdx) || 0;
+  if (detectedObj && Array.isArray(detectedObj.box) && detectedObj.box.length === 4) {
+    _storeLockedHoopObject(detectedObj, frameIdx);
+  } else {
+    _storeLockedHoopFromBox(frameIdx, 'manual-lock');
+  }
   try { window.__hoopLockFreezeUntil = performance.now() + 1800; } catch {}
   window.__hoopAutoLocked = true;
   try { window.__hoopLockFlashUntil = performance.now() + 1500; } catch {}
+  try { window.__hoopConfirmed = true; } catch {}
   lastHoopSeenFrame = (window.lastDetectedFrame && window.lastDetectedFrame.__frameIdx) || 0;
-  console.log('🎯 Locked hoop to:', Math.round(x), Math.round(y));
+  console.log('dYZ_ Locked hoop to:', Math.round(centerX), Math.round(centerY));
 }
 
 export function getLockedHoopBox() {
@@ -222,6 +294,12 @@ export function getLockedHoopBox() {
   }
   return null;
 }
+export function getLockedHoopObject() {
+  if (!lockedHoopObject) return null;
+  const box = Array.isArray(lockedHoopObject.box) ? lockedHoopObject.box.slice() : null;
+  return { ...lockedHoopObject, box };
+}
+try { if (typeof window !== 'undefined') window.getLockedHoopObject = getLockedHoopObject; } catch {}
 export function isUserLocked()     { return manualHoopLocked; }
 
 export function getHoopRegionBox(padding = 40) {
@@ -280,10 +358,24 @@ export function stabilizeLockedHoop(objects = []) {
   // Adopt external lock if present (tests or shim)
   try {
     if (!lockedHoopBox) {
-      const ext = window.__lockedHoopBox;
-      if (ext && Number.isFinite(ext.cx) && Number.isFinite(ext.cy)) {
-        _writeLock(ext.cx, ext.cy, ext.w || DEFAULT_RIM_W, ext.h || DEFAULT_RIM_H);
-        anchorLockActive = true;
+      const extObj = window.__lockedHoopObject;
+      if (extObj && Array.isArray(extObj.box) && extObj.box.length === 4) {
+        const [x1,y1,x2,y2] = extObj.box.map(Number);
+        if ([x1,y1,x2,y2].every(Number.isFinite) && x2 > x1 && y2 > y1) {
+          const cx = (x1 + x2) / 2;
+          const cy = (y1 + y2) / 2;
+          _writeLock(cx, cy, x2 - x1, y2 - y1);
+          _storeLockedHoopObject(extObj, Number(extObj.lastFrame ?? 0));
+          anchorLockActive = true;
+        }
+      } else {
+        const ext = window.__lockedHoopBox;
+        if (ext && Number.isFinite(ext.cx) && Number.isFinite(ext.cy)) {
+          _writeLock(ext.cx, ext.cy, ext.w || DEFAULT_RIM_W, ext.h || DEFAULT_RIM_H);
+          const adoptFrame = (window.lastDetectedFrame && window.lastDetectedFrame.__frameIdx) || 0;
+          _storeLockedHoopFromBox(adoptFrame, 'external-adopt');
+          anchorLockActive = true;
+        }
       }
     }
   } catch {}
@@ -294,7 +386,7 @@ export function stabilizeLockedHoop(objects = []) {
 
   // Live sessions: normally hold manual lock stable; optionally allow re-lock on drift
   try {
-    const allowRelock = (window.RELOCK_HOOP_ON_DRIFT === true);
+    const allowRelock = (window.RELOCK_HOOP_ON_DRIFT !== false);
     if (window.__SESSION_ACTIVE && !allowRelock) {
       _ensureHoopPresent(objects);
       lastHoopSeenFrame = frameIdx;
@@ -316,6 +408,7 @@ export function stabilizeLockedHoop(objects = []) {
   // 1) Freeze during ball–rim interaction (common ONNX flicker moment)
   if (_ballInsideHoopBand(objects, lockedHoopBox)) {
     _ensureHoopPresent(objects);           // keep a hoop object for overlays/logic
+    _storeLockedHoopFromBox(frameIdx, 'ball-band');
     lastHoopSeenFrame = Math.max(lastHoopSeenFrame, frameIdx);
     return;
   }
@@ -337,25 +430,26 @@ export function stabilizeLockedHoop(objects = []) {
   if (!hoops.length) {
     if (frameIdx - lastHoopSeenFrame <= KEEP_FRAMES) {
       _ensureHoopPresent(objects);
+      _storeLockedHoopFromBox(frameIdx, 'stale-hoop');
       return;
     }
     // still no hoop beyond KEEP_FRAMES: just keep current lock & synth for continuity
     _ensureHoopPresent(objects);
+    _storeLockedHoopFromBox(frameIdx, 'no-hoop');
     return;
   }
 
   // 4) Choose nearest to current lock; allow hard recenter if way off
   const cur = lockedHoopBox;
-  let best = null, bestD = Infinity;
+  let best = null, bestD = Infinity, bestObj = null;
   for (const o of hoops) {
     const [x1,y1,x2,y2] = o.box;
     const cx = (x1+x2)/2, cy = (y1+y2)/2;
     const d  = Math.hypot(cx - cur.x, cy - cur.y);
-    if (d < bestD) { bestD = d; best = { x: cx, y: cy, w: x2-x1, h: y2-y1 }; }
+    if (d < bestD) { bestD = d; best = { x: cx, y: cy, w: x2-x1, h: y2-y1 }; bestObj = o; }
   }
-  if (!best) return;
+  if (!best) { _storeLockedHoopFromBox(frameIdx, 'no-candidate'); return; }
   const HARD_RECENTER_DIST = 300;
-  if (bestD > ACCEPT_DIST_PX && bestD <= HARD_RECENTER_DIST) return;
   if (bestD > HARD_RECENTER_DIST) {
     lockedHoopBox.x = Math.round(best.x);
     lockedHoopBox.y = Math.round(best.y);
@@ -363,6 +457,8 @@ export function stabilizeLockedHoop(objects = []) {
     _ensureHoopPresent(objects);
     lastHoopSeenFrame = frameIdx;
     _writeLock(lockedHoopBox.x, lockedHoopBox.y, lockedHoopBox.w, lockedHoopBox.h);
+    if (bestObj) _storeLockedHoopObject(bestObj, frameIdx);
+    else _storeLockedHoopFromBox(frameIdx, 'hard-recenter');
     return;
   }
 
@@ -384,6 +480,8 @@ export function stabilizeLockedHoop(objects = []) {
 
   // make sure clients still see a hoop object this frame
   _ensureHoopPresent(objects);
+  if (bestObj) _storeLockedHoopObject(bestObj, frameIdx);
+  else _storeLockedHoopFromBox(frameIdx, 'smooth');
   lastHoopSeenFrame = frameIdx;
   try { if (lockedHoopBox) window.__lockedHoopBox = { cx: lockedHoopBox.x, cy: lockedHoopBox.y, w: lockedHoopBox.w, h: lockedHoopBox.h }; } catch {}
 }
@@ -670,9 +768,11 @@ export function autoDetectHoop(objects, overlay, force = false) {
     const cx = (x1 + x2) / 2;
     const cy = (y1 + y2) / 2;
     const dist = Math.hypot(cx - overlay.width / 2, cy - overlay.height / 2);
-    return dist < closest.dist ? { x: cx, y: cy, dist } : closest;
-  }, { x: 0, y: 0, dist: Infinity });
+    return dist < closest.dist ? { x: cx, y: cy, dist, obj } : closest;
+  }, { x: 0, y: 0, dist: Infinity, obj: null });
 
-  lockHoopToSelected(best.x, best.y);
+  lockHoopToSelected(best.x, best.y, best.obj || null);
   console.log('🎯 Auto-selected hoop center:', Math.round(best.x), Math.round(best.y));
 }
+
+
