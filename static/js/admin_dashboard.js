@@ -56,6 +56,102 @@
     return `${value.toFixed(digits)} ${units[unit]}`;
   };
 
+  const ARCMM_STATUS_LABELS = {
+    complete: 'Complete',
+    processing: 'Processing',
+    queued: 'Queued',
+    waiting_clip: 'Waiting Clip',
+    missing_clip: 'Missing Clip',
+    error: 'Error',
+    skipped: 'Skipped',
+  };
+
+  const arcmmClassForStatus = (status) => {
+    switch (status) {
+      case 'complete': return 'ok';
+      case 'processing':
+      case 'queued':
+      case 'waiting_clip':
+        return 'pending';
+      case 'missing_clip':
+      case 'error':
+        return 'bad';
+      case 'skipped':
+        return 'muted';
+      default:
+        return 'pending';
+    }
+  };
+
+  const renderArcmmStatusCell = (arcmmRaw, meta = {}, clip = {}) => {
+    const arcmm = (arcmmRaw && typeof arcmmRaw === 'object') ? arcmmRaw : {};
+    let status = typeof arcmm.status === 'string' ? arcmm.status.toLowerCase() : '';
+    if (!status) {
+      if (clip?.processedUrl || arcmm?.processed_clip) status = 'complete';
+      else if (arcmm?.summary || meta?.arcmmSummary) status = 'complete';
+    }
+    const label = ARCMM_STATUS_LABELS[status] || (status ? status.replace(/_/g, ' ') : 'Pending');
+    const pillClass = `arcmm-pill ${arcmmClassForStatus(status)}`;
+
+    const sections = [];
+    sections.push(`<div class="arcmm-line arcmm-status-line"><span class="${pillClass}">${escapeHtml(label)}</span></div>`);
+
+    const summary =
+      (arcmm.summary && typeof arcmm.summary === 'object' ? arcmm.summary : null)
+      || (clip.summary && typeof clip.summary === 'object' ? clip.summary : null)
+      || (meta.arcmmSummary && typeof meta.arcmmSummary === 'object' ? meta.arcmmSummary : null);
+
+    const madeVal = summary && typeof summary.made === 'boolean'
+      ? summary.made
+      : (typeof arcmm.made === 'boolean' ? arcmm.made : (typeof meta.result === 'boolean' ? meta.result : null));
+
+    const metricsParts = [];
+    if (typeof madeVal === 'boolean') metricsParts.push(madeVal ? 'MAKE' : 'MISS');
+
+    const releaseAngle = summary?.releaseAngle ?? arcmm.releaseAngle ?? meta?.releaseAngle;
+    if (Number.isFinite(releaseAngle)) metricsParts.push(`Release ${Math.round(releaseAngle)} deg`);
+
+    const entryAngle = summary?.entryAngle ?? arcmm.entryAngle ?? meta?.entryAngle;
+    if (Number.isFinite(entryAngle)) metricsParts.push(`Entry ${Math.round(entryAngle)} deg`);
+
+    const arcHeight = summary?.arcHeight ?? arcmm.arcHeight ?? meta?.arcHeight;
+    if (Number.isFinite(arcHeight)) metricsParts.push(`Arc ${Math.round(arcHeight)} in`);
+
+    if (summary?.apexHeight != null && Number.isFinite(summary.apexHeight)) {
+      metricsParts.push(`Apex ${Math.round(summary.apexHeight)} in`);
+    }
+
+    if (metricsParts.length) {
+      sections.push(`<div class="arcmm-line arcmm-metrics">${metricsParts.map((v) => escapeHtml(v)).join(' | ')}</div>`);
+    }
+
+    const processedUrl = clip?.processedUrl || arcmm.processed_clip;
+    if (processedUrl) {
+      sections.push(`<div class="arcmm-line"><a class="arcmm-overlay-link" href="${processedUrl}" target="_blank" rel="noopener">Processed overlay</a></div>`);
+    }
+
+    const messageRaw = arcmm.message || meta.arcmmMessage || clip.arcmmMessage;
+    if (messageRaw) {
+      const lines = String(messageRaw).split(/\r?\n/).map((ln) => ln.trim()).filter(Boolean);
+      const snippet = lines.slice(0, 2).join(' ');
+      const text = snippet || String(messageRaw).trim();
+      const truncated = text.length > 220 ? `${text.slice(0, 217)}…` : text;
+      sections.push(`<div class="arcmm-line arcmm-message">${escapeHtml(truncated)}</div>`);
+    }
+
+    const updated = arcmm.updated_at;
+    const updatedDisplay = updated ? fmtTime(updated) : null;
+    if (updatedDisplay && updatedDisplay !== '--') {
+      sections.push(`<div class="arcmm-line arcmm-updated">Updated ${escapeHtml(updatedDisplay)}</div>`);
+    }
+
+    if (sections.length === 0) {
+      return '<div class="arcmm-status muted">Awaiting processing</div>';
+    }
+
+    return `<div class="arcmm-status">${sections.join('')}</div>`;
+  };
+
   const parseTimestampValue = (value) => {
     if (value === null || value === undefined) return 0;
     if (typeof value === 'number') {
@@ -304,6 +400,18 @@
         if (!entry.pose && shot?.pose) entry.pose = shot.pose;
         if (!entry.poseMetrics && shot?.poseMetrics) entry.poseMetrics = shot.poseMetrics;
         if (!entry.poseSource && shot?.poseSource) entry.poseSource = shot.poseSource;
+        if (shot?.arcmm && typeof shot.arcmm === 'object') {
+          entry.arcmm = { ...(entry.arcmm || {}), ...shot.arcmm };
+          if (shot.arcmm.summary && typeof shot.arcmm.summary === 'object') {
+            entry.arcmmSummary = shot.arcmm.summary;
+            if (typeof shot.arcmm.summary.made === 'boolean') entry.result = shot.arcmm.summary.made;
+            if (Number.isFinite(shot.arcmm.summary.arcHeight) && entry.arcHeight == null) entry.arcHeight = shot.arcmm.summary.arcHeight;
+            if (Number.isFinite(shot.arcmm.summary.entryAngle) && entry.entryAngle == null) entry.entryAngle = shot.arcmm.summary.entryAngle;
+            if (Number.isFinite(shot.arcmm.summary.releaseAngle) && entry.releaseAngle == null) entry.releaseAngle = shot.arcmm.summary.releaseAngle;
+          }
+          if (shot.arcmm.status && !entry.arcmmStatus) entry.arcmmStatus = shot.arcmm.status;
+          if (shot.arcmm.message && !entry.arcmmMessage) entry.arcmmMessage = shot.arcmm.message;
+        }
       });
     }
 
@@ -389,7 +497,27 @@
       const shotIdx = deriveShotIdx(clip, index + 1);
       const meta = shotMeta.get(shotIdx) || {};
 
-      const resultValue = meta.result ?? clip.result;
+      const arcmmData = {
+        ...(meta.arcmm || {}),
+        ...(clip.arcmm && typeof clip.arcmm === 'object' ? clip.arcmm : {}),
+      };
+      if (!arcmmData.summary && meta.arcmmSummary && typeof meta.arcmmSummary === 'object') {
+        arcmmData.summary = meta.arcmmSummary;
+      }
+      if (!arcmmData.summary && clip.summary && typeof clip.summary === 'object') {
+        arcmmData.summary = clip.summary;
+      }
+      if (!arcmmData.processed_clip && clip.processedUrl) {
+        arcmmData.processed_clip = clip.processedUrl;
+      }
+
+      let resultValue = meta.result ?? clip.result;
+      if (arcmmData.summary && typeof arcmmData.summary.made === 'boolean') {
+        resultValue = arcmmData.summary.made;
+      } else if (typeof arcmmData.made === 'boolean') {
+        resultValue = arcmmData.made;
+      }
+
       shotResults.push({ idx: shotIdx, result: resultValue });
       const pillHtml = resultPill(resultValue);
 
@@ -419,11 +547,14 @@
         ? `<a class="clip-link" href="${linkUrl}" target="_blank" rel="noopener">${escapeHtml(linkText)}</a>`
         : `<span class="clip-link clip-link-disabled">${escapeHtml(linkText)}</span>`;
 
+      const arcmmCell = renderArcmmStatusCell(arcmmData, meta, clip);
+
       shotRows.push(`
         <tr>
           <td>${shotIdx}</td>
           <td>${pillHtml}</td>
           <td>${linkHtml}</td>
+          <td class="arcmm-cell">${arcmmCell}</td>
           <td>${poseCell}</td>
           <td>${saved}</td>
           <td>${size}</td>
@@ -433,7 +564,7 @@
     shotsWrap.className = '';
     shotsWrap.innerHTML = `
       <table class='shots-table'>
-        <thead><tr><th>#</th><th>Result</th><th>Clip</th><th>Pose Highlights</th><th>Saved</th><th>Size</th></tr></thead>
+        <thead><tr><th>#</th><th>Result</th><th>Clip</th><th>ArcMM</th><th>Pose Highlights</th><th>Saved</th><th>Size</th></tr></thead>
         <tbody>${shotRows.join('')}</tbody>
       </table>`;
 

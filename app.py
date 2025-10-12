@@ -7,6 +7,7 @@ import numpy as np
 import requests
 import cv2
 import os
+import shlex
 try:
     import torch  # type: ignore
     from ultralytics.nn.tasks import DetectionModel  # type: ignore
@@ -33,6 +34,7 @@ import wave
 from datetime import date, datetime, timezone
 from collections import defaultdict
 import threading
+from queue import Queue
 from arcmm_api import arcmm_api
 try:
     from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey
@@ -291,6 +293,247 @@ def _write_session(sid: str, data: dict):
     p = _session_json_path(sid)
     with open(p, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+
+# ---------------------- ArcMM Auto-processing ----------------------
+ARCMM_AUTO_PROCESS = os.getenv('ARCMM_AUTO_PROCESS', '1').lower() not in ('0', 'false', 'no', 'off')
+ARCMM_RUNNER_CMD = os.getenv('ARCMM_RUNNER_CMD', '').strip()
+ARCMM_MAX_ATTEMPTS = int(os.getenv('ARCMM_MAX_ATTEMPTS', '6'))
+ARCMM_RETRY_DELAY = float(os.getenv('ARCMM_RETRY_DELAY', '1.5'))
+ARCMM_RUNNER_TIMEOUT = float(os.getenv('ARCMM_RUNNER_TIMEOUT', '120'))
+ARCMM_PROCESSED_DIRNAME = 'processed'
+
+_ARCMM_QUEUE: "Queue[dict]" = Queue()
+_ARCMM_JOB_KEYS: set[str] = set()
+_ARCMM_LOCK = threading.Lock()
+_ARCMM_WORKER_THREAD: threading.Thread | None = None
+
+
+def _arcmm_processed_dir(sid: str) -> Path:
+    return Path(_session_path(sid)) / ARCMM_PROCESSED_DIRNAME
+
+
+def _arcmm_clip_candidates(sid: str, idx: int) -> Path | None:
+    clips_dir = Path(_session_path(sid)) / 'clips'
+    if not clips_dir.exists():
+        return None
+    names = [
+        f'shot-{idx}.webm',
+        f'shot_{idx}.webm',
+        f'shot-{idx}.mp4',
+        f'shot_{idx}.mp4',
+    ]
+    for name in names:
+        p = clips_dir / name
+        if p.exists():
+            return p
+    for pattern in (f'shot-{idx}.*', f'shot_{idx}.*'):
+        for p in clips_dir.glob(pattern):
+            if p.is_file():
+                return p
+    return None
+
+
+def _arcmm_update_shot_status(
+    sid: str,
+    idx: int,
+    *,
+    status: str,
+    message: str | None = None,
+    summary: dict | None = None,
+    clip_url: str | None = None,
+) -> None:
+    db = getattr(app, 'db', None)
+    if not db or 'ShotRow' not in db:
+        return
+    from sqlalchemy import select  # local import to keep module import light
+
+    with db['Session']() as s:
+        ShotRow = db['ShotRow']
+        row = s.execute(select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)).scalar_one_or_none()
+        if not row:
+            return
+
+        payload = dict(row.data or {})
+        arcmm = dict(payload.get('arcmm') or {})
+        arcmm['status'] = status
+        arcmm['updated_at'] = datetime.utcnow().isoformat(timespec='seconds')
+        if message is not None:
+            arcmm['message'] = message
+        if clip_url:
+            arcmm['processed_clip'] = clip_url
+        if summary is not None:
+            arcmm['summary'] = summary
+            try:
+                if 'entryAngle' in summary and summary['entryAngle'] is not None:
+                    row.entry_angle = float(summary['entryAngle'])
+                if 'releaseAngle' in summary and summary['releaseAngle'] is not None:
+                    row.release_angle = float(summary['releaseAngle'])
+                if 'arcHeight' in summary and summary['arcHeight'] is not None:
+                    row.arc_height = float(summary['arcHeight'])
+                if 'made' in summary and summary['made'] is not None:
+                    row.made = bool(summary['made'])
+                if 'missReason' in summary:
+                    row.miss_reason = summary.get('missReason')
+            except Exception as exc:
+                _trace('arcmm: summary->column sync failed', exc)
+
+        payload['arcmm'] = arcmm
+        row.data = payload
+        try:
+            s.commit()
+        except Exception:
+            s.rollback()
+            raise
+
+    try:
+        if summary is not None:
+            sess = _read_session(sid)
+            if sess and isinstance(sess.get('shots'), list):
+                updated = False
+                for shot in sess['shots']:
+                    try:
+                        if int(shot.get('idx')) == int(idx):
+                            shot.setdefault('arcmm', {})
+                            shot['arcmm'].update(arcmm)
+                            # mirror key metrics
+                            if summary.get('made') is not None:
+                                shot['made'] = bool(summary['made'])
+                            if 'entryAngle' in summary:
+                                shot['entryAngle'] = summary['entryAngle']
+                            if 'releaseAngle' in summary:
+                                shot['releaseAngle'] = summary['releaseAngle']
+                            if 'arcHeight' in summary:
+                                shot['arcHeight'] = summary['arcHeight']
+                            updated = True
+                            break
+                    except Exception:
+                        continue
+                if updated:
+                    _write_session(sid, sess)
+    except Exception as exc:
+        _trace('arcmm: session sync failed', exc)
+
+
+def _arcmm_requeue(job: dict, delay: float) -> None:
+    time.sleep(delay)
+    job['attempt'] = int(job.get('attempt', 0)) + 1
+    key = f"{job['sid']}:{job['idx']}"
+    with _ARCMM_LOCK:
+        _ARCMM_JOB_KEYS.add(key)
+    _ARCMM_QUEUE.put(job)
+
+
+def _run_arcmm_runner(sid: str, idx: int, clip_path: Path) -> dict:
+    if not ARCMM_RUNNER_CMD:
+        raise RuntimeError('ARCMM_RUNNER_CMD is not configured')
+    processed_dir = _arcmm_processed_dir(sid)
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    cmd = shlex.split(ARCMM_RUNNER_CMD)
+    cmd += [str(clip_path), str(processed_dir), str(idx)]
+    _trace('[arcmm] runner', cmd)
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=ARCMM_RUNNER_TIMEOUT)
+    if result.returncode != 0:
+        stderr = (result.stderr or '').strip()
+        stdout = (result.stdout or '').strip()
+        raise RuntimeError(stderr or stdout or f'runner exit {result.returncode}')
+    summary_path = processed_dir / f'shot-{idx}.summary.json'
+    summary = None
+    if summary_path.exists():
+        summary = json.loads(summary_path.read_text(encoding='utf-8'))
+    clip_url = None
+    for ext in ('.results.webm', '.results.mp4'):
+        processed_file = processed_dir / f'shot-{idx}{ext}'
+        if processed_file.exists():
+            clip_url = f'/sessions/{sid}/{ARCMM_PROCESSED_DIRNAME}/{processed_file.name}'
+            break
+    stdout_lines = (result.stdout or '').splitlines()
+    message = None
+    if stdout_lines:
+        flat = [ln.strip() for ln in stdout_lines if ln.strip()]
+        non_json = [ln for ln in flat if not (ln.startswith('{') and ln.endswith('}'))]
+        if non_json:
+            message = non_json[-1]
+    if not message:
+        message = 'ArcMM runner completed'
+    if len(message) > 240:
+        message = message[:237] + '…'
+    return {'summary': summary, 'clip_url': clip_url, 'message': message}
+
+
+def _arcmm_worker_loop() -> None:
+    while True:
+        job = _ARCMM_QUEUE.get()
+        sid = job['sid']
+        idx = int(job['idx'])
+        attempt = int(job.get('attempt', 0))
+        key = f"{sid}:{idx}"
+        requeued = False
+        try:
+            clip = _arcmm_clip_candidates(sid, idx)
+            if clip is None:
+                if attempt < ARCMM_MAX_ATTEMPTS:
+                    _arcmm_update_shot_status(sid, idx, status='waiting_clip', message='clip not found; retrying')
+                    _arcmm_requeue(job, ARCMM_RETRY_DELAY)
+                    requeued = True
+                else:
+                    _arcmm_update_shot_status(sid, idx, status='missing_clip', message='clip not found')
+                continue
+            try:
+                _arcmm_update_shot_status(sid, idx, status='processing')
+                runner_out = _run_arcmm_runner(sid, idx, clip)
+                summary = runner_out.get('summary')
+                clip_url = runner_out.get('clip_url')
+                if summary is None:
+                    _arcmm_update_shot_status(sid, idx, status='error', message='runner did not produce summary')
+                else:
+                    _arcmm_update_shot_status(
+                        sid,
+                        idx,
+                        status='complete',
+                        summary=summary,
+                        clip_url=clip_url,
+                        message=runner_out.get('message'),
+                    )
+            except Exception as exc:
+                _arcmm_update_shot_status(sid, idx, status='error', message=str(exc))
+        except Exception as exc:
+            _trace('arcmm worker error', exc)
+            try:
+                _arcmm_update_shot_status(sid, idx, status='error', message=str(exc))
+            except Exception:
+                pass
+        finally:
+            if not requeued:
+                with _ARCMM_LOCK:
+                    _ARCMM_JOB_KEYS.discard(key)
+            _ARCMM_QUEUE.task_done()
+
+
+def _ensure_arcmm_worker_started() -> None:
+    global _ARCMM_WORKER_THREAD
+    if not ARCMM_AUTO_PROCESS:
+        return
+    if _ARCMM_WORKER_THREAD and _ARCMM_WORKER_THREAD.is_alive():
+        return
+    _ARCMM_WORKER_THREAD = threading.Thread(target=_arcmm_worker_loop, name='arcmm-worker', daemon=True)
+    _ARCMM_WORKER_THREAD.start()
+
+
+def _arcmm_queue_shot(sid: str, idx: int) -> None:
+    if not ARCMM_AUTO_PROCESS:
+        return
+    if not ARCMM_RUNNER_CMD:
+        _arcmm_update_shot_status(sid, int(idx), status='skipped', message='ARCMM_RUNNER_CMD not configured')
+        return
+    key = f"{sid}:{int(idx)}"
+    with _ARCMM_LOCK:
+        if key in _ARCMM_JOB_KEYS:
+            return
+        _ARCMM_JOB_KEYS.add(key)
+    _ensure_arcmm_worker_started()
+    job = {'sid': sid, 'idx': int(idx), 'attempt': 0, 'enqueued_at': time.time()}
+    _ARCMM_QUEUE.put(job)
+    _arcmm_update_shot_status(sid, int(idx), status='queued', message='awaiting processing')
 
 def _new_session_id():
     return datetime.utcnow().strftime('%Y%m%d_%H%M%S_%f')
@@ -723,6 +966,8 @@ def _try_init_db():
 
 _try_init_db()
 
+_ensure_arcmm_worker_started()
+
 def _db_add_session(sid, started_at):
     try:
         db = getattr(app, 'db', None)
@@ -762,6 +1007,7 @@ def _db_add_shot(sid, idx, payload):
             ShotRow = db['ShotRow']
             # Upsert by (sid, idx)
             existing = s.execute(select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)).scalar_one_or_none()
+            queue_idx = None
             if existing is not None:
                 m_in = payload.get('made')
                 if m_in is not None:
@@ -772,6 +1018,7 @@ def _db_add_shot(sid, idx, payload):
                 existing.miss_reason = payload.get('missReason')
                 existing.data = payload
                 row = existing
+                queue_idx = int(existing.idx)
             else:
                 m_in = payload.get('made')
                 made_val = (None if m_in is None else bool(m_in))
@@ -786,6 +1033,7 @@ def _db_add_shot(sid, idx, payload):
                     data=payload,
                 )
                 s.add(row)
+                queue_idx = int(idx)
 
             # Ensure a session row exists, create if missing (idempotent)
             try:
@@ -821,6 +1069,11 @@ def _db_add_shot(sid, idx, payload):
             # Commit regardless of whether totals were updated
             s.commit()
             _trace('db:upsert:shot', {'sid': sid, 'idx': idx, 'made': row.made, 'arcHeight': row.arc_height, 'entryAngle': row.entry_angle, 'releaseAngle': row.release_angle})
+            if queue_idx is not None:
+                try:
+                    _arcmm_queue_shot(sid, queue_idx)
+                except Exception as q_exc:
+                    _trace('arcmm queue error:', q_exc)
     except Exception as e:
         _trace('db_add_shot:', e)
 
@@ -872,6 +1125,33 @@ def _db_backfill_session_shots(sid: str):
                     s.rollback()
     except Exception as e:
         print('db_backfill_session_shots:', e)
+
+
+@app.post('/api/arcmm/requeue')
+def api_arcmm_requeue():
+    body = request.get_json(silent=True) or {}
+    sid = (body.get('sid') or '').strip()
+    if not sid:
+        return jsonify({'ok': False, 'error': 'sid is required'}), 400
+    try:
+        idx = body.get('idx')
+        queued: list[int] = []
+        if idx is None:
+            sess = _read_session(sid) or {}
+            for shot in sess.get('shots') or []:
+                try:
+                    shot_idx = int(shot.get('idx'))
+                except Exception:
+                    continue
+                _arcmm_queue_shot(sid, shot_idx)
+                queued.append(shot_idx)
+        else:
+            shot_idx = int(idx)
+            _arcmm_queue_shot(sid, shot_idx)
+            queued.append(shot_idx)
+        return jsonify({'ok': True, 'queued': queued})
+    except Exception as exc:
+        return jsonify({'ok': False, 'error': str(exc)}), 500
 
 def _db_finalize_session(sid):
     try:
@@ -1874,6 +2154,46 @@ def admin_session_clips(sid):
     clips_dir = Path(_session_path(sid)) / 'clips'
     if not clips_dir.exists():
         return jsonify({'sid': sid, 'count': 0, 'clips': []})
+
+    arcmm_meta: dict[int, dict] = {}
+    try:
+        db = _db_get()
+        if db:
+            from sqlalchemy import select
+            with db['Session']() as s:
+                ShotRow = db['ShotRow']
+                rows = s.execute(select(ShotRow).where(ShotRow.sid == sid)).scalars().all()
+                for row in rows:
+                    try:
+                        idx = int(row.idx)
+                    except Exception:
+                        continue
+                    data = row.data if isinstance(row.data, dict) else {}
+                    arcmm = data.get('arcmm') if isinstance(data, dict) else None
+                    meta = {}
+                    if isinstance(arcmm, dict):
+                        meta = {
+                            'status': arcmm.get('status'),
+                            'message': arcmm.get('message'),
+                            'updated_at': arcmm.get('updated_at'),
+                            'processed_clip': arcmm.get('processed_clip'),
+                            'summary': arcmm.get('summary'),
+                        }
+                    else:
+                        meta = {}
+                    # fall back to DB columns when summary missing
+                    if getattr(row, 'made', None) is not None:
+                        meta.setdefault('made', bool(row.made))
+                    if getattr(row, 'entry_angle', None) is not None:
+                        meta.setdefault('entryAngle', row.entry_angle)
+                    if getattr(row, 'release_angle', None) is not None:
+                        meta.setdefault('releaseAngle', row.release_angle)
+                    if getattr(row, 'arc_height', None) is not None:
+                        meta.setdefault('arcHeight', row.arc_height)
+                    arcmm_meta[idx] = meta
+    except Exception as exc:
+        _trace('admin_session_clips: arcmm meta error', {'sid': sid, 'error': str(exc)})
+
     items = []
     try:
         for clip_path in clips_dir.glob('*'):
@@ -1891,6 +2211,24 @@ def admin_session_clips(sid):
             except Exception:
                 info['size'] = None
                 info['created'] = None
+            idx = None
+            match = re.search(r'shot[-_]?(\d+)', clip_path.name, re.IGNORECASE)
+            if match:
+                try:
+                    idx = int(match.group(1))
+                    info['shotIdx'] = idx
+                except Exception:
+                    idx = None
+            if idx is not None:
+                arcmm = arcmm_meta.get(idx) or arcmm_meta.get(idx if idx >= 0 else idx + 1)
+                if arcmm:
+                    info['arcmm'] = arcmm
+                    processed_clip = arcmm.get('processed_clip')
+                    if processed_clip:
+                        info['processedUrl'] = processed_clip
+                    summary = arcmm.get('summary')
+                    if isinstance(summary, dict):
+                        info['summary'] = summary
             items.append(info)
     except Exception as exc:
         _trace('admin_session_clips error', {'sid': sid, 'error': str(exc)})
@@ -3808,4 +4146,5 @@ if __name__ == '__main__':
 
 # WSGI entrypoint for PythonAnywhere
 application = app
+
 

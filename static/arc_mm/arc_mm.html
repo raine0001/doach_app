@@ -205,16 +205,21 @@
 
 
         /* ---------- demo list (replace with server later) ---------- */
-        const sid = "20250930_204140_927675";
-        const base = `/static/arc_mm/sessions/${sid}/clips`;
-        const SHOTS = Array.from({ length: 10 }, (_, i) => {
+        const g = window;
+        const demoSid = "20250930_204140_927675";
+        const demoBase = `/static/arc_mm/sessions/${demoSid}/clips`;
+        const demoShots = Array.from({ length: 10 }, (_, i) => {
             const n = i + 1;
-            return { id: `${sid}-${n}`, name: `shot-${n}.webm`, url: `${base}/shot-${n}.webm` };
+            return { id: `${demoSid}-${n}`, name: `shot-${n}.webm`, url: `${demoBase}/shot-${n}.webm` };
         });
+        const SHOTS = (() => {
+            const override = (g.arcmmRunner && Array.isArray(g.arcmmRunner.shots)) ? g.arcmmRunner.shots
+                : (Array.isArray(g.SHOTS) ? g.SHOTS : null);
+            if (override && override.length) return override;
+            return demoShots;
+        })();
 
         /* ---------- bridge to window (idempotent, no clobbering) ---------- */
-        const g = window;
-
         // Helper: pick first defined function from a list
         const pickFn = (...fns) => fns.find(fn => typeof fn === 'function') || null;
 
@@ -978,6 +983,9 @@
         try { window.shotArc?.resetShotFSM?.(); } catch { }
         window.__onFrameOnce = null;
 
+        const runnerCfg = window.arcmmRunner || {};
+        const requireFullRun = runnerCfg.forceFullRun === true;
+
         // reset prox tail for this clip
         window.__resetProxTail?.();
         try { window.__lastSummaryEventSent = false; } catch {}
@@ -1232,15 +1240,33 @@
             // stop recorder and attach preview + status
             try {
                 const { blob, url, revoke } = await (recHandle?.stop?.() || Promise.resolve({}));
+                const overlayName = `${outBasename || id || 'shot'}.results.webm`;
+                const resultDetail = {
+                    id,
+                    outBasename,
+                    summary,
+                    hoop,
+                    proxTail,
+                    trail: shotTrail,
+                    arcTrailFrozen: Array.isArray(arc?.refinedTrailFrozen) ? cloneTrail(arc.refinedTrailFrozen) : null,
+                    overlay: {
+                        name: overlayName,
+                        url,
+                        mime: blob?.type || null,
+                        blob,
+                    },
+                };
+                try { window.arcmmRunner?.onResult?.(resultDetail); } catch {}
+                try { window.dispatchEvent(new CustomEvent('arcmm:result', { detail: resultDetail })); } catch {}
                 const row = document.querySelector(`[data-shot="${id}"]`);
                 if (url && row) {
-                const a  = document.createElement('a'); a.href = url;
-                a.download = `${outBasename || id || 'shot'}.results.webm`; a.textContent = 'Download';
-                const pv = document.createElement('video');
-                pv.src = url; pv.controls = true; pv.muted = true; pv.style.maxWidth = '360px'; pv.style.display = 'block';
-                row.appendChild(document.createTextNode(' · '));
-                row.appendChild(a); row.appendChild(document.createElement('br')); row.appendChild(pv);
-                pv.addEventListener('loadeddata', () => revoke?.(), { once: true });
+                    const a  = document.createElement('a'); a.href = url;
+                    a.download = overlayName; a.textContent = 'Download';
+                    const pv = document.createElement('video');
+                    pv.src = url; pv.controls = true; pv.muted = true; pv.style.maxWidth = '360px'; pv.style.display = 'block';
+                    row.appendChild(document.createTextNode(' · '));
+                    row.appendChild(a); row.appendChild(document.createElement('br')); row.appendChild(pv);
+                    pv.addEventListener('loadeddata', () => revoke?.(), { once: true });
                 }
                 const st = document.querySelector(`[data-shot="${id}"] .status`);
                 if (st) st.textContent = summary.made === true ? '✓ MAKE' : summary.made === false ? '✗ MISS' : '—';
@@ -1248,8 +1274,28 @@
             }
 
             // fire exactly once
-            window.addEventListener('shot:summary', () => finishNow('summary'), { once: true });
-            window.addEventListener('shot:end',     () => finishNow('end'),     { once: true });
+            const removeFinishListeners = () => {
+                try { window.removeEventListener('shot:summary', onSummaryFinish); } catch {}
+                try { window.removeEventListener('shot:end', onEndFinish); } catch {}
+            };
+
+            const finishIfAllowed = (via = 'unknown', detail) => {
+                if (requireFullRun) {
+                const viaTag = String(via || (detail?.via ?? '') || '').toLowerCase();
+                if (viaTag !== 'fbf-90' && viaTag !== 'frame-limit' && viaTag !== 'arcmm-result') return;
+                }
+                removeFinishListeners();
+                finishNow(via);
+            };
+
+            const onSummaryFinish = (ev) => finishIfAllowed('summary', ev?.detail);
+            const onEndFinish = (ev) => {
+                const via = ev?.detail?.via || 'end';
+                finishIfAllowed(via, ev?.detail);
+            };
+
+            window.addEventListener('shot:summary', onSummaryFinish);
+            window.addEventListener('shot:end', onEndFinish);
 
             // 8) run deterministic FBF driver (uses getStepSec(video) internally)
             window.__fbfDriver = makeFbfDriver(v, ui.overlay, { wallMs: FBF_WALL_MS });
@@ -1263,15 +1309,54 @@
 
             // tiny helper: wait for this shot to complete (summary or end)
             function waitForShotDone() {
+                const requireFull = window.arcmmRunner?.forceFullRun === true;
                 return new Promise(resolve => {
-                    const done = (e) => { cleanup(); resolve(e?.type || 'shot:end'); };
                     const cleanup = () => {
-                        window.removeEventListener('shot:summary', done);
-                        window.removeEventListener('shot:end', done);
+                        window.removeEventListener('shot:summary', onShotSummary);
+                        window.removeEventListener('shot:end', onShotEnd);
+                        window.removeEventListener('arcmm:result', onArcmmResult);
                     };
-                    window.addEventListener('shot:summary', done, { once: true });
-                    window.addEventListener('shot:end', done, { once: true });
+                    const resolveWith = (tag, ev) => {
+                        cleanup();
+                        resolve(tag || ev?.type || 'shot:end');
+                    };
+                    const onShotSummary = (ev) => {
+                        if (requireFull) return;
+                        resolveWith('shot:summary', ev);
+                    };
+                    const onShotEnd = (ev) => {
+                        if (requireFull) {
+                        const via = String(ev?.detail?.via || '').toLowerCase();
+                        if (via !== 'fbf-90' && via !== 'frame-limit') return;
+                        }
+                        resolveWith('shot:end', ev);
+                    };
+                    const onArcmmResult = (ev) => resolveWith('arcmm:result', ev);
+                    window.addEventListener('shot:summary', onShotSummary);
+                    window.addEventListener('shot:end', onShotEnd);
+                    if (requireFull) {
+                        window.addEventListener('arcmm:result', onArcmmResult, { once: true });
+                    }
                 });
+            }
+
+            async function maybeAutoStart() {
+                const cfg = g.arcmmRunner;
+                if (!cfg || !cfg.autoStart) return;
+                const mode = cfg.mode || (cfg.shots && cfg.shots.length <= 1 ? 'single' : 'all');
+                cfg.autoStart = false;
+                await new Promise(r => setTimeout(r, cfg.startDelayMs || 50));
+                if (mode === 'single') {
+                    const first = ui.list.querySelector('.shot button.go');
+                    if (first && !first.disabled) {
+                        await handleOneButtonClick(first);
+                    }
+                } else {
+                    const buttons = [...ui.list.querySelectorAll('.shot button.go')].filter(b => !b.disabled);
+                    for (const btn of buttons) {
+                        await handleOneButtonClick(btn);
+                    }
+                }
             }
 
             function renderList() {
@@ -1283,6 +1368,7 @@
             <span class="name">${s.name || s.url}</span>
         </div>
         `).join('');
+                maybeAutoStart();
             }
 
             async function handleOneButtonClick(b) {
@@ -1296,7 +1382,13 @@
                 try {
                     st && (st.textContent = 'running…');
                     // headless deterministic pipeline; returns once driver is started
-                    await renderResultsClip({ id: shot.id, url: shot.url, outBasename: `shot-${shot.id}` });
+                    const baseName =
+                        (typeof shot.outBasename === 'string' && shot.outBasename.trim())
+                            ? shot.outBasename.trim()
+                            : (typeof shot.downloadName === 'string' && shot.downloadName.trim()
+                                ? shot.downloadName.trim()
+                                : `shot-${shot.id}`);
+                    await renderResultsClip({ id: shot.id, url: shot.url, outBasename: baseName });
                     // now wait for this shot to actually finish (summary or end)
                     await waitForShotDone();
                 } catch (err) {
@@ -1352,6 +1444,13 @@
             } else {
                 boot();
             }
+            try {
+                if (g.arcmmRunner) {
+                    g.arcmmRunner.ready = true;
+                    g.arcmmRunner.shotsRendered = true;
+                    g.arcmmRunner.onReady?.({ shots: SHOTS.slice() });
+                }
+            } catch {}
         })();
 
     </script>
