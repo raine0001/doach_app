@@ -821,7 +821,7 @@ export function armHoopPick(onPick) {
     if (p && typeof onPick === 'function') onPick(p);
   };
   ov.addEventListener('pointerdown', once, { passive: true });
-  console.log('[pick] armed GÇö tap the hoop');
+  console.log('[pick] armed, tap the hoop');
 }
 
 export function clientToVideoXY(clientX, clientY) {
