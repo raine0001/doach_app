@@ -1162,6 +1162,20 @@
             }
             summary.result = summary.made === true ? 'MAKE' : summary.made === false ? 'MISS' : null;
 
+            const toDegrees = (val) => Number.isFinite(val) ? Math.round(val) : null;
+            const toNumber  = (val) => Number.isFinite(val) ? Math.round(val) : null;
+            const rawReleaseAngle = summary?.releaseAngle ?? summaryFromShotLogger?.releaseAngle ?? null;
+            const rawEntryAngle   = summary?.entryAngle   ?? summaryFromShotLogger?.entryAngle   ?? null;
+            const rawApexHeight   = summary?.apexHeight   ?? summaryFromShotLogger?.apexHeight   ?? null;
+            const releaseAngle = toDegrees(rawReleaseAngle);
+            const entryAngle   = toDegrees(rawEntryAngle);
+            const apexHeight   = toNumber(rawApexHeight);
+            if (summary) {
+                if (releaseAngle != null) summary.releaseAngle = releaseAngle;
+                if (entryAngle   != null) summary.entryAngle   = entryAngle;
+                if (apexHeight   != null) summary.apexHeight   = apexHeight;
+            }
+
             try {
                 const hoopDebug = hoop ? {
                     x: hoop.x ?? null,
@@ -1177,6 +1191,9 @@
                     via: summaryFromShotLogger ? 'shot_logger' : 'fallback',
                     summaryFromShotLogger,
                     appliedSummary: summary,
+                    releaseAngle,
+                    entryAngle,
+                    apexHeight,
                     trailPoints: shotTrail.length,
                     lastTrailFrame,
                     frameIndexForSummary,

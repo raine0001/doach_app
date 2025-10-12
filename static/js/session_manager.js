@@ -167,12 +167,12 @@ async function persistShotFromSummary(detail) {
     }
   }
   if (!poseSnapshot) {
-    console.error('[persistShot] missing canonical pose snapshot', { shotId });
+    console.warn('[persistShot] missing canonical pose snapshot', { shotId });
     window.dispatchEvent(new CustomEvent('pose:capture-missing', { detail: { shotId, reason: 'no-pose-for-summary' } }));
-    return;
+  } else {
+    detail.poseSnapshot = poseSnapshot;
+    try { window.poseStore?.set(shotId, poseSnapshot, { source: 'persist', overwrite: false }); } catch {}
   }
-  detail.poseSnapshot = poseSnapshot;
-  try { window.poseStore?.set(shotId, poseSnapshot, { source: 'persist', overwrite: false }); } catch {}
 
   // Only persist if we have a session id; otherwise try to start one lazily
   if (!__sid) {
