@@ -2868,9 +2868,10 @@ Draft to refine (optional): '${draftLine}'` : ''}
             }
             __lastSpeak = { text, at: now };
             // Realtime-only: do not speak table/summary lines; leave UI text only
-            if (!window.DOACH_ONLY_REALTIME) {
-                queueMicrotask(() => doachSpeak?.(text));
-            }
+            // voice is owned by the global shot:summary handler
+            //  if (!window.DOACH_ONLY_REALTIME) {
+            //      queueMicrotask(() => doachSpeak?.(text));
+            // }
 
         } catch (e) { console.warn('[doachOnShot]', e); }
     };
