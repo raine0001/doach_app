@@ -120,28 +120,64 @@ async function startSession() {
     try { window.mountSessionHUD?.(); window.setSessionStatus?.('SESSION IN PROGRESS'); } catch { }
 
     // tell everyone
+    let muted = false;
+    try { window.__coachMuted = false; } catch { }
+    try {
+        localStorage.setItem('doach_muted', 'false');
+        muted = localStorage.getItem('doach_muted') === 'true';
+    } catch {
+        muted = false;
+    }
+
+    const shouldGreet = !muted;
+
+    let resolveGreeting = null;
+    let greetingPromise = null;
+    if (shouldGreet) {
+        try {
+            greetingPromise = new Promise((resolve) => { resolveGreeting = resolve; });
+            window.__GREETING_PROMISE = greetingPromise;
+        } catch { resolveGreeting = null; greetingPromise = null; }
+    } else {
+        try { window.__GREETING_PROMISE = null; } catch { }
+    }
+
     try { window.dispatchEvent(new CustomEvent('hud:start-session')); } catch { }
 
-    // start session voice cue
-    try {
-        try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch { }
-        if (localStorage.getItem('doach_muted') !== 'true') {
-            const hoopLocked = window.__hoopConfirmed === true;
-            if (!hoopLocked) {
-                const greeting = `Hi ${name}, let's get started. Tap the hoop area, then get into position to take your first shot.`;
-                try { await primeCoachAudio?.(); } catch { }
+    const finishGreeting = () => {
+        try { resolveGreeting?.(); } catch { }
+        try { window.__GREETING_PROMISE = null; } catch { }
+        try { window.dispatchEvent(new CustomEvent('coach:greeting-finished')); } catch { }
+    };
+
+    if (shouldGreet) {
+        const greeting = `Hi ${name}, let's get started. Tap the hoop area, then get into position to take your first shot.`;
+        try { await primeCoachAudio?.(); } catch { }
+        try {
+            if (typeof doachSpeak === 'function') {
                 try {
-                    if (typeof doachSpeak === 'function') {
-                        await doachSpeak(greeting);
+                    const job = doachSpeak(greeting);
+                    if (job && typeof job.then === 'function') {
+                        try { window.__GREETING_PROMISE = greetingPromise || job; } catch { }
+                        const ok = await job;
+                        if (!ok) speak(greeting);
                     } else {
                         speak(greeting);
                     }
-                } catch {
+                } catch (err) {
                     speak(greeting);
+                    throw err;
                 }
+            } else {
+                speak(greeting);
             }
+        } catch { }
+        finally {
+            finishGreeting();
         }
-    } catch { }
+    } else {
+        finishGreeting();
+    }
 
     return __sid;
 }

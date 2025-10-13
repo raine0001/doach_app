@@ -780,6 +780,7 @@ export function enableHoopPickOnce() {
         return;
     }
 
+    const alreadyPicking = window.__pickingHoop === true;
     window.__pickingHoop = true;
     ov.style.pointerEvents = 'auto';
     ov.style.touchAction = 'none';
@@ -796,10 +797,6 @@ export function enableHoopPickOnce() {
 
     const speakHoopReminder = () => {
         if (window.__hoopConfirmed || window.__coachMuted) return;
-        try {
-            const talk = window.doachSpeak || window.coachSpeak;
-            if (typeof talk === 'function') talk('Tap the hoop to begin.');
-        } catch { }
         showPromptCompat('Tap the Hoop to Begin', 6000);
     };
 
@@ -815,8 +812,24 @@ export function enableHoopPickOnce() {
         }, 6000);
     };
 
-    showPromptCompat('Tap the Hoop to Begin', 6000);
-    scheduleHoopReminders();
+    const launchHoopPrompts = () => {
+        clearHoopReminders();
+        scheduleHoopReminders();
+    };
+
+    const pendingGreeting = (() => {
+        try {
+            const p = window.__GREETING_PROMISE;
+            return p && typeof p.then === 'function' ? p : null;
+        } catch { return null; }
+    })();
+
+    if (pendingGreeting) {
+        pendingGreeting.then(launchHoopPrompts, launchHoopPrompts);
+    } else {
+        launchHoopPrompts();
+    }
+
     syncOverlayToVideo?.();
 
     const finish = () => {
@@ -844,8 +857,10 @@ export function enableHoopPickOnce() {
         }
     };
 
-    ov.addEventListener('pointerdown', pickOnce, { passive: false, once: true });
-    ov.addEventListener('click', pickOnce, { passive: true });
+    if (!alreadyPicking) {
+        ov.addEventListener('pointerdown', pickOnce, { passive: false, once: true });
+        ov.addEventListener('click', pickOnce, { passive: true });
+    }
 }
 window.enableHoopPickOnce = enableHoopPickOnce;
 
