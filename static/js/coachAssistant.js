@@ -49,7 +49,7 @@ window.__flushCoachQueue = function () {
 
 // Let summaries speak once session starts.
 window.addEventListener('hud:start-session', () => {
-  try { window.DOACH_ONLY_REALTIME = false; } catch {}
+    try { window.DOACH_ONLY_REALTIME = false; } catch { }
 });
 
 
@@ -2166,7 +2166,7 @@ window.addEventListener('shot:feedback:request', (e) => {
             // window.addEventListener('hud:score-trip', () => assessPoseAndSpeak('hud:score-trip'));
             // window.addEventListener('hud:shot-taken', () => assessPoseAndSpeak('hud:shot-taken'));
             // Add a secondary chance to speak on final summary (per shot)
-            window.addEventListener('shot:summary', () => assessPoseAndSpeak('shot:summary'));
+            // window.addEventListener('shot:summary', () => assessPoseAndSpeak('shot:summary'));
             // Removed pose:release voice; rely strictly on shot:release + summary to avoid pre-shot chatter
             // Per-shot reset so the next summary/tip is not suppressed
             window.addEventListener('shot:release', () => { try { if (window.DOACH_RELEASE_TRACE === true) console.log('[coach:evt] shot:release'); } catch { } try { __lastSpokenKey = null; window.__COACH_TIP_LAST_AT = 0; } catch { } });

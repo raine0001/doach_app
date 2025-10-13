@@ -254,15 +254,32 @@ window.poseDetectSerial = poseDetectSerial;
     }
     window.emitMicroclipSummary = emitMicroclipSummary; // keep fallback callable
 
-    async function startMicroClip(shotId, releaseFrame = null) {
-        if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) {
-            window.updateShot?.(shotId, { clip: { status: 'disabled' } });
-            emitMicroclipSummary(shotId);
-            return;
+        async function startMicroClip(shotId, releaseFrame = null) {
+            if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) {
+                window.updateShot?.(shotId, { clip: { status: 'disabled' } });
+                emitMicroclipSummary(shotId);
+                return;
+            }
+
+            const v = document.getElementById('videoPlayer');
+
+            // Prefer the landscape canvas compositor
+            let comp = window.__landscapeRecController;
+            if (!comp && typeof window.startLandscapeRecorder === 'function') {
+            try {
+            comp = await window.startLandscapeRecorder(v, { width: 1280, height: 720, fps: 30 });
+            window.__landscapeRecController = comp;
+        } catch {}
         }
 
-        const v = document.getElementById('videoPlayer');
-        const stream = v?.srcObject || v?.captureStream?.();
+        // Fall back if compositor isn’t available
+        const stream = comp?.stream || v?.captureStream?.() || v?.srcObject;
+        if (!stream || !stream.getVideoTracks?.().length) {
+        window.updateShot?.(shotId, { clip: { status: stream ? 'no-video-track' : 'no-stream' } });
+        emitMicroclipSummary(shotId);
+        return;
+        }
+
         if (!stream || !stream.getVideoTracks?.().length) {
             window.updateShot?.(shotId, { clip: { status: stream ? 'no-video-track' : 'no-stream' } });
             emitMicroclipSummary(shotId);

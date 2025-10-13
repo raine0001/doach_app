@@ -2,6 +2,10 @@
 
 let __preferredWebVoice = null;
 
+// Who owns the intro line? 'session_manager' (default) or 'coach_voice'
+try { if (typeof window.PREF_GREETER_SOURCE === 'undefined') window.PREF_GREETER_SOURCE = 'session_manager'; } catch {}
+
+
 function isOverlayVisible(el) {
     if (!el) return false;
     if (el.hidden === true) return false;
@@ -81,15 +85,22 @@ export function speak(text) {
     return true;
 }
 
- // Display name for voice (fallbacks)
-    function getDisplayName() {
-        try {
-            return window.__USER_NAME || localStorage.getItem('firstname') || 'Player';
-        } catch {
-            return window.__USER_NAME || 'Player';
-        }
-    }
-    const name = getDisplayName();
+function sanitizeName(n) {
+  return String(n ?? '')
+    .replace(/^[\s"'`]+|[\s"'`]+$/g, '')   // strip quotes and extra spaces
+    .trim();
+}
+
+// Display name for voice (fallbacks)
+function getDisplayName() {
+  try {
+    const raw = window.__USER_NAME || localStorage.getItem('firstname') || 'Player';
+    return sanitizeName(raw);
+  } catch {
+    return sanitizeName(window.__USER_NAME || 'Player');
+  }
+}
+const name = getDisplayName();
 
 // ===== Shared one-time greeter (iOS-safe) =====
 (function initCoachGreeter(){
@@ -99,18 +110,21 @@ export function speak(text) {
 
   function isIOS(){ return /iphone|ipad|ipod/i.test(navigator.userAgent||''); }
 
+  // If session_manager finishes its own greeting, consider ours "done"
+  try {
+    window.addEventListener('coach:greeting-finished', () => { greeted = true; }, { passive: true });
+  } catch {}
+
   window.resetCoachGreeting = function resetCoachGreeting(){
     try { greeted = false; } catch {}
   };
 
-  window.coachGreetingOnce = async function coachGreetingOnce(text = `hi ${name}, I'm listening and ready.`) {
-    // already said, or muted, or no speaker available
+  window.coachGreetingOnce = async function coachGreetingOnce(text = `Hi ${name}, I'm listening and ready.`) {
     if (greeted) return false;
     if (window.__coachMuted) return false;
 
     try { await window.CoachAudio?.unlock(); } catch {}
 
-    // force sane engine on iOS; doachSpeak already routes, this just belts+suspenders
     const ok = await (window.doachSpeak?.(text, { engine: isIOS() ? 'openai' : undefined }) || Promise.resolve(false));
     if (ok !== false) {
       greeted = true;
@@ -119,22 +133,26 @@ export function speak(text) {
     return false;
   };
 
-  // If user unmutes later, gently try once
-  window.addEventListener('hud:mute-toggle', (e) => {
-    if (e?.detail?.muted === false) {
-      setTimeout(() => { try { window.coachGreetingOnce(); } catch {} }, 150);
-    }
-  });
+  // Only auto-poke this greeter if coach_voice is the chosen source
+  if (window.PREF_GREETER_SOURCE === 'coach_voice') {
+    // If user unmutes later, gently try once
+    window.addEventListener('hud:mute-toggle', (e) => {
+      if (e?.detail?.muted === false) {
+        setTimeout(() => { try { window.coachGreetingOnce(); } catch {} }, 150);
+      }
+    });
 
-  // Wake hooks help after bfcache/visibility
-  window.addEventListener('pageshow', () => {
-    if (!greeted) setTimeout(() => { try { window.coachGreetingOnce(); } catch {} }, 120);
-  }, { passive: true });
+    // Wake hooks help after bfcache/visibility
+    window.addEventListener('pageshow', () => {
+      if (!greeted) setTimeout(() => { try { window.coachGreetingOnce(); } catch {} }, 120);
+    }, { passive: true });
+  }
 
   ['hud:end-session','session:reset','hud:arm-reset'].forEach(evt => {
     window.addEventListener(evt, () => { try { greeted = false; } catch {} });
   });
 })();
+
 
 
 

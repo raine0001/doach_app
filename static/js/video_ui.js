@@ -15,6 +15,16 @@ window.DEMO_MINIMAL_TABLE = true;
 // Make these helpers reachable to other modules
 window.getLockedHoopBox = getLockedHoopBox;
 window.handleHoopSelection = handleHoopSelection;
+window.startLandscapeRecorder = startLandscapeRecorder;
+
+// stop the compositor when the session ends or page unloads
+window.addEventListener('hud:end-session', async () => {
+  try { await window.__landscapeRecController?.stop(); } catch {}
+  window.__landscapeRecController = null;
+});
+window.addEventListener('beforeunload', () => {
+  try { window.__landscapeRecController?.stop(); } catch {}
+});
 
 /* ----------------------- iOS viewport + basics ----------------------- */
 (function installMobileViewportFixes() {
@@ -894,6 +904,108 @@ function clearNewSessionPromptTimers() {
     }
 }
 
+// keep session in landscape mode
+async function startLandscapeRecorder(videoEl, opts = {}) {
+  const fps = opts.fps || 30;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent||'');
+  const wantW = opts.width  || 1280;  // target output
+  const wantH = opts.height || 720;
+
+  // Offscreen canvas = our compositor
+  const cvs = document.createElement('canvas');
+  const ctx = cvs.getContext('2d', { alpha: false });
+
+  function orientationAngle() {
+    // iOS: screen.orientation is incomplete; window.orientation exists (deg)
+    if (typeof screen?.orientation?.angle === 'number') return screen.orientation.angle;
+    if (typeof window.orientation === 'number') return window.orientation; // 0, 90, -90
+    // fallback guess: treat width>height as landscape
+    return (innerWidth > innerHeight) ? 90 : 0;
+  }
+
+  function layoutForLandscape() {
+    const angle = orientationAngle();
+    const rot90 = angle === 90 || angle === -90;
+
+    // We want the final file in landscape WxH
+    cvs.width  = wantW;
+    cvs.height = wantH;
+
+    // Compute draw transform
+    // We’ll scale to fill and rotate if stream arrives portrait
+    const vW = videoEl.videoWidth  || 1080;
+    const vH = videoEl.videoHeight || 1920;
+
+    // Many iPhones report vW<vH even when physically landscape.
+    const isPortraitStream = vH > vW;
+
+    return { angle, rot90, isPortraitStream };
+  }
+
+  const { rot90, isPortraitStream } = layoutForLandscape();
+
+  // Start the recorder from the canvas stream
+  const stream = cvs.captureStream(fps);
+  const chunks = [];
+  const rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+  rec.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+  const done = new Promise(resolve => rec.onstop = () => resolve(new Blob(chunks, { type: 'video/webm' })));
+  rec.start();
+
+  let rafId = 0;
+  function draw() {
+    const w = cvs.width;
+    const h = cvs.height;
+    ctx.clearRect(0, 0, w, h);
+
+    // Letterbox/pillarbox: scale to cover
+    const vW = videoEl.videoWidth  || 1080;
+    const vH = videoEl.videoHeight || 1920;
+    const scaleCover = Math.max(w / vW, h / vH);
+
+    ctx.save();
+
+    // If the stream is portrait but we want landscape output, rotate
+    // On iOS this is almost always true when the device is held landscape.
+    if (isPortraitStream) {
+      // rotate 90 degrees clockwise and draw centered
+      ctx.translate(w, 0);
+      ctx.rotate(Math.PI / 2);
+
+      const dW = h / scaleCover; // because we rotated, canvas dims swap roles
+      const dH = w / scaleCover;
+      const x = (0 - (dW - vW) / 2);
+      const y = (0 - (dH - vH) / 2);
+      ctx.drawImage(videoEl, x, y, dW, dH);
+    } else {
+      // Already landscape: just draw scaled to cover
+      const drawW = vW * scaleCover;
+      const drawH = vH * scaleCover;
+      const x = (w - drawW) / 2;
+      const y = (h - drawH) / 2;
+      ctx.drawImage(videoEl, x, y, drawW, drawH);
+    }
+
+    ctx.restore();
+    rafId = requestAnimationFrame(draw);
+  }
+
+  // kick the compositor loop once metadata is ready
+  if (videoEl.readyState >= 2) draw();
+  else videoEl.addEventListener('loadedmetadata', draw, { once: true });
+
+  // return a small controller
+  return {
+    stop: () => {
+      cancelAnimationFrame(rafId);
+      try { rec.stop(); } catch {}
+      return done;
+    },
+    stream
+  };
+}
+
+// Reset to start overlay state
 function finalizeToStartOverlay() {
     if (__newSessionFinalized !== false) return;
     __newSessionFinalized = true;
