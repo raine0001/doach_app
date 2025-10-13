@@ -95,7 +95,7 @@
         <label>Engine</label>
         <select id="engine">
           <option value="openai">OpenAI (studio-quality)</option>
-          <option value="web">Web Speech (many OS voices)</option>
+          <option value="webspeech">Web Speech (many OS voices)</option>
         </select>
       </div>
       <div>
@@ -321,13 +321,14 @@
   // show/hide engine-specific controls
   function toggleEngineUI(engine){
     $('openaiVoiceWrap').style.display = engine === 'openai' ? '' : 'none';
-    $('webVoiceWrap').style.display    = engine === 'web'    ? '' : 'none';
-    $('pitchWrap').style.display       = engine === 'web'    ? '' : 'none';
+    $('webVoiceWrap').style.display    = engine === 'webspeech'    ? '' : 'none';
+    $('pitchWrap').style.display       = engine === 'webspeech'    ? '' : 'none';
   }
 
   // load prefs into UI
   function prefsToUI(p){
-    $('engine').value     = p.tts || 'openai';
+    const engineValue = (p.tts === 'web') ? 'webspeech' : (p.tts || 'openai');
+    $('engine').value     = engineValue;
     $('lang').value       = p.lang || 'en-US';
     $('openaiVoice').value= p.voice || 'alloy';
     $('webVoice').value   = p.webVoiceName || '';
@@ -348,7 +349,7 @@
 
   function uiToPrefs(){
     return {
-      tts: $('engine').value,
+      tts: ($('engine').value === 'web' ? 'webspeech' : $('engine').value),
       lang: $('lang').value,
       voice: $('openaiVoice').value,
       webVoiceName: $('webVoice').value,

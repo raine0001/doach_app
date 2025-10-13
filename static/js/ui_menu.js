@@ -1158,8 +1158,28 @@ async function openMyDoachPanel(){
     const panel = (openMyDoachPanel.panel ||= makeSidePanel('My Doach'));
     const prefs = (window.doachGetPrefs?.() || {voice:'alloy', tts:'openai', speed:1, pitch:1, volume:1, bassDb:0, trebleDb:0, lang:'en-US'});
     const body = el('div');
+    const normalizeEngine = (value) => {
+      if (!value) return 'openai';
+      return value === 'web' ? 'webspeech' : value;
+    };
 
-    const ttsSel   = el('select', {}, ...['openai','web'].map(v=> el('option',{value:v, selected:(prefs.tts===v)}, v)));
+    const storedEngine = (() => {
+      try { return normalizeEngine(window.TTS_ENGINE || localStorage.getItem('tts_engine') || prefs.tts || 'openai'); }
+      catch { return normalizeEngine(prefs.tts || 'openai'); }
+    })();
+    prefs.tts = storedEngine;
+    try {
+      if (!window.TTS_ENGINE) window.TTS_ENGINE = storedEngine;
+      if (!localStorage.getItem('tts_engine')) localStorage.setItem('tts_engine', storedEngine);
+    } catch {}
+
+    const ttsOptions = [
+      { value: 'openai', label: 'OpenAI TTS' },
+      { value: 'webspeech', label: 'Browser Speech' }
+    ];
+    const ttsSel   = el('select', {},
+      ...ttsOptions.map(opt => el('option', { value: opt.value, selected: storedEngine === opt.value }, opt.label))
+    );
     const voiceInp = el('input', {type:'text', value:(prefs.voice||'alloy')});
     const speed    = el('input', {type:'range', class:'doach-range', min:'0.5', max:'1.5', step:'0.05', value: prefs.speed??1});
     const pitch    = el('input', {type:'range', class:'doach-range', min:'0.5', max:'2.0', step:'0.05', value: prefs.pitch??1});
@@ -1182,7 +1202,12 @@ async function openMyDoachPanel(){
       const presets = (await window.doachLoadPresets?.()) || [];
       const p = presets.find(x=>x.name===presetSel.value);
       if (!p) return;
-      ttsSel.value = p.tts || prefs.tts;
+      const engineFromPreset = normalizeEngine(p.tts || prefs.tts);
+      ttsSel.value = engineFromPreset;
+      try {
+        localStorage.setItem('tts_engine', engineFromPreset);
+        window.TTS_ENGINE = engineFromPreset;
+      } catch {}
       voiceInp.value = p.voice || prefs.voice;
       speed.value = p.speed ?? 1;
       pitch.value = p.pitch ?? 1;
@@ -1220,6 +1245,11 @@ async function openMyDoachPanel(){
     );
 
     panel.setBody(body); panel.open();
+    ttsSel.addEventListener('change', (e) => {
+      const v = normalizeEngine(e?.target?.value);
+      try { localStorage.setItem('tts_engine', v); } catch {}
+      try { window.TTS_ENGINE = v; } catch {}
+    });
 
     function readUI(){
       return {
@@ -1234,7 +1264,7 @@ async function openMyDoachPanel(){
       };
     }
 
-    function speakWithUnlock(line) {
+    async function speakWithUnlock(line) {
       if (!line) return;
       try {
         if (window.__coachMuted) {
@@ -1252,11 +1282,12 @@ async function openMyDoachPanel(){
           }
         }
       } catch {}
+      try { await window.CoachAudio?.unlock?.(); } catch {}
 
       try {
         const speaker = window.doachSpeak || window.coachSpeak || window.speak;
         if (typeof speaker === 'function') {
-          speaker(line);
+          await speaker(line);
         }
       } catch {}
     }
@@ -1265,46 +1296,64 @@ async function openMyDoachPanel(){
       const p = readUI();
       window.doachSetPrefs?.({ ...p, audioOn: true });
       try {
+        const engine = normalizeEngine(p.tts);
         localStorage.setItem('doach_muted','false');
         window.__coachMuted = false;
+        p.tts = engine;
+        localStorage.setItem('tts_engine', engine);
+        window.TTS_ENGINE = engine;
         const prefs = {
-          provider: p.tts || 'server',
+          provider: engine === 'openai' ? 'server' : 'web',
           voice: p.voice || 'alloy',
           speed: p.speed,
           pitch: p.pitch,
           volume: p.volume,
           bassDb: p.bassDb,
           trebleDb: p.trebleDb,
+          tts: p.tts,
           lang: p.lang
         };
         localStorage.setItem('doach_tts', JSON.stringify(prefs));
         localStorage.setItem('doach_voice_provider', prefs.provider);
         localStorage.setItem('doach_voice', prefs.voice);
       } catch {}
-      try { await window.ensureMicPrimed?.(); } catch {}
+      if (window.PREF_ALLOW_MIC === true) {
+        try { await window.ensureMicPrimed?.(); } catch {}
+        try { window.__startCoachVoiceRecognition?.(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'prefs-apply' } })); } catch {}
+      }
       await speakWithUnlock("Voice settings applied.");
     }
     async function testVoice(){
       const p = readUI();
       window.doachSetPrefs?.({ ...p, audioOn: true });
       try {
+        const engine = normalizeEngine(p.tts);
         localStorage.setItem('doach_muted','false');
         window.__coachMuted = false;
+        p.tts = engine;
+        localStorage.setItem('tts_engine', engine);
+        window.TTS_ENGINE = engine;
         const prefs = {
-          provider: p.tts || 'server',
+          provider: engine === 'openai' ? 'server' : 'web',
           voice: p.voice || 'alloy',
           speed: p.speed,
           pitch: p.pitch,
           volume: p.volume,
           bassDb: p.bassDb,
           trebleDb: p.trebleDb,
+          tts: p.tts,
           lang: p.lang
         };
         localStorage.setItem('doach_tts', JSON.stringify(prefs));
         localStorage.setItem('doach_voice_provider', prefs.provider);
         localStorage.setItem('doach_voice', prefs.voice);
       } catch {}
-      try { await window.ensureMicPrimed?.(); } catch {}
+      if (window.PREF_ALLOW_MIC === true) {
+        try { await window.ensureMicPrimed?.(); } catch {}
+        try { window.__startCoachVoiceRecognition?.(); } catch {}
+        try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'prefs-test' } })); } catch {}
+      }
       await speakWithUnlock("This is your Doach voice.");
     }
     async function savePreset(){

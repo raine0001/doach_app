@@ -47,6 +47,11 @@ window.__flushCoachQueue = function () {
     }
 };
 
+// Let summaries speak once session starts.
+window.addEventListener('hud:start-session', () => {
+  try { window.DOACH_ONLY_REALTIME = false; } catch {}
+});
+
 
 // HUD mute button -> toggle voice
 window.addEventListener('hud:mute-toggle', (e) => {
@@ -62,40 +67,33 @@ window.addEventListener('hud:mute-toggle', (e) => {
     } catch { }
 });
 
+// Default: no extra intro from coachAssistant; session_manager owns greeting.
+if (typeof window.PREF_COACH_INTRO === 'undefined') window.PREF_COACH_INTRO = false;
 
-// --- One-time intro voice guard + throttle ---
+// --- Intro voice: trigger shared greeter once per ceremony, gated by PREF_COACH_INTRO ---
 try {
-    if (typeof window.__INTRO_SAID === 'undefined') window.__INTRO_SAID = false;
-    if (typeof window.__INTRO_LAST_AT === 'undefined') window.__INTRO_LAST_AT = 0;
-
     if (!window.__coachIntroWired) {
         window.__coachIntroWired = true;
 
-        // Speak once when countdown starts, but only if explicitly enabled
+        // Fire when countdown arms, but only if the user actually wants the intro
         window.addEventListener('hud:arm-countdown', () => {
             try {
-                // hard throttle in case the event fires twice
-                const now = performance.now();
-                if (now - window.__INTRO_LAST_AT < 1500) return;
-                window.__INTRO_LAST_AT = now;
-
-                // say this intro once per ceremony
-                if (window.__INTRO_SAID) return;
-                window.__INTRO_SAID = true;
-
-                // Only speak if you actually want the intro
                 if (window.PREF_COACH_INTRO === true) {
-                    (window.coachSpeak || window.doachSpeak)?.("Let's get started. Get into position and shoot when ready.");
+                    // shared greeter handles unlock, mute, one-shot
+                    window.coachGreetingOnce?.("Let's get started. Get into position and shoot when ready.");
                 }
             } catch { }
         });
 
-        // reset the one-shot flag at session end or a hard reset
+        // Reset greeting on end/reset so next ceremony can greet again if enabled
         ['hud:end-session', 'session:reset', 'hud:arm-reset'].forEach(evt => {
-            window.addEventListener(evt, () => { try { window.__INTRO_SAID = false; } catch { } });
+            window.addEventListener(evt, () => {
+                try { window.resetCoachGreeting?.(); } catch { }
+            });
         });
     }
 } catch { }
+
 
 
 // Default saved TTS preference to server voice if none is set (helps desktop first-run)
@@ -1387,7 +1385,7 @@ window.addEventListener('shot:feedback:request', (e) => {
         chatEndpoint: '/api/coach',  // POST {prompt, model}
         ttsEndpoint: '/api/tts',    // POST {text, voice}
         model: 'gpt-4o-mini',
-        tts: 'openai',      // 'openai' or 'web'
+        tts: 'openai',      // 'openai' or 'webspeech'
         voice: 'alloy',
         personality: 'positive, concise, basketball fundamentals-first',
         llmMode: 'off',        // 'primary' | 'polish' | 'off'
@@ -3021,7 +3019,15 @@ Draft to refine (optional): '${draftLine}'` : ''}
         async function start() {
             if (hfActive || hfStarting) return;
             // permission prime (helps UX)
-            try { await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { }
+            if (!window.__doachMicPrimed) {
+                try {
+                    await navigator.mediaDevices.getUserMedia({ audio: true });
+                    window.__doachMicPrimed = true;
+                } catch (err) {
+                    try { console.warn('[Doach HandsFree] mic prime rejected', err); } catch { }
+                    return;
+                }
+            }
 
             hfRec = new SR();
             hfRec.lang = 'en-US';
@@ -3206,6 +3212,17 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
         const prefs = (window.doachGetPrefs?.() || {});
 
+        const IS_IOS = (() => {
+            try {
+                const nav = (typeof navigator !== 'undefined') ? navigator : null;
+                if (!nav) return false;
+                const ua = String(nav.userAgent || nav.vendor || '').toLowerCase();
+                return /iphone|ipad|ipod/.test(ua);
+            } catch {
+                return false;
+            }
+        })();
+
         // --- recognizer + state (define all the vars used below!)
         const recog = new SR();
         recog.lang = prefs.lang || 'en-US';
@@ -3306,15 +3323,44 @@ Draft to refine (optional): '${draftLine}'` : ''}
             catch { starting = false; setTimeout(() => { try { recog.start(); starting = true; } catch { } }, 400); }
         }
 
-        async function start() {
-            if (!isMicAllowed()) {                     // << new
+        let allowIOSWake = !IS_IOS || !!window.__doachMicPrimed || isMicAllowed();
+        let pendingIOSWake = false;
+
+        async function start(force = false) {
+            const micAllowed = isMicAllowed();
+            if (!micAllowed && !force) {
                 console.warn('[Doach HF] mic disabled by preferences');
+                return;
+            }
+            if (force && !micAllowed) {
+                try { doachSetPrefs({ ...doachGetPrefs(), allowMic: true }); } catch { }
+            }
+
+            if (force) {
+                allowIOSWake = true;
+                pendingIOSWake = false;
+            }
+            if (!allowIOSWake) {
+                pendingIOSWake = true;
                 return;
             }
 
             if (listening || starting) return;
             // mic prime improves UX/permissions
-            try { await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { }
+            if ((!window.__doachMicPrimed) && navigator.mediaDevices?.getUserMedia) {
+                try {
+                    await navigator.mediaDevices.getUserMedia({ audio: true });
+                    window.__doachMicPrimed = true;
+                    try { doachSetPrefs({ ...doachGetPrefs(), allowMic: true }); } catch { }
+                } catch (err) {
+                    try { console.warn('[Doach Voice] mic prime rejected', err); } catch { }
+                    if (IS_IOS && !force) {
+                        allowIOSWake = false;
+                        pendingIOSWake = true;
+                    }
+                    return;
+                }
+            }
             armed = true;
             tryStartRecog();
             showDot(true);
@@ -3435,22 +3481,39 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
         // Public controls
         window.doachVoice = {
-            on: start,
+            on: () => start(true),
             off: stop,
-            toggle: () => (listening || starting ? stop() : start()),
+            toggle: () => (listening || starting ? stop() : start(true)),
             isOn: () => listening
         };
 
         // Auto-start unless user disabled it in prefs
-        if (prefs.voiceWake !== false) {
-            if (prefs.voiceWake !== false && isMicAllowed()) {
-                if (document.readyState === 'loading') {
-                    document.addEventListener('DOMContentLoaded', () => start());
-                } else {
-                    start();
-                }
+        const queueAutoStart = () => {
+            if (!isMicAllowed()) return;
+            if (IS_IOS && !window.__doachMicPrimed) {
+                pendingIOSWake = true;
+                return;
             }
+            start();
+        };
+        if (prefs.voiceWake !== false) {
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', queueAutoStart, { once: true });
+            } else {
+                queueAutoStart();
+            }
+        }
+
+        if (IS_IOS) {
+            const enableFromGesture = () => {
+                allowIOSWake = true;
+                pendingIOSWake = false;
+                start(true);
+            };
+            window.addEventListener('coach:voice-rec-start', enableFromGesture);
+            try { window.__enableCoachVoiceWake = enableFromGesture; } catch { }
         }
     })();
 
 })();
+

@@ -151,7 +151,7 @@ async function startSession() {
     };
 
     if (shouldGreet) {
-        const greeting = `Hi ${name}, let's get started. Tap the hoop area, then get into position to take your first shot.`;
+        const greeting = `${name}, let's get started. Tap the hoop area, then get into position to take your first shot.`;
         try { await primeCoachAudio?.(); } catch { }
         try {
             if (typeof doachSpeak === 'function') {

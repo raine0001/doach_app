@@ -1,237 +1,286 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>D🏀ACH</title>
-  <link rel="icon" href="/static/favicon.ico">  <script>
-    // Lightweight defaults; enable extras via ?debug=1 or ?releaseTrace=1
-    (function configureDoachFlags(){
-      const search = new URLSearchParams(location.search || '');
-      const flag = (key) => ['1','true','yes','on'].includes((search.get(key) || '').toLowerCase());
-      const enableDebug = flag('debug');
-      const enableTrace = enableDebug || flag('releaseTrace');
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>D🏀ACH</title>
+    <link rel="icon" href="/static/favicon.ico">
+    <script>
+        // Lightweight defaults; enable extras via ?debug=1 or ?releaseTrace=1
+        (function configureDoachFlags() {
+            const search = new URLSearchParams(location.search || '');
+            const flag = (key) => ['1', 'true', 'yes', 'on'].includes((search.get(key) || '').toLowerCase());
+            const enableDebug = flag('debug');
+            const enableTrace = enableDebug || flag('releaseTrace');
 
-      const ua = (navigator.userAgent || '').toLowerCase();
-      const isAndroid = /android/.test(ua);
-      const isIOS = /iphone|ipad|ipod/.test(ua);
+            const ua = (navigator.userAgent || '').toLowerCase();
+            const isAndroid = /android/.test(ua);
+            const isIOS = /iphone|ipad|ipod/.test(ua);
 
-      window.__LOCAL_DETECTOR = isAndroid ? true : false;
-      window.__forceServerDetect = false;
-      window.PD_PREFETCH_FPS = isAndroid ? 6 : (isIOS ? 8 : 10);
-      window.PREF_LIVE_TIPS = true;
-      window.__PREDETECT_MIN_DT = isAndroid ? 80 : 100;
+            window.__LOCAL_DETECTOR = isAndroid ? true : false;
+            window.__forceServerDetect = false;
+            window.PD_PREFETCH_FPS = isAndroid ? 6 : (isIOS ? 8 : 10);
+            window.PREF_LIVE_TIPS = true;
+            window.__PREDETECT_MIN_DT = isAndroid ? 80 : 100;
 
-      window.DEBUG_FORCE_POSE_ACTIVE = enableDebug;
-      window.DEBUG_FORCE_HOOP_LOCKED = enableDebug;
-      window.DEBUG_FORCE_SESSION_ACTIVE = enableDebug;
-      window.POSE_DEBUG = enableDebug;
-      window.DOACH_RELEASE_TRACE = enableTrace;
+            window.DEBUG_FORCE_POSE_ACTIVE = enableDebug;
+            window.DEBUG_FORCE_HOOP_LOCKED = enableDebug;
+            window.DEBUG_FORCE_SESSION_ACTIVE = enableDebug;
+            window.POSE_DEBUG = enableDebug;
+            window.DOACH_RELEASE_TRACE = enableTrace;
 
-      if (enableDebug && !window.REL_SCORE_THRESH) {
-        window.REL_SCORE_THRESH = 0.55;
-      }
-    })();
-  </script>
-
-  <!-- Early global guard: swallow pre-hoop or unstable pose releases -->
-  <script>
-    (function installEarlyReleaseGuard(){
-      try {
-        if (window.__earlyRelGuard) return; window.__earlyRelGuard = true;
-        window.addEventListener('shot:release', (e) => {
-          try {
-            const hoopLocked = !!(window.getLockedHoopBox && window.getLockedHoopBox());
-            const confirmed  = (window.__hoopConfirmed === true);
-            const armed      = (window.__shotTrackingArmed === true);
-            if (!hoopLocked || !confirmed || !armed) { e.stopImmediatePropagation(); return; }
-          } catch {}
-        }, true);
-      } catch {}
-    })();
-  </script>
-
-  <!-- Core app/scripts (load each ONCE) -->
-  <script type="module" src="/static/js/app.js"></script>
-  <script type="module" src="/static/js/video_ui.js"></script>
-  <script type="module" src="/static/js/session_manager.js"></script>
-  <script type="module" src="/static/js/coach_voice.js"></script>
-  <script type="module" src="/static/js/coachAssistant.js"></script>
-
-  <script>
-    // Conditionally load auto probe tools via query param ?probe=release
-    (function(){ try { var q=new URLSearchParams(location.search||''); if((q.get('probe')||'').toLowerCase()==='release'){ var s=document.createElement('script'); s.type='module'; s.src='/static/js/auto_probe_release.js'; document.head.appendChild(s);} } catch(e){} })();
-  </script>
-
-  <!-- Core libraries -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
-  <!-- Lottie for splash animation -->
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
-
-  <!-- Early shims: provide globals the tests probe before modules load -->
-  <script>
-    (function bootEarlyGlobals(){
-      try {
-        const isPW = !!(navigator.webdriver) || /playwright|headless/i.test(navigator.userAgent||'');
-        const urlHasE2E = /__e2e=1/.test(location.search||'');
-        window.__TEST_MODE = isPW || urlHasE2E;
-      } catch { window.__TEST_MODE = false; }
-      // E2E-friendly release/exit tuning
-      try {
-        window.RELEASE_DELAY_FRAMES   = 1;
-        window.REL_HAND_DIST_PX       = 120;
-        window.REL_POSE_STREAK        = 1;
-        window.REL_UPWARD_MIN_FRAMES  = 1;
-        window.EXIT_LINGER_FRAMES     = 8;
-        window.EXIT_BELOW_MARGIN      = 12;
-        window.proxX                  = 200;
-        window.proxYAbove             = 170;
-        window.proxYBelow             = 100;
-      } catch {}
-      // Prefer a dense slow-pass during shot windows for backend accuracy
-      try {
-        // Backend pre-roll cadence (analyzer pump when paused)
-        window.__PREROLL_FPS = window.__PREROLL_FPS || 10;
-        // Test-mode hardening: denser backend, ROI-only, server detect
-        if (window.__TEST_MODE) {
-          window.FBF_VISUAL_FPS = 10;
-          window.FBF_MIN_FRAMES = 48;         // ensure long sampling window
-          window.__forceServerDetect = true;
-          window.DETECT_ROI_ONLY = true;
-          window.__ROI_DETECT_ALWAYS = true;
-          window.ARC_SMOOTH = true;
-        }
-      } catch {}
-
-      // Overlay helpers: minimal no-op-safe fallbacks (replaced by module later)
-      if (typeof window.ensureOverlayCss !== 'function') {
-        window.ensureOverlayCss = function ensureOverlayCssFallback() {
-          try {
-            const ov  = document.getElementById('overlay');
-            const vid = document.getElementById('videoPlayer');
-            if (!ov || !vid) return;
-            const anchor = vid.parentElement || document.body;
-            if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
-            ov.style.position = 'absolute'; ov.style.left = '0'; ov.style.top  = '0';
-            ov.style.userSelect = 'none'; ov.style.pointerEvents = 'none'; ov.style.zIndex = '100';
-          } catch {}
-        };
-      }
-      if (typeof window.lockOverlayToVideo !== 'function') {
-        window.lockOverlayToVideo = function lockOverlayToVideoFallback() {
-          try {
-            const ov  = document.getElementById('overlay');
-            const vid = document.getElementById('videoPlayer');
-            if (!ov || !vid) return;
-            const r = vid.getBoundingClientRect();
-            const dpr = window.devicePixelRatio || 1;
-            ov.width  = Math.max(1, Math.round((vid.videoWidth  || r.width)  * dpr));
-            ov.height = Math.max(1, Math.round((vid.videoHeight || r.height) * dpr));
-          } catch {}
-        };
-      }
-
-      // Analyzer: stub that defers to real implementation once loaded
-      if (typeof window.analyzeVideoFrameByFrame !== 'function') {
-        window.analyzeVideoFrameByFrame = function analyzerDeferred(v, c) {
-          // Attempt immediate handoff if real impl already present
-          const real = (window.__realAnalyzeVideoFrameByFrame || window.legacyAnalyzeVideoFrameByFrame);
-          if (typeof real === 'function') { try { return real(v, c); } catch {} }
-          // Kick a fast poll to start once available
-          let tries = 0;
-          const t = setInterval(() => {
-            const fn = (window.__realAnalyzeVideoFrameByFrame || window.legacyAnalyzeVideoFrameByFrame);
-            if (typeof fn === 'function' || ++tries > 80) {
-              clearInterval(t);
-              if (typeof fn === 'function') { try { fn(v, c); } catch {} }
+            if (enableDebug && !window.REL_SCORE_THRESH) {
+                window.REL_SCORE_THRESH = 0.55;
             }
-          }, 50);
-          // Nudge: dynamically import analyzer to hurry availability
-          try {
-            import('/static/js/analyzer.js').then(m => {
-              try { (window.__bootLog ||= []).push('analyzer_import_ok'); } catch {}
-              if (typeof m?.analyzeVideoFrameByFrame === 'function') {
-                window.__realAnalyzeVideoFrameByFrame = m.analyzeVideoFrameByFrame;
-              }
-            }).catch((e) => { try { (window.__bootLog ||= []).push('analyzer_import_err:' + (e?.message||e)); } catch {} });
-          } catch (e) { try { (window.__bootLog ||= []).push('analyzer_import_throw:' + (e?.message||e)); } catch {} }
-        };
-      }
-    })();
-  </script>
+        })();
+    </script>
+    <script>
+        (function setIOSMicDefault() {
+            const ua = (navigator.userAgent || '').toLowerCase();
+            const isIOS = /iphone|ipad|ipod/.test(ua);
+            if (typeof window.PREF_ALLOW_MIC === 'undefined') {
+                window.PREF_ALLOW_MIC = isIOS ? false : true;
+            }
+        })();
+    </script>
+    <script>
+        (function setDefaultTTSEngine() {
+            let inferredIOS = false;
+            try {
+                const ua = (navigator.userAgent || '').toLowerCase();
+                inferredIOS = /iphone|ipad|ipod/.test(ua);
+                const key = 'tts_engine';
+                let engine = localStorage.getItem(key);
 
-  <!-- MediaPipe Pose Model -->
-  <script type="module">
-    import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
-    window.FilesetResolver = FilesetResolver;
-    window.PoseLandmarker = PoseLandmarker;
-  </script>
+                if (!engine) engine = 'openai';
+                if (engine === 'web') engine = 'webspeech';
+                // force sane default on iOS
+                if (inferredIOS && engine !== 'openai') engine = 'openai';
 
-  <!-- Styles -->
-  <link rel="stylesheet" href="/static/style.css" />
-  <!-- Boxicons -->
-  <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
+                try { localStorage.setItem(key, engine); } catch { }
+                window.TTS_ENGINE = engine;
+            } catch { }
+            if (!window.TTS_ENGINE) window.TTS_ENGINE = 'openai';
+            if (typeof window.isIOS !== 'boolean') window.isIOS = inferredIOS;
+        })();
+    </script>
+
+    <!-- Early global guard: swallow pre-hoop or unstable pose releases -->
+    <script>
+        (function installEarlyReleaseGuard() {
+            try {
+                if (window.__earlyRelGuard) return; window.__earlyRelGuard = true;
+                window.addEventListener('shot:release', (e) => {
+                    try {
+                        const hoopLocked = !!(window.getLockedHoopBox && window.getLockedHoopBox());
+                        const confirmed = (window.__hoopConfirmed === true);
+                        const armed = (window.__shotTrackingArmed === true);
+                        if (!hoopLocked || !confirmed || !armed) { e.stopImmediatePropagation(); return; }
+                    } catch { }
+                }, true);
+            } catch { }
+        })();
+    </script>
+
+    <!-- Core app/scripts (load each ONCE) -->
+    <script type="module" src="/static/js/app.js"></script>
+    <script type="module" src="/static/js/video_ui.js"></script>
+    <script type="module" src="/static/js/session_manager.js"></script>
+    <script type="module" src="/static/js/coach_voice.js"></script>
+    <script type="module" src="/static/js/coachAssistant.js"></script>
+
+    <script>
+        // Conditionally load auto probe tools via query param ?probe=release
+        (function () { try { var q = new URLSearchParams(location.search || ''); if ((q.get('probe') || '').toLowerCase() === 'release') { var s = document.createElement('script'); s.type = 'module'; s.src = '/static/js/auto_probe_release.js'; document.head.appendChild(s); } } catch (e) { } })();
+    </script>
+
+    <!-- Core libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mathjs/11.8.0/math.min.js"></script>
+    <!-- Lottie for splash animation -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lottie-web/5.12.2/lottie.min.js"></script>
+
+    <!-- Early shims: provide globals the tests probe before modules load -->
+    <script>
+        (function bootEarlyGlobals() {
+            try {
+                const isPW = !!(navigator.webdriver) || /playwright|headless/i.test(navigator.userAgent || '');
+                const urlHasE2E = /__e2e=1/.test(location.search || '');
+                window.__TEST_MODE = isPW || urlHasE2E;
+            } catch { window.__TEST_MODE = false; }
+            // E2E-friendly release/exit tuning
+            try {
+                window.RELEASE_DELAY_FRAMES = 1;
+                window.REL_HAND_DIST_PX = 120;
+                window.REL_POSE_STREAK = 1;
+                window.REL_UPWARD_MIN_FRAMES = 1;
+                window.EXIT_LINGER_FRAMES = 8;
+                window.EXIT_BELOW_MARGIN = 12;
+                window.proxX = 200;
+                window.proxYAbove = 170;
+                window.proxYBelow = 100;
+            } catch { }
+            // Prefer a dense slow-pass during shot windows for backend accuracy
+            try {
+                // Backend pre-roll cadence (analyzer pump when paused)
+                window.__PREROLL_FPS = window.__PREROLL_FPS || 10;
+                // Test-mode hardening: denser backend, ROI-only, server detect
+                if (window.__TEST_MODE) {
+                    window.FBF_VISUAL_FPS = 10;
+                    window.FBF_MIN_FRAMES = 48;         // ensure long sampling window
+                    window.__forceServerDetect = true;
+                    window.DETECT_ROI_ONLY = true;
+                    window.__ROI_DETECT_ALWAYS = true;
+                    window.ARC_SMOOTH = true;
+                }
+            } catch { }
+
+            // Overlay helpers: minimal no-op-safe fallbacks (replaced by module later)
+            if (typeof window.ensureOverlayCss !== 'function') {
+                window.ensureOverlayCss = function ensureOverlayCssFallback() {
+                    try {
+                        const ov = document.getElementById('overlay');
+                        const vid = document.getElementById('videoPlayer');
+                        if (!ov || !vid) return;
+                        const anchor = vid.parentElement || document.body;
+                        if (getComputedStyle(anchor).position === 'static') anchor.style.position = 'relative';
+                        ov.style.position = 'absolute'; ov.style.left = '0'; ov.style.top = '0';
+                        ov.style.userSelect = 'none'; ov.style.pointerEvents = 'none'; ov.style.zIndex = '100';
+                    } catch { }
+                };
+            }
+            if (typeof window.lockOverlayToVideo !== 'function') {
+                window.lockOverlayToVideo = function lockOverlayToVideoFallback() {
+                    try {
+                        const ov = document.getElementById('overlay');
+                        const vid = document.getElementById('videoPlayer');
+                        if (!ov || !vid) return;
+                        const r = vid.getBoundingClientRect();
+                        const dpr = window.devicePixelRatio || 1;
+                        ov.width = Math.max(1, Math.round((vid.videoWidth || r.width) * dpr));
+                        ov.height = Math.max(1, Math.round((vid.videoHeight || r.height) * dpr));
+                    } catch { }
+                };
+            }
+
+            // Analyzer: stub that defers to real implementation once loaded
+            if (typeof window.analyzeVideoFrameByFrame !== 'function') {
+                window.analyzeVideoFrameByFrame = function analyzerDeferred(v, c) {
+                    // Attempt immediate handoff if real impl already present
+                    const real = (window.__realAnalyzeVideoFrameByFrame || window.legacyAnalyzeVideoFrameByFrame);
+                    if (typeof real === 'function') { try { return real(v, c); } catch { } }
+                    // Kick a fast poll to start once available
+                    let tries = 0;
+                    const t = setInterval(() => {
+                        const fn = (window.__realAnalyzeVideoFrameByFrame || window.legacyAnalyzeVideoFrameByFrame);
+                        if (typeof fn === 'function' || ++tries > 80) {
+                            clearInterval(t);
+                            if (typeof fn === 'function') { try { fn(v, c); } catch { } }
+                        }
+                    }, 50);
+                    // Nudge: dynamically import analyzer to hurry availability
+                    try {
+                        import('/static/js/analyzer.js').then(m => {
+                            try { (window.__bootLog ||= []).push('analyzer_import_ok'); } catch { }
+                            if (typeof m?.analyzeVideoFrameByFrame === 'function') {
+                                window.__realAnalyzeVideoFrameByFrame = m.analyzeVideoFrameByFrame;
+                            }
+                        }).catch((e) => { try { (window.__bootLog ||= []).push('analyzer_import_err:' + (e?.message || e)); } catch { } });
+                    } catch (e) { try { (window.__bootLog ||= []).push('analyzer_import_throw:' + (e?.message || e)); } catch { } }
+                };
+            }
+        })();
+    </script>
+
+    <!-- MediaPipe Pose Model -->
+    <script type="module">
+        import { FilesetResolver, PoseLandmarker } from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/vision_bundle.mjs';
+        window.FilesetResolver = FilesetResolver;
+        window.PoseLandmarker = PoseLandmarker;
+    </script>
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="/static/style.css" />
+    <!-- Boxicons -->
+    <link href="https://unpkg.com/boxicons@2.1.4/css/boxicons.min.css" rel="stylesheet" />
 
 </head>
 
 <body>
 
-  <!-- Splash animation (3s) -->
-  <div id="splashOverlay" style="
+    <!-- Splash animation (3s) -->
+    <div id="splashOverlay" style="
     position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
     background: radial-gradient(ellipse at center, rgba(0,0,0,.85) 0%, rgba(0,0,0,.92) 60%, rgba(0,0,0,.98) 100%);
     z-index:10080;">
-    <div id="lottieSplash" style="width:min(70vw,520px); height:min(70vh,520px);"></div>
-  </div>
-
-  <!-- Auth / Start overlays -->
-  <div id="startSessionOverlay" style="
-    position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:10060;">
-    <div style="display:flex; flex-direction:column; align-items:center; gap:16px;">
-      <button id="btnStartLive" style="
-        font:700 22px system-ui, -apple-system, Segoe UI, Arial; padding:16px 24px; border-radius:14px; border:1px solid rgba(255,255,255,.18);
-        background: rgba(0,0,0,.78); color:#fff; cursor:pointer; box-shadow:0 10px 40px rgba(0,0,0,.35);">Start Session</button>
-      <button id="btnStartChallenge" style="
-        display:none; font:700 18px system-ui, -apple-system, Segoe UI, Arial; padding:12px 20px; border-radius:12px; border:1px solid rgba(255,255,255,.18);
-        background: rgba(17,28,46,.82); color:#fff; cursor:pointer; box-shadow:0 8px 28px rgba(0,0,0,.32);">Start Challenge Session</button>
-      <div id="challengeBtnNote" style="display:none; font:500 12px system-ui; text-align:center; color:#f6d365; max-width:320px;"></div>
+        <div id="lottieSplash" style="width:min(70vw,520px); height:min(70vh,520px);"></div>
     </div>
-  </div>
 
-  <div id="authOverlay" style="
+    <!-- Auth / Start overlays -->
+    <div id="startSessionOverlay" style="
     position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:10060;">
-    <div id="authCard" style="
+        <div style="display:flex; flex-direction:column; align-items:center; gap:16px;">
+
+            <button id="btnStartLive" style="
+        font:700 22px system-ui, -apple-system, Segoe UI, Arial; padding:16px 24px; border-radius:14px; border:1px solid rgba(255,255,255,.18);
+        background: rgba(0,0,0,.78); color:#fff; cursor:pointer; box-shadow:0 10px 40px rgba(0,0,0,.35);">Start
+                Session</button>
+
+            <p> </p>
+
+            <button id="btnEnableMic" style="
+        font:700 16px system-ui, -apple-system, Segoe UI, Arial;
+        padding:12px 18px; border-radius:12px;
+        border:1px solid rgba(255,255,255,.18);
+        background: rgba(0,0,0,.65); color:#fff;
+        display:none; cursor:pointer; box-shadow:0 6px 20px rgba(0,0,0,.28);">
+                Enable Mic & Voice
+            </button>
+
+            <button id="btnStartChallenge" style="
+        display:none; font:700 18px system-ui, -apple-system, Segoe UI, Arial; padding:12px 20px; border-radius:12px; border:1px solid rgba(255,255,255,.18);
+        background: rgba(17,28,46,.82); color:#fff; cursor:pointer; box-shadow:0 8px 28px rgba(0,0,0,.32);">Start
+                Challenge Session</button>
+            <div id="challengeBtnNote"
+                style="display:none; font:500 12px system-ui; text-align:center; color:#f6d365; max-width:320px;"></div>
+        </div>
+    </div>
+
+    <div id="authOverlay" style="
+    position:fixed; inset:0; display:none; align-items:center; justify-content:center; z-index:10060;">
+        <div id="authCard" style="
       width:min(92%, 520px); background: rgba(0,0,0,.88); color:#fff; border:1px solid rgba(255,255,255,.12);
       border-radius:16px; padding:18px 18px 16px; box-shadow:0 10px 40px rgba(0,0,0,.45);">
-      <div id="authTitle" style="font:700 18px system-ui; margin-bottom:10px; text-align:center;">Welcome to Doach</div>
-      <div id="authBody"></div>
+            <div id="authTitle" style="font:700 18px system-ui; margin-bottom:10px; text-align:center;">Welcome to Doach
+            </div>
+            <div id="authBody"></div>
+        </div>
     </div>
-  </div>
 
-  <!-- Overlay Prompt Message -->
-  <div id="promptBar"></div>
+    <!-- Overlay Prompt Message -->
+    <div id="promptBar"></div>
 
-  <!-- ✅ Main Video + Overlay -->
-  <div class="session-container">
-    <div class="video-frame">
-      <video id="videoPlayer" muted playsinline></video>
-      <canvas id="overlay"></canvas>
-      <div class="session-status">SESSION IN PROGRESS...</div>
-      <!-- Top-left demo controls removed; use bottom HUD controls instead -->
+    <!-- ✅ Main Video + Overlay -->
+    <div class="session-container">
+        <div class="video-frame">
+            <video id="videoPlayer" muted playsinline></video>
+            <canvas id="overlay"></canvas>
+            <div class="session-status">SESSION IN PROGRESS...</div>
+            <!-- Top-left demo controls removed; use bottom HUD controls instead -->
+        </div>
     </div>
-  </div>
 
-  <!-- ✅ Coach Feedback + Shot Summary -->
-  <div id="coachNotes" style="
+    <!-- ✅ Coach Feedback + Shot Summary -->
+    <div id="coachNotes" style="
     position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
     max-width: 520px; background: rgba(0,0,0,0.7); color: #fff;
     padding: 10px 14px; border-radius: 8px; text-align: center;
     font-size: 14px; line-height: 1.4; z-index: 900; pointer-events: none;">
-    <strong>🤖 Coach Feedback</strong><br>
-    <span style="color:gray;">(No shot yet)</span>
-  </div>
+        <strong>Doach Feedback</strong><br>
+        <span style="color:gray;">(No shot yet)</span>
+    </div>
 
-  <div id="shotOverlaySummary" style="
+    <div id="shotOverlaySummary" style="
     position: absolute;
     bottom: 80px;
     right: 20px;
@@ -247,128 +296,124 @@
     pointer-events: none;
     display: none;"></div>
 
-  <!-- Hidden upload control the new “Content” menu will click -->
-  <input type="file" id="videoInput" accept="video/*" hidden />
+    <!-- Hidden upload control the new “Content” menu will click -->
+    <input type="file" id="videoInput" accept="video/*" hidden />
 
-  <!-- Mount the new Hamburger menu + Feedback widget -->
-  <script type="module">
-    import { installFeedbackWidget } from '/static/js/feedback_widget.js';
-    window.addEventListener('DOMContentLoaded', () => installFeedbackWidget());
-  </script>
-
-
-  <!-- (Keep) lightweight helpers already on the page -->
-  <script>
-    document.addEventListener("DOMContentLoaded", () => {
-      const promptOverlay = document.getElementById("overlayPrompt");
-
-      window.showPrompt = (message) => {
-        promptOverlay.textContent = message;
-        promptOverlay.style.display = "block";
-      };
-      window.hidePrompt = () => { promptOverlay.style.display = "none"; };
-
-      window.lockHoop = function () {
-        hidePrompt();
-        console.log("✅ Hoop lock UI confirmed");
-      };
-
-      window.endSession = () => {
-        try { window.autoEndSessionAndSummarize?.(); }
-        catch { alert('✅ Session ended.'); }
-      };
-    });
-  </script>
-
-  <script>
-    function startNativeVoice() {
-      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'startVoice' });
-    }
-    function stopNativeVoice() {
-      window.webkit?.messageHandlers?.doach?.postMessage({ action: 'stopVoice' });
-    }
+    <!-- Mount the new Hamburger menu + Feedback widget -->
+    <script type="module">
+        import { installFeedbackWidget } from '/static/js/feedback_widget.js';
+        window.addEventListener('DOMContentLoaded', () => installFeedbackWidget());
     </script>
 
-    
 
-<!-- ui menu (classic, auto-mounts) -->
-<script src="/static/js/ui_menu.js?v=2"></script>
+    <!-- (Keep) lightweight helpers already on the page -->
+    <script>
+        document.addEventListener("DOMContentLoaded", () => {
+            const promptOverlay = document.getElementById("overlayPrompt");
 
-  <!-- Early bootstrap: expose overlay helpers + analyzer global before app.js -->
-  <script type="module">
-    // Import overlay helpers first; the module binds window.ensureOverlayCss/lockOverlayToVideo
-    try {
-      await import('/static/js/fix_overlay_display.js');
-      // default to coach: show pose + hoop only
-      try { window.setOverlayMode?.('coach'); } catch {}
-    } catch (e) {
-      console.warn('[boot] overlay helpers failed to import early', e);
-    }
-    // Import analyzer and bind legacy global expected by tests
-    try {
-      const mod = await import('/static/js/analyzer.js');
-      if (mod?.analyzeVideoFrameByFrame) {
-        window.analyzeVideoFrameByFrame = mod.analyzeVideoFrameByFrame;
-      }
-    } catch (e) {
-      console.warn('[boot] analyzer failed to import early', e);
-    }
+            window.showPrompt = (message) => {
+                promptOverlay.textContent = message;
+                promptOverlay.style.display = "block";
+            };
+            window.hidePrompt = () => { promptOverlay.style.display = "none"; };
 
-    // Dev/CI: auto‑start background FBF plane when running automation or ?__bg=1
-    try {
-      const isBG = /[?&]__bg=1/.test(location.search) || (window.__TEST_MODE === true);
-      if (isBG) {
-        window.__BG_ONLY = true;
-        window.__PREROLL_FPS = window.__PREROLL_FPS || 10;
-        window.__forceServerDetect = true;      // prefer backend YOLO for accuracy
-        window.DETECT_ROI_ONLY = true;
-        window.__ROI_DETECT_ALWAYS = true;
-        // Load development HUD for BG plane
-        try { await import('/static/js/bg_hud.js'); } catch {}
-        const bootBG = () => {
-          const v = document.getElementById('videoPlayer');
-          const ov = document.getElementById('overlay');
-          if (!v || !ov) return;
-          const syncWH = () => { try { ov.width = v.videoWidth || ov.width || 1280; ov.height = v.videoHeight || ov.height || 720; } catch {} };
-          if (v.readyState >= 2) { syncWH(); }
-          else {
-            v.addEventListener('loadedmetadata', syncWH, { once: true });
-            v.addEventListener('canplay', syncWH, { once: true });
-          }
-          try { window.analyzeVideoFrameByFrame?.(v, ov); } catch {}
-          try { v.pause(); } catch {}
-        };
-        if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', bootBG); else bootBG();
-      }
-    } catch {}
-  </script>
+            window.lockHoop = function () {
+                hidePrompt();
+                console.log("✅ Hoop lock UI confirmed");
+            };
 
-  <!-- app entry (ESM) imports the rest of the modules -->
-  <script type="module" src="/static/js/app.js"></script>
-  <script type="module" src="/static/js/session_manager.js"></script>
+            window.endSession = () => {
+                try { window.autoEndSessionAndSummarize?.(); }
+                catch { alert('✅ Session ended.'); }
+            };
+        });
+    </script>
 
-  <!-- Splash + Auth bootstrap -->
-  <script>
-    (function bootSplashAndAuth(){
-      const splash = document.getElementById('splashOverlay');
-      const lottieDiv = document.getElementById('lottieSplash');
-      // try {
-      //   if (window.lottie && lottieDiv) {
-      //     const anim = lottie.loadAnimation({ container: lottieDiv, renderer: 'svg', loop: false, autoplay: true, path: '/static/GlowingYellow%202.json' });
-      //   }
-      // } catch {}
+    <script>
+        function startNativeVoice() {
+            window.webkit?.messageHandlers?.doach?.postMessage({ action: 'startVoice' });
+        }
+        function stopNativeVoice() {
+            window.webkit?.messageHandlers?.doach?.postMessage({ action: 'stopVoice' });
+        }
+    </script>
 
-      const showStart = () => { try { document.getElementById('startSessionOverlay').style.display = 'flex'; } catch {} };
-      const hideStart = () => { try { document.getElementById('startSessionOverlay').style.display = 'none'; } catch {} };
-      const showAuth  = () => { try { document.getElementById('authOverlay').style.display = 'flex'; } catch {} };
-      const hideAuth  = () => { try { document.getElementById('authOverlay').style.display = 'none'; } catch {} };
-      const setAuthBody = (html) => { try { document.getElementById('authBody').innerHTML = html; } catch {} };
-      const setAuthTitle= (txt)  => { try { document.getElementById('authTitle').textContent = txt; } catch {} };
 
-      // Login form
-      function renderLogin(){
-        setAuthTitle('Login to Doach');
-        setAuthBody(`
+
+    <!-- ui menu (classic, auto-mounts) -->
+    <script src="/static/js/ui_menu.js?v=2"></script>
+
+    <!-- Early bootstrap: expose overlay helpers + analyzer global before app.js -->
+    <script type="module">
+        // Import overlay helpers first; the module binds window.ensureOverlayCss/lockOverlayToVideo
+        try {
+            await import('/static/js/fix_overlay_display.js');
+            // default to coach: show pose + hoop only
+            try { window.setOverlayMode?.('coach'); } catch { }
+        } catch (e) {
+            console.warn('[boot] overlay helpers failed to import early', e);
+        }
+        // Import analyzer and bind legacy global expected by tests
+        try {
+            const mod = await import('/static/js/analyzer.js');
+            if (mod?.analyzeVideoFrameByFrame) {
+                window.analyzeVideoFrameByFrame = mod.analyzeVideoFrameByFrame;
+            }
+        } catch (e) {
+            console.warn('[boot] analyzer failed to import early', e);
+        }
+
+        // Dev/CI: auto‑start background FBF plane when running automation or ?__bg=1
+        try {
+            const isBG = /[?&]__bg=1/.test(location.search) || (window.__TEST_MODE === true);
+            if (isBG) {
+                window.__BG_ONLY = true;
+                window.__PREROLL_FPS = window.__PREROLL_FPS || 10;
+                window.__forceServerDetect = true;      // prefer backend YOLO for accuracy
+                window.DETECT_ROI_ONLY = true;
+                window.__ROI_DETECT_ALWAYS = true;
+                // Load development HUD for BG plane
+                try { await import('/static/js/bg_hud.js'); } catch { }
+                const bootBG = () => {
+                    const v = document.getElementById('videoPlayer');
+                    const ov = document.getElementById('overlay');
+                    if (!v || !ov) return;
+                    const syncWH = () => { try { ov.width = v.videoWidth || ov.width || 1280; ov.height = v.videoHeight || ov.height || 720; } catch { } };
+                    if (v.readyState >= 2) { syncWH(); }
+                    else {
+                        v.addEventListener('loadedmetadata', syncWH, { once: true });
+                        v.addEventListener('canplay', syncWH, { once: true });
+                    }
+                    try { window.analyzeVideoFrameByFrame?.(v, ov); } catch { }
+                    try { v.pause(); } catch { }
+                };
+                if (document.readyState === 'loading') window.addEventListener('DOMContentLoaded', bootBG); else bootBG();
+            }
+        } catch { }
+    </script>
+
+    <!-- Splash + Auth bootstrap -->
+    <script>
+        (function bootSplashAndAuth() {
+            const splash = document.getElementById('splashOverlay');
+            const lottieDiv = document.getElementById('lottieSplash');
+            // try {
+            //   if (window.lottie && lottieDiv) {
+            //     const anim = lottie.loadAnimation({ container: lottieDiv, renderer: 'svg', loop: false, autoplay: true, path: '/static/GlowingYellow%202.json' });
+            //   }
+            // } catch {}
+
+            const showStart = () => { try { document.getElementById('startSessionOverlay').style.display = 'flex'; } catch { } };
+            const hideStart = () => { try { document.getElementById('startSessionOverlay').style.display = 'none'; } catch { } };
+            const showAuth = () => { try { document.getElementById('authOverlay').style.display = 'flex'; } catch { } };
+            const hideAuth = () => { try { document.getElementById('authOverlay').style.display = 'none'; } catch { } };
+            const setAuthBody = (html) => { try { document.getElementById('authBody').innerHTML = html; } catch { } };
+            const setAuthTitle = (txt) => { try { document.getElementById('authTitle').textContent = txt; } catch { } };
+
+            // Login form
+            function renderLogin() {
+                setAuthTitle('Login to Doach');
+                setAuthBody(`
           <div style="display:grid; gap:10px">
             <input id="lg_email" type="email" placeholder="Email" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
             <input id="lg_password" type="password" placeholder="Password" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
@@ -376,22 +421,22 @@
             <button id="btnShowSignup" style="padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:transparent;color:#fff;font:600 13px system-ui;cursor:pointer">Sign up Now</button>
             <div id="authMsg" style="min-height:18px;color:#f88;font:600 12px system-ui"></div>
           </div>`);
-        document.getElementById('btnShowSignup').onclick = renderSignup;
-        document.getElementById('btnDoLogin').onclick = async () => {
-          const email = document.getElementById('lg_email').value.trim();
-          const password = document.getElementById('lg_password').value;
-          try {
-            const r = await fetch('/api/auth/login', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ email, password }) });
-            const j = await r.json(); if (!r.ok) throw new Error(j.error||'Login failed');
-            localStorage.setItem('firstname', j.name || 'player'); hideAuth(); showStart();
-          } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Login failed'; }
-        };
-      }
+                document.getElementById('btnShowSignup').onclick = renderSignup;
+                document.getElementById('btnDoLogin').onclick = async () => {
+                    const email = document.getElementById('lg_email').value.trim();
+                    const password = document.getElementById('lg_password').value;
+                    try {
+                        const r = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email, password }) });
+                        const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Login failed');
+                        localStorage.setItem('firstname', j.name || 'player'); hideAuth(); showStart();
+                    } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Login failed'; }
+                };
+            }
 
-      // Signup form (extended)
-      function renderSignup(){
-        setAuthTitle('Create Your Account');
-        setAuthBody(`
+            // Signup form (extended)
+            function renderSignup() {
+                setAuthTitle('Create Your Account');
+                setAuthBody(`
           <div style="display:grid; gap:10px">
             <input id="su_name"  placeholder="Name" style="padding:12px;border-radius:10px;border:1px solid rgba(255,255,255,.16);background:#111;color:#fff">
             <div style="display:flex; gap:8px">
@@ -423,117 +468,206 @@
             <button id="btnShowLogin" style="padding:10px;border-radius:10px;border:1px solid rgba(255,255,255,.18);background:transparent;color:#fff;font:600 13px system-ui;cursor:pointer">Back to Login</button>
             <div id="authMsg" style="min-height:18px;color:#f88;font:600 12px system-ui"></div>
           </div>`);
-        document.getElementById('btnShowLogin').onclick = renderLogin;
-        document.getElementById('btnDoSignup').onclick = async () => {
-          const name = document.getElementById('su_name').value.trim();
-          const email= document.getElementById('su_email').value.trim();
-          const password = document.getElementById('su_pw').value;
-          const profile = {
-            name,
-            birthdate: `${document.getElementById('su_birth_mm').value}/${document.getElementById('su_birth_dd').value}/${document.getElementById('su_birth_yy').value}`,
-            phone: document.getElementById('su_phone').value.trim(),
-            height: `${document.getElementById('su_height_ft').value}ft ${document.getElementById('su_height_in').value}in`,
-            hand: document.getElementById('su_hand').value,
-            experience: document.getElementById('su_exp').value
-          };
-          try {
-            const r = await fetch('/api/auth/register', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ name, email, password }) });
-            const j = await r.json(); if (!r.ok) throw new Error(j.error||'Register failed');
-            localStorage.setItem('doachProfile', JSON.stringify(profile));
-            localStorage.setItem('firstname', profile.name || 'player');
-            hideAuth(); showStart();
-          } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Register failed'; }
-          try { await window.prefetchChallengeState?.(); } catch {}
-        };
-      }
+                document.getElementById('btnShowLogin').onclick = renderLogin;
+                document.getElementById('btnDoSignup').onclick = async () => {
+                    const name = document.getElementById('su_name').value.trim();
+                    const email = document.getElementById('su_email').value.trim();
+                    const password = document.getElementById('su_pw').value;
+                    const profile = {
+                        name,
+                        birthdate: `${document.getElementById('su_birth_mm').value}/${document.getElementById('su_birth_dd').value}/${document.getElementById('su_birth_yy').value}`,
+                        phone: document.getElementById('su_phone').value.trim(),
+                        height: `${document.getElementById('su_height_ft').value}ft ${document.getElementById('su_height_in').value}in`,
+                        hand: document.getElementById('su_hand').value,
+                        experience: document.getElementById('su_exp').value
+                    };
+                    try {
+                        const r = await fetch('/api/auth/register', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, email, password }) });
+                        const j = await r.json(); if (!r.ok) throw new Error(j.error || 'Register failed');
+                        localStorage.setItem('doachProfile', JSON.stringify(profile));
+                        localStorage.setItem('firstname', profile.name || 'player');
+                        hideAuth(); showStart();
+                    } catch (e) { document.getElementById('authMsg').textContent = e.message || 'Register failed'; }
+                    try { await window.prefetchChallengeState?.(); } catch { }
+                };
+            }
 
-      // Check auth and show next view after splash (3s)
-      function afterSplash(){
-        fetch('/api/auth/me').then(r=>r.json()).then(j=>{
-          try { splash.style.display = 'none'; } catch {}
-          const user = j && j.user;
-          if (user) { showStart(); try { window.prefetchChallengeState?.(); } catch {} }
-          else { showAuth(); renderLogin(); }
-        }).catch(()=>{ try { splash.style.display='none'; } catch {}; showAuth(); renderLogin(); });
-      }
-      setTimeout(afterSplash, 3000);
+            // Check auth and show next view after splash (3s)
+            function afterSplash() {
+                fetch('/api/auth/me').then(r => r.json()).then(j => {
+                    try { splash.style.display = 'none'; } catch { }
+                    const user = j && j.user;
+                    if (user) { showStart(); try { window.prefetchChallengeState?.(); } catch { } }
+                    else { showAuth(); renderLogin(); }
+                }).catch(() => { try { splash.style.display = 'none'; } catch { }; showAuth(); renderLogin(); });
+            }
+            setTimeout(afterSplash, 3000);
 
-      async function beginLiveSession(opts = {}) {
-        if (window.__beginSessionBusy) return;
-        window.__beginSessionBusy = true;
-        const detail = { via: opts.via || 'button' };
-        try {
-          try {
-            const unlock = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : window.primeCoachAudio;
-            if (typeof unlock === 'function') await unlock();
-          } catch (err) {
-            try { console.warn('[start-live] audio unlock failed', err); } catch {}
-          }
-          try { window.__AWAITING_NEW_SESSION_CONFIRM = false; } catch {}
-          try { window.__NEW_SESSION_PROMPTED = false; } catch {}
-          try { window.doachSession?.reset?.(); } catch {}
-          try { window.__shotList = []; window.__finalizedShotIds?.clear?.(); } catch {}
-          try { window.__shots = new Map(); window.__SHOT_ID = 0; window.__sessionTotals = { attempts:0, made:0 }; } catch {}
-          try { window.__SESSION_SHOT_COUNT = 0; } catch {}
-          try { window.__SESSION_ACTIVE = false; } catch {}
+            async function beginLiveSession(opts = {}) {
+                if (window.__beginSessionBusy) return;
+                window.__beginSessionBusy = true;
+                const detail = { via: opts.via || 'button' };
+                try {
+                    try { window.__greetedOnce = false; } catch { }
+                    try {
+                        const unlock = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : window.primeCoachAudio;
+                        if (typeof unlock === 'function') {
+                            const maybe = unlock();
+                            if (maybe && typeof maybe.then === 'function') {
+                                const unlockPromise = Promise.resolve(maybe);
+                                const timeout = new Promise((resolve) => setTimeout(() => resolve(false), 600));
+                                unlockPromise.catch(() => { });
+                                await Promise.race([unlockPromise.catch(() => false), timeout]);
+                            }
+                        }
+                    } catch (err) {
+                        try { console.warn('[start-live] audio unlock failed', err); } catch { }
+                    }
+                    try { window.__AWAITING_NEW_SESSION_CONFIRM = false; } catch { }
+                    try { window.__NEW_SESSION_PROMPTED = false; } catch { }
+                    try { window.doachSession?.reset?.(); } catch { }
+                    try { window.__shotList = []; window.__finalizedShotIds?.clear?.(); } catch { }
+                    try { window.__shots = new Map(); window.__SHOT_ID = 0; window.__sessionTotals = { attempts: 0, made: 0 }; } catch { }
+                    try { window.__SESSION_SHOT_COUNT = 0; } catch { }
+                    try { window.__SESSION_ACTIVE = false; } catch { }
 
-          try { hideStart(); } catch {}
-          try { window.dispatchEvent(new CustomEvent('doach:new-session-requested', { detail })); } catch {}
+                    try { hideStart(); } catch { }
+                    try { window.dispatchEvent(new CustomEvent('doach:new-session-requested', { detail })); } catch { }
 
-          try {
-            const started = await window.doachSession?.start?.();
-            if (started && !window.__SESSION_ID) window.__SESSION_ID = started;
-            window.__SHOT_IDX = window.__SHOT_IDX || 0;
-          } catch (err) {
-            console.warn('[start-live] session start failed', err);
-          }
+                    try {
+                        const started = await window.doachSession?.start?.();
+                        if (started && !window.__SESSION_ID) window.__SESSION_ID = started;
+                        window.__SHOT_IDX = window.__SHOT_IDX || 0;
+                    } catch (err) {
+                        console.warn('[start-live] session start failed', err);
+                    }
 
-          try {
-            await window.requestInitialMediaAccess?.({ video: true, audio: true });
-          } catch (err) {
-            try { console.warn('[media] initial access failed', err); } catch {}
-          }
-          try { await window.ensureMicPrimed?.(); } catch {}
-          try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch {}
-          try { window.doachVoice?.on?.(); } catch {}
-          try { await window.primeCoachAudio?.(); } catch {}
-          try {
-            if (window.startCamera) await window.startCamera();
-          } catch {}
-          try { window.dispatchEvent(new CustomEvent('hud:start-session', { detail })); } catch {}
-        } finally {
-          window.__beginSessionBusy = false;
-        }
-      }
+                    const ua = (navigator.userAgent || '').toLowerCase();
+                    const isIOS = /iphone|ipad|ipod/.test(ua);
+                    const wantMic = (window.PREF_ALLOW_MIC === true);
 
-      try { window.beginLiveSession = beginLiveSession; } catch {}
+                    try {
+                        await window.requestInitialMediaAccess?.({ video: true, audio: (wantMic && !isIOS) });
+                    } catch (err) {
+                        try { console.warn('[media] initial access failed', err); } catch { }
+                    }
+                    if (wantMic) {
+                        try { await window.ensureMicPrimed?.({ audio: true }); } catch { }
+                        try { window.__startCoachVoiceRecognition?.(); } catch { }
+                        try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail })); } catch { }
+                        try { window.doachVoice?.on?.(); } catch { }
+                    }
+                    try { localStorage.setItem('doach_muted', 'false'); window.__coachMuted = false; } catch { }
+                    if (wantMic) {
+                        try { window.doachVoice?.on?.(); } catch { }
+                    }
+                    try { await window.primeCoachAudio?.(); } catch { }
+                    try {
+                        if (window.startCamera) await window.startCamera();
+                    } catch { }
+                    try { window.dispatchEvent(new CustomEvent('hud:start-session', { detail })); } catch { }
 
-      // Start Session wiring
-      try {
-        document.getElementById('btnStartLive').onclick = () => { beginLiveSession({ via: 'button' }); };
-      } catch {}
-    })();
-  </script>
+                    (function scheduleGreeting() {
+                        // Leave session_manager.js in charge of the greeting.
+                        if (window.PREF_GREETER_SOURCE === 'index') {
+                            try {
+                                if (!window.__greetedOnce && window.__coachMuted === false) {
+                                    window.__greetedOnce = true;
+                                    window.CoachAudio?.unlock?.();
+                                    // window.doachSpeak?.(`I’m Doach, I'm listening and I'm ready.`);
+                                }
+                            } catch { }
 
-<!-- local detector enable (ESM) -->
-<script type="module">
-  (async () => {
-    if (!window.localDetector) {
-      console.warn('[LocalDetector] not loaded; using server detector.');
-      return;
-    }
-    try {
-      const ok = await window.localDetector.enable(
-        '/static/models/best.onnx',
-        ['basketball','hoop','net','backboard','player']
-      );
-      console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
-    } catch (e) {
-      console.warn('[LocalDetector] init failed; using server detector.', e);
-    }
-  })();
-</script>
+                        }
+                    })();
+
+                } finally {
+                    window.__beginSessionBusy = false;
+                }
+            }
+
+            try { window.beginLiveSession = beginLiveSession; } catch { }
+
+            // Start Session wiring
+            try {
+                document.getElementById('btnStartLive').onclick = () => { beginLiveSession({ via: 'button' }); };
+            } catch { }
+        })();
+    </script>
+
+    <script>
+        (function wireEnableMicCTA() {
+            const ua = (navigator.userAgent || '').toLowerCase();
+            const isIOS = /iphone|ipad|ipod/.test(ua);
+            const btn = document.getElementById('btnEnableMic');
+            if (!btn) return;
+
+            // Only show on iOS when mic pref is currently off
+            const micAllowed = (typeof window.PREF_ALLOW_MIC !== 'undefined') ? !!window.PREF_ALLOW_MIC : false;
+
+            // We want summary TTS too, not just realtime
+            try { window.DOACH_ONLY_REALTIME = false; } catch { }
+
+            if (isIOS && !micAllowed) btn.style.display = 'inline-flex';
+
+            btn.addEventListener('click', async () => {
+                try {
+                    // 0) Flip the stored preference
+                    window.PREF_ALLOW_MIC = true;
+                    const p = (window.doachGetPrefs?.() || {});
+                    window.doachSetPrefs?.({ ...p, allowMic: true });
+
+                    // Ensure unmute so TTS can speak per-shot lines
+                    try {
+                        window.__coachMuted = false;
+                        localStorage.setItem('doach_muted', 'false');
+                        window.dispatchEvent(new CustomEvent('hud:mute-toggle', { detail: { muted: false, via: 'enable-mic-cta' } }));
+                    } catch { }
+
+
+                    // 1) Unlock TTS audio path (so we can speak immediately after)
+                    try { await (window.unlockIOSAudio?.() || window.primeCoachAudio?.()); } catch { }
+
+                    // 2) Trigger the actual mic permission prompt (requires user gesture)
+                    try { await window.ensureMicPrimed?.({ audio: true }); } catch { }
+
+                    // 3) Start recognition + wake voice
+                    try { window.__startCoachVoiceRecognition?.(); } catch { }
+                    try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'enable-mic-cta' } })); } catch { }
+                    try { window.doachVoice?.on?.(); } catch { }
+
+                    // 4) Small confirmation so humans feel less cursed
+                    try { (window.doachSpeak || window.coachSpeak)?.("Voice enabled."); } catch { }
+
+                    btn.style.display = 'none';
+                } catch { }
+            });
+        })();
+    </script>
+
+
+
+
+    <!-- local detector enable (ESM) -->
+    <script type="module">
+        (async () => {
+            if (!window.localDetector) {
+                console.warn('[LocalDetector] not loaded; using server detector.');
+                return;
+            }
+            try {
+                const ok = await window.localDetector.enable(
+                    '/static/models/best.onnx',
+                    ['basketball', 'hoop', 'net', 'backboard', 'player']
+                );
+                console.log(ok ? '✅ Local detector enabled' : '⬇️ Using server detector');
+            } catch (e) {
+                console.warn('[LocalDetector] init failed; using server detector.', e);
+            }
+        })();
+    </script>
 
 
 </body>
+
 </html>
