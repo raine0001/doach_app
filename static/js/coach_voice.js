@@ -393,6 +393,7 @@ export async function unlockIOSAudio() {
     }
   } catch {}
 
+  try { window.__iosAudioUnlocked = true; } catch {}
   return true;
 }
 
@@ -450,6 +451,7 @@ export async function primeCoachAudio() {
     }
 
     if (unlocked) __coachAudioPrimed = true;
+    if (unlocked) { try { window.__iosAudioUnlocked = true; } catch {} }
     return unlocked;
   })();
 

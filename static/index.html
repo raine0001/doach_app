@@ -463,6 +463,12 @@
         window.__beginSessionBusy = true;
         const detail = { via: opts.via || 'button' };
         try {
+          try {
+            const unlock = (typeof window.unlockIOSAudio === 'function') ? window.unlockIOSAudio : window.primeCoachAudio;
+            if (typeof unlock === 'function') await unlock();
+          } catch (err) {
+            try { console.warn('[start-live] audio unlock failed', err); } catch {}
+          }
           try { window.__AWAITING_NEW_SESSION_CONFIRM = false; } catch {}
           try { window.__NEW_SESSION_PROMPTED = false; } catch {}
           try { window.doachSession?.reset?.(); } catch {}
