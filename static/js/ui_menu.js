@@ -35,7 +35,9 @@
     window.coachSpeak = function (text) {
       if (!text) return;
       if (typeof window.doachSpeak === 'function') { try { return window.doachSpeak(text); } catch {} }
-      try { const u = new SpeechSynthesisUtterance(String(text)); window.speechSynthesis?.speak(u); } catch {}
+      if (typeof window.doachSpeak === 'function') {
+        try { window.doachSpeak(String(text)); } catch {}
+      }
     };
   }
 
@@ -1285,9 +1287,8 @@ async function openMyDoachPanel(){
       try { await window.CoachAudio?.unlock?.(); } catch {}
 
       try {
-        const speaker = window.doachSpeak || window.coachSpeak || window.speak;
-        if (typeof speaker === 'function') {
-          await speaker(line);
+        if (typeof window.doachSpeak === 'function') {
+          await window.doachSpeak(line);
         }
       } catch {}
     }
@@ -1398,7 +1399,291 @@ async function openMyDoachPanel(){
     const btnSessions = document.createElement('button'); btnSessions.className = 'doach-btn'; btnSessions.textContent = 'My Sessions';
     actions.append(btnLogin, btnCreate, btnLogout, btnSessions);
 
-    body.append(status, nameRow, emailRow, pwRow, actions);
+    const faceSection = document.createElement('div'); faceSection.className = 'doach-face-lock'; faceSection.style.marginTop = '18px'; faceSection.style.borderTop = '1px solid rgba(255,255,255,0.06)'; faceSection.style.paddingTop = '12px';
+    const faceHeader = document.createElement('div'); faceHeader.textContent = 'Face Lock'; faceHeader.style.cssText = 'font:600 13px system-ui; letter-spacing:.02em; opacity:.88; margin-bottom:6px;';
+    const faceStatus = document.createElement('div'); faceStatus.className = 'doach-face-status'; faceStatus.style.cssText = 'font:500 12px system-ui; opacity:.8; margin-bottom:10px;'; faceStatus.textContent = 'Checking device support...';
+
+    const consentRow = document.createElement('div'); consentRow.className = 'doach-field';
+    const consentLab = document.createElement('label'); consentLab.textContent = 'Enable face lock';
+    const consentToggle = document.createElement('input'); consentToggle.type = 'checkbox'; consentToggle.disabled = true;
+    consentRow.append(consentLab, consentToggle);
+
+    const strategyRow = document.createElement('div'); strategyRow.className = 'doach-field';
+    const strategyLab = document.createElement('label'); strategyLab.textContent = 'Enrollment mode';
+    const strategySel = document.createElement('select');
+    [['server', 'Server (recommended)'], ['client', 'Client only']].forEach(([v, t]) => {
+      const opt = document.createElement('option'); opt.value = v; opt.textContent = t; strategySel.appendChild(opt);
+    });
+    strategyRow.append(strategyLab, strategySel);
+
+    const faceActions = document.createElement('div'); faceActions.className = 'doach-actions';
+    const btnEnrollFace = document.createElement('button'); btnEnrollFace.className = 'doach-btn'; btnEnrollFace.textContent = 'Enroll / Refresh';
+    const btnClearFace = document.createElement('button'); btnClearFace.className = 'doach-btn ghost'; btnClearFace.textContent = 'Clear';
+    faceActions.append(btnEnrollFace, btnClearFace);
+
+    const faceHelp = document.createElement('div'); faceHelp.style.cssText = 'font:500 11px system-ui; opacity:.65; margin-top:6px;'; faceHelp.textContent = 'Keeps pose + ball tracking focused on you. Needs 5-10 clear face crops.';
+
+    faceSection.append(faceHeader, faceStatus, consentRow, strategyRow, faceActions, faceHelp);
+
+    body.append(status, nameRow, emailRow, pwRow, actions, faceSection);
+
+    const faceLockMgr = () => window.FaceLock || window.faceLockManager || null;
+
+    let faceBusy = false;
+    async function updateFaceStatus() {
+      const mgr = faceLockMgr();
+      if (!mgr) {
+        faceStatus.textContent = 'Face lock module unavailable in this build.';
+        consentToggle.disabled = true;
+        strategySel.disabled = true;
+        btnEnrollFace.disabled = true;
+        btnClearFace.disabled = true;
+        return;
+      }
+      try { await mgr.init?.({ silent: true }); } catch {}
+      if (!mgr.userId) {
+        faceStatus.textContent = 'Sign in to enable face lock.';
+        consentToggle.disabled = true;
+        strategySel.disabled = true;
+        btnEnrollFace.disabled = true;
+        btnClearFace.disabled = true;
+        return;
+      }
+      if (window.PREF_FACE_LOCK === false) {
+        faceStatus.textContent = 'Face lock disabled in Preferences.';
+        consentToggle.disabled = true;
+        strategySel.disabled = true;
+        btnEnrollFace.disabled = true;
+        btnClearFace.disabled = true;
+        return;
+      }
+      let supported = true;
+      try {
+        const ready = await mgr.ensureWorker?.();
+        supported = ready !== false;
+      } catch {
+        supported = false;
+      }
+      if (!supported) {
+        faceStatus.textContent = 'Face detector not supported on this device (needs FaceDetector API).';
+        consentToggle.disabled = true;
+        strategySel.disabled = true;
+        btnEnrollFace.disabled = true;
+        btnClearFace.disabled = true;
+        return;
+      }
+      let info = null;
+      try { info = await mgr.refreshStatus?.({ includeEmbedding: false, silent: true }); } catch { info = mgr.status || {}; }
+      info = info || mgr.status || {};
+      const dims = info.embedding_dims || mgr.embeddingDims || null;
+      const updated = info.updated_at ? (() => { try { return new Date(info.updated_at).toLocaleString(); } catch { return String(info.updated_at); } })() : '—';
+      if (info.has_embedding) {
+        faceStatus.textContent = `Template ready • ${dims || '?'} dims • updated ${updated}`;
+        btnClearFace.disabled = false;
+        consentToggle.disabled = false;
+      } else {
+        faceStatus.textContent = 'No face enrolled yet.';
+        btnClearFace.disabled = true;
+        consentToggle.disabled = true;
+      }
+      btnEnrollFace.disabled = false;
+      strategySel.disabled = false;
+      consentToggle.checked = !!info.consent;
+      return info;
+    }
+
+    async function performFaceEnrollment(strategy = 'server', reason = 'manual') {
+      const mgr = faceLockMgr();
+      if (!mgr) { alert('Face lock module unavailable.'); return; }
+      if (faceBusy) return;
+      faceBusy = true;
+      btnEnrollFace.disabled = true; btnClearFace.disabled = true; consentToggle.disabled = true; strategySel.disabled = true;
+      faceStatus.textContent = 'Collecting face crops...';
+      try {
+        await mgr.enroll({ strategy, reason });
+        faceStatus.textContent = 'Face lock ready.';
+      } catch (err) {
+        faceStatus.textContent = 'Enrollment failed.';
+        alert('Face enrollment failed: ' + (err?.message || err));
+      } finally {
+        faceBusy = false;
+        await updateFaceStatus();
+      }
+    }
+
+    function promptFaceLockChoice(reason) {
+      return new Promise((resolve) => {
+        const existing = document.getElementById('faceLockPrompt');
+        try { existing?.remove(); } catch {}
+        const overlay = document.createElement('div');
+        overlay.id = 'faceLockPrompt';
+        Object.assign(overlay.style, {
+          position: 'fixed',
+          inset: '0',
+          background: 'rgba(0,0,0,0.55)',
+          zIndex: 10080,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center'
+        });
+
+        const panel = document.createElement('div');
+        Object.assign(panel.style, {
+          background: 'rgba(16,16,18,0.95)',
+          color: '#fff',
+          padding: '22px 24px 20px',
+          borderRadius: '14px',
+          boxShadow: '0 18px 46px rgba(0,0,0,0.45)',
+          width: 'min(360px, 90vw)',
+          font: '500 14px system-ui',
+          textAlign: 'center'
+        });
+
+        const copy = (() => {
+          if (reason === 'register') {
+            return {
+              title: 'Finish setup with a quick face lock.',
+              body: 'Grab a few face shots now so every shot locks to you.'
+            };
+          }
+          if (reason === 'login') {
+            return {
+              title: 'Keep the coach focused on you.',
+              body: 'Set up face lock in a few seconds and lock your stats to your profile.'
+            };
+          }
+          return {
+            title: 'Face lock keeps the coach on you.',
+            body: 'Want to set it up now? It only takes a second.'
+          };
+        })();
+
+        const title = document.createElement('div');
+        title.textContent = copy.title;
+        title.style.cssText = 'font:600 16px system-ui; margin-bottom:8px;';
+
+        const msg = document.createElement('div');
+        msg.textContent = copy.body;
+        msg.style.opacity = '0.8';
+        msg.style.marginBottom = '16px';
+
+        const btnWrap = document.createElement('div');
+        btnWrap.style.display = 'flex';
+        btnWrap.style.flexDirection = 'column';
+        btnWrap.style.gap = '8px';
+
+        const mkBtn = (label, tone) => {
+          const b = document.createElement('button');
+          b.textContent = label;
+          b.className = 'doach-btn';
+          if (tone === 'ghost') b.className += ' ghost';
+          if (tone === 'danger') {
+            b.style.background = 'rgba(220,60,60,0.9)';
+            b.style.borderColor = 'rgba(220,60,60,0.95)';
+          }
+          return b;
+        };
+
+        const btnSetup = mkBtn('Set up now');
+        const btnRemind = mkBtn('Remind me next login', 'ghost');
+        const btnIgnore = mkBtn('Ignore', 'danger');
+
+        btnWrap.append(btnSetup, btnRemind, btnIgnore);
+
+        const cleanup = (value) => {
+          try { overlay.remove(); } catch {}
+          resolve(value);
+        };
+
+        btnSetup.onclick = () => cleanup('setup');
+        btnRemind.onclick = () => cleanup('remind');
+        btnIgnore.onclick = () => cleanup('ignore');
+        overlay.onclick = (e) => { if (e.target === overlay) cleanup('remind'); };
+
+        panel.append(title, msg, btnWrap);
+        overlay.append(panel);
+        document.body.appendChild(overlay);
+      });
+    }
+
+    async function maybeOfferFaceLock(reason) {
+      if (window.PREF_FACE_LOCK === false) {
+        await updateFaceStatus();
+        return;
+      }
+      const mgr = faceLockMgr();
+      if (!mgr) return;
+      try { await mgr.init?.({ silent: true }); } catch {}
+      let supported = true;
+      try {
+        const ok = await mgr.ensureWorker?.();
+        supported = ok !== false;
+      } catch {
+        supported = false;
+      }
+      if (!supported || !mgr.isSupported?.()) {
+        await updateFaceStatus();
+        return;
+      }
+      await mgr.refreshStatus?.({ includeEmbedding: true, silent: true }).catch(()=>{});
+      const info = mgr.status || {};
+      if (info.has_embedding && info.consent) {
+        await updateFaceStatus();
+        return;
+      }
+      try {
+        if (localStorage.getItem('faceLockIgnore') === '1') {
+          await updateFaceStatus();
+          return;
+        }
+        const snoozeKey = `faceLockSnooze:${reason}`;
+        if (sessionStorage.getItem(snoozeKey) === '1') {
+          await updateFaceStatus();
+          return;
+        }
+      } catch {}
+      const choice = await promptFaceLockChoice(reason);
+      if (choice === 'ignore') {
+        try { localStorage.setItem('faceLockIgnore', '1'); } catch {}
+        try { await mgr.setConsent?.(false); } catch {}
+        await updateFaceStatus();
+        return;
+      }
+      if (choice === 'remind' || !choice) {
+        try { sessionStorage.setItem(`faceLockSnooze:${reason}`, '1'); } catch {}
+        try { await mgr.setConsent?.(false); } catch {}
+        await updateFaceStatus();
+        return;
+      }
+      await performFaceEnrollment(strategySel?.value || 'server', reason);
+    }
+
+    consentToggle.onchange = async () => {
+      const mgr = faceLockMgr();
+      if (!mgr) return;
+      const want = !!consentToggle.checked;
+      consentToggle.disabled = true;
+      try {
+        await mgr.setConsent?.(want);
+        if (want && !mgr.hasEmbedding?.()) {
+          await performFaceEnrollment(strategySel?.value || 'server', 'manual');
+        }
+      } catch (err) {
+        alert('Unable to update face lock: ' + (err?.message || err));
+      } finally {
+        consentToggle.disabled = false;
+        await updateFaceStatus();
+      }
+    };
+
+    btnEnrollFace.onclick = () => performFaceEnrollment(strategySel?.value || 'server', 'manual');
+    btnClearFace.onclick = async () => {
+      const mgr = faceLockMgr();
+      if (!mgr) return;
+      if (!window.confirm('Clear saved face template?')) return;
+      btnClearFace.disabled = true;
+      try { await mgr.clearEnrollment?.(); } catch (err) { alert('Failed to clear face template: ' + (err?.message || err)); } finally { await updateFaceStatus(); }
+    };
 
     async function fetchJSON(url, opts) {
       const r = await fetch(url, opts);
@@ -1413,15 +1698,21 @@ async function openMyDoachPanel(){
           status.textContent = `Signed in as ${u.user.name || u.user.email}`;
           btnLogout.style.display = '';
           nameRow.style.display = 'none';
+          try { faceLockMgr()?.setUser?.(u.user); } catch {}
+          await updateFaceStatus();
         } else {
           status.textContent = 'Not signed in';
           btnLogout.style.display = 'none';
           nameRow.style.display = '';
+          try { faceLockMgr()?.setUser?.(null); } catch {}
+          await updateFaceStatus();
         }
       } catch (e) {
         status.textContent = 'Not signed in';
         btnLogout.style.display = 'none';
         nameRow.style.display = '';
+        try { faceLockMgr()?.setUser?.(null); } catch {}
+        await updateFaceStatus();
       }
     }
 
@@ -1436,6 +1727,9 @@ async function openMyDoachPanel(){
         window.__welcomePending = true; window.showStartSessionCTA?.();
         try { window.enableHoopPickOnce?.(); } catch {}
         try { await window.prefetchChallengeState?.(); } catch {}
+        try { faceLockMgr()?.setUser?.(j); } catch {}
+        try { await updateFaceStatus(); } catch {}
+        try { await maybeOfferFaceLock('login'); } catch {}
       } catch (e) { alert('Login failed: ' + e.message); }
     };
     btnCreate.onclick = async ()=>{
@@ -1449,6 +1743,9 @@ async function openMyDoachPanel(){
         window.__welcomePending = true; window.showStartSessionCTA?.();
         try { window.enableHoopPickOnce?.(); } catch {}
         try { await window.prefetchChallengeState?.(); } catch {}
+        try { faceLockMgr()?.setUser?.(j); } catch {}
+        try { await updateFaceStatus(); } catch {}
+        try { await maybeOfferFaceLock('register'); } catch {}
       } catch (e) { alert('Create failed: ' + e.message); }
     };
     btnLogout.onclick = async ()=>{
@@ -1457,6 +1754,8 @@ async function openMyDoachPanel(){
       btnLogout.style.display = 'none';
       nameRow.style.display = '';
       try { window.__challengeState = null; window.syncChallengeCTA?.(); } catch {}
+      try { faceLockMgr()?.setUser?.(null); } catch {}
+      try { await updateFaceStatus(); } catch {}
     };
     btnSessions.onclick = ()=> window.open('/static/my_sessions.html','_blank');
 
@@ -1554,7 +1853,8 @@ function getDefaults() {
     // audio/permissions
     audioOn: (window.PREF_AUDIO_ENABLED !== false),
     allowMic: (window.PREF_ALLOW_MIC !== false),
-    allowCamera: !!window.PREF_ALLOW_CAMERA
+    allowCamera: !!window.PREF_ALLOW_CAMERA,
+    faceLock: (window.PREF_FACE_LOCK !== false)
   };
 }
 
@@ -1586,6 +1886,7 @@ function applyPrefs(p) {
   window.PREF_AUDIO_ENABLED = !!p.audioOn;
   window.PREF_ALLOW_MIC     = !!p.allowMic;
   window.PREF_ALLOW_CAMERA  = !!p.allowCamera;
+  window.PREF_FACE_LOCK     = p.faceLock !== false;
 
   saveDoachPrefs(p);
 
@@ -1688,6 +1989,7 @@ async function openPreferencesPanel() {
   body.append(chk('pf_audio_on','Audio on (TTS)', prefs.audioOn));
   body.append(chk('pf_allow_mic','Allow microphone', prefs.allowMic));
   body.append(chk('pf_allow_cam','Allow camera', prefs.allowCamera));
+  body.append(chk('pf_face_lock','Enable face lock', prefs.faceLock !== false));
 
   // Actions
   const actions = document.createElement('div'); actions.className='doach-actions';
@@ -1697,22 +1999,31 @@ async function openPreferencesPanel() {
   body.append(actions);
 
   function readPrefsFromUI() {
+    const checked = (sel, fallback=false) => {
+      const el = body.querySelector(sel);
+      return el ? !!el.checked : !!fallback;
+    };
+    const valueOf = (sel, fallback='') => {
+      const el = body.querySelector(sel);
+      return el ? el.value : fallback;
+    };
     return {
-      scorerMode: (body.querySelector('#pf_mode')?.value || 'weighted'),
-      weightedThresh: Number(body.querySelector('#pf_thresh').value),
+      scorerMode: (valueOf('#pf_mode', 'weighted') || 'weighted'),
+      weightedThresh: Number(body.querySelector('#pf_thresh')?.value ?? prefs.weightedThresh ?? 0.75),
       show: {
-        poseLines: body.querySelector('#pf_show_poseLines').checked,
-        releaseGate: body.querySelector('#pf_show_releaseGate').checked,
-        player:  body.querySelector('#pf_show_player').checked,
-        ball:    body.querySelector('#pf_show_ball').checked,
-        trails:  body.querySelector('#pf_show_trails').checked,
-        hoop:    body.querySelector('#pf_show_hoop').checked,
-        backboard: body.querySelector('#pf_show_bb').checked,
-        net:     body.querySelector('#pf_show_net').checked
+        poseLines: checked('#pf_show_poseLines', prefs.show.poseLines),
+        releaseGate: checked('#pf_show_releaseGate', prefs.show.releaseGate),
+        player:  checked('#pf_show_player', prefs.show.player),
+        ball:    checked('#pf_show_ball', prefs.show.ball),
+        trails:  checked('#pf_show_trails', prefs.show.trails),
+        hoop:    checked('#pf_show_hoop', prefs.show.hoop),
+        backboard: checked('#pf_show_bb', prefs.show.backboard),
+        net:     checked('#pf_show_net', prefs.show.net)
       },
-      audioOn:    body.querySelector('#pf_audio_on').checked,
-      allowMic:   body.querySelector('#pf_allow_mic').checked,
-      allowCamera:body.querySelector('#pf_allow_cam').checked
+      audioOn:    checked('#pf_audio_on', prefs.audioOn),
+      allowMic:   checked('#pf_allow_mic', prefs.allowMic),
+      allowCamera:checked('#pf_allow_cam', prefs.allowCamera),
+      faceLock:   checked('#pf_face_lock', prefs.faceLock)
     };
   }
 

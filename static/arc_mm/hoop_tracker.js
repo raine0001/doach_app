@@ -31,6 +31,32 @@ function _proxParams() {
 const DEFAULT_RIM_W = 88;
 const DEFAULT_RIM_H = 36;
 
+// --- derive a rim center from a NET box (top edge of the net) ---
+function _rimFromNetBox(netBox) {
+    if (!Array.isArray(netBox) || netBox.length !== 4) return null;
+    const [x1, y1, x2, y2] = netBox;
+    const w = Math.max(1, x2 - x1);
+    const cx = (x1 + x2) / 2;
+    const rimW = Math.max(DEFAULT_RIM_W, Math.round(w * 0.55)); // net is narrower than rim
+    const yR = y1;                                              // rim sits at net top
+    return { cx, cy: yR, w: rimW, h: Math.round(rimW * 0.40) };
+}
+
+// IoU + area for scoring
+function _iou(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 4 || b.length !== 4) return 0;
+    const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+    const x2 = Math.min(a[2], b[2]), y2 = Math.min(a[3], b[3]);
+    const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
+    const inter = iw * ih;
+    const uni = _area(a) + _area(b) - inter;
+    return uni > 0 ? inter / uni : 0;
+}
+function _area(b) {
+    if (!Array.isArray(b) || b.length !== 4) return 0;
+    return Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
+}
+
 // side guard to avoid hopping to the other hoop
 let courtMidX = null;
 let lockSide = null;          // 'L' | 'R'
@@ -238,6 +264,52 @@ export function handleHoopSelection(e, overlay, lastFrame, promptBar) {
     }
     safelyReassignHoop(overlay, lastFrame); try { window.dispatchEvent(new CustomEvent('hoop:locked', { detail: { cx: lockedHoopBox?.x, cy: lockedHoopBox?.y } })); } catch { }
 }
+
+
+// --- choose hoop by largest-net + largest-hoop association ---
+function _pickHoopByLargestNet(objects, W, H) {
+    const hoops = (objects || []).filter(o => (o.label === 'hoop' || o.label === 'rim') && Array.isArray(o.box));
+    const nets = (objects || []).filter(o => o.label === 'net' && Array.isArray(o.box));
+    if (!hoops.length) return null;
+
+    // area utility
+    const area = (b) => Math.max(1, (b[2] - b[0]) * (b[3] - b[1]));
+    // IoU utility
+    const iou = (a, b) => {
+        const x1 = Math.max(a[0], b[0]), y1 = Math.max(a[1], b[1]);
+        const x2 = Math.min(a[2], b[2]), y2 = Math.min(a[3], b[3]);
+        const iw = Math.max(0, x2 - x1), ih = Math.max(0, y2 - y1);
+        const inter = iw * ih, uni = area(a) + area(b) - inter;
+        return uni > 0 ? inter / uni : 0;
+    };
+
+    // largest hoop and largest net
+    const largestHoop = hoops.reduce((m, o) => area(o.box) > (m ? area(m.box) : 0) ? o : m, null);
+    const largestNet = nets.length ? nets.reduce((m, o) => area(o.box) > (m ? area(m.box) : 0) ? o : m, null) : null;
+
+    // If we have a net, choose hoop with best IoU to the largest net
+    let best = null, bestScore = -1;
+    if (largestNet) {
+        for (const h of hoops) {
+            const s = iou(h.box, largestNet.box);
+            // score: association dominates, very light size tie-break
+            const a = Math.sqrt(area(h.box));
+            const score = 1.0 * s + 0.05 * a;
+            if (score > bestScore) { bestScore = score; best = h; }
+        }
+        // if association is weak everywhere, fall back to largest hoop
+        if (bestScore < 0.05 && largestHoop) best = largestHoop;
+    } else {
+        // no net seen: just take largest hoop
+        best = largestHoop;
+    }
+    if (!best) return null;
+
+    const [x1, y1, x2, y2] = best.box;
+    const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2, w = (x2 - x1), h = (y2 - y1);
+    return { obj: best, cx, cy, w, h, area: w * h, assocScore: bestScore };
+}
+
 
 
 /* ──────────────────────────────────────────────
@@ -760,21 +832,102 @@ export function safelyReassignHoop(overlay, lastFrame) {
 /* ──────────────────────────────────────────────
  *  Optional auto-lock when you want it
  * ────────────────────────────────────────────── */
+// ---- Smart autolock: "larger + lower = closer" ----
 export function autoDetectHoop(objects, overlay, force = false) {
     if (!force && isUserLocked()) return;
-    const candidates = (objects || []).filter(o => o.label === 'hoop' && Array.isArray(o.box));
-    if (!candidates.length) return;
+    if (!Array.isArray(objects) || !objects.length) return;
 
-    const best = candidates.reduce((closest, obj) => {
-        const [x1, y1, x2, y2] = obj.box;
-        const cx = (x1 + x2) / 2;
-        const cy = (y1 + y2) / 2;
-        const dist = Math.hypot(cx - overlay.width / 2, cy - overlay.height / 2);
-        return dist < closest.dist ? { x: cx, y: cy, dist, obj } : closest;
-    }, { x: 0, y: 0, dist: Infinity, obj: null });
+    const W = overlay?.width || (window.__VIEW?.vw) || 1280;
+    const H = overlay?.height || (window.__VIEW?.vh) || 720;
 
-    lockHoopToSelected(best.x, best.y, best.obj || null);
-    console.log('🎯 Auto-selected hoop center:', Math.round(best.x), Math.round(best.y));
+    const nets = objects.filter(o => o.label === 'net' && Array.isArray(o.box));
+    const rims = objects.filter(o => (o.label === 'hoop' || o.label === 'rim') && Array.isArray(o.box));
+    const backs = objects.filter(o => o.label === 'backboard' && Array.isArray(o.box));
+
+    let pick = null;    // {cx, cy, w, h, from: 'net'|'hoop'|'backboard', obj}
+
+    // 1) PRIMARY: largest NET → derive rim
+    if (nets.length) {
+        const largestNet = nets.reduce((m, o) => _area(o.box) > (m ? _area(m.box) : 0) ? o : m, null);
+        const rim = _rimFromNetBox(largestNet?.box);
+        if (rim) pick = { ...rim, from: 'net', obj: largestNet };
+    }
+
+    // 2) FALLBACK A: largest hoop/rim if net missing or tiny
+    if (!pick || (_area(pick?.obj?.box || [0, 0, 0, 0]) < 250)) {
+        if (rims.length) {
+            const largestHoop = rims.reduce((m, o) => _area(o.box) > (m ? _area(m.box) : 0) ? o : m, null);
+            if (largestHoop) {
+                const [x1, y1, x2, y2] = largestHoop.box;
+                const cx = (x1 + x2) / 2;
+                const cy = (y1 + y2) / 2;
+                const w = x2 - x1;
+                const h = y2 - y1;
+                const cand = {
+                    cx,
+                    cy,
+                    w: Math.max(w, DEFAULT_RIM_W),
+                    h: Math.max(h, DEFAULT_RIM_H),
+                    from: 'hoop',
+                    obj: largestHoop
+                };
+                if (!pick) pick = cand;
+                else {
+                    const scoreN = Math.sqrt((pick.w || 0) * (pick.h || 0)) / Math.sqrt(W * H) + (1 - pick.cy / H);
+                    const scoreH = Math.sqrt(cand.w * cand.h) / Math.sqrt(W * H) + (1 - cand.cy / H);
+                    if (scoreH > scoreN * 1.1) pick = cand;
+                }
+            }
+        }
+    }
+
+    // 3) FALLBACK B: backboard bottom center
+    if (!pick && backs.length) {
+        const largestBack = backs.reduce((m, o) => _area(o.box) > (m ? _area(m.box) : 0) ? o : m, null);
+        if (largestBack) {
+            const [x1, y1, x2, y2] = largestBack.box;
+            const cx = (x1 + x2) / 2;
+            const cy = y2 - 10;
+            pick = { cx, cy, w: DEFAULT_RIM_W, h: DEFAULT_RIM_H, from: 'backboard', obj: largestBack };
+        }
+    }
+
+    if (!pick) return;
+
+    // --- Hysteresis: do not switch unless clearly better (+25%) for 1s ---
+    const now = performance.now();
+    const cur = window.__hoopLock || null;
+    const score = (Math.sqrt((pick.w || 0) * (pick.h || 0)) / Math.sqrt(W * H)) + (1 - pick.cy / H);
+    const gain = 1.25;
+    const holdMs = 1000;
+
+    if (cur && (now - cur.ts) < holdMs) {
+        if ((cur.score || 0) * gain >= score) return;
+    }
+
+    lockHoopToSelected(pick.cx, pick.cy, pick.obj || null);
+    window.__hoopLock = {
+        box: { cx: pick.cx, cy: pick.cy, w: pick.w, h: pick.h },
+        score,
+        ts: now
+    };
+    try {
+        const V = window.__VIEW || { vw: W };
+        courtMidX = (V.vw || W) / 2;
+        lockSide = pick.cx < courtMidX ? 'L' : 'R';
+    } catch { }
+
+    try {
+        const x1 = Math.round(pick.cx - pick.w / 2);
+        const y1 = Math.round(pick.cy - pick.h / 2);
+        const syn = { label: 'hoop', confidence: 0.51, synthetic: true, box: [x1, y1, x1 + pick.w, y1 + pick.h] };
+        objects.push(syn);
+    } catch { }
+
+    console.log(`[auto-hoop] ${pick.from}→ lock @ ${Math.round(pick.cx)},${Math.round(pick.cy)}  score=${score.toFixed(3)}`);
 }
+
+
+
 
 

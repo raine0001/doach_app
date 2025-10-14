@@ -310,6 +310,7 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
 
   try { stabilizeLockedHoop?.(objects); } catch {}
   try { objects = filterObjectsToLockedHoop?.(objects) ?? objects; } catch {}
+  try { objects = window.faceLockFilterDetections?.(objects) ?? objects; } catch {}
   let hoopLocked = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || getLockedHoopBox?.();
   if (!hoopLocked) {
     try {
@@ -799,6 +800,7 @@ export function analyzeVideoFrameByFrame(videoEl, canvasEl) {
         poses = Array.isArray(poseRes?.landmarks) ? poseRes.landmarks : [];
       }
       stabilizeLockedHoop?.(objects); try { objects = filterObjectsToLockedHoop?.(objects) ?? objects; } catch {}
+      try { objects = window.faceLockFilterDetections?.(objects) ?? objects; } catch {}
       const hoopLocked = (typeof window.getLockedHoopBox === 'function' ? window.getLockedHoopBox() : null) || getLockedHoopBox?.(); const Hc = hoopLocked ? canonHoop(hoopLocked) : null; const hoopTL = Hc ? { ...asTopLeft(Hc), anchor: 'topleft' } : null; if (hoopTL) window.attachHoop?.(hoopTL);
       // Pose selection fallback
       window.updateActivePlayer?.(objects, frameIdx, canvasEl.width, canvasEl.height);

@@ -1200,13 +1200,23 @@ try { window.__SNAP_IMPL = 'snapshot-v2'; } catch { }
 
 
 function getShotScoreForSummary(shot) {
+    const normalizeScore = (val) => {
+        if (!Number.isFinite(val)) return null;
+        return Math.round(val <= 1 ? val * 100 : val);
+    };
+
     try {
-        if (Number.isFinite(shot?.weightedScore)) return Math.round(shot.weightedScore);
+        const primary = normalizeScore(shot?.weightedScore);
+        if (primary != null) return primary;
+
         if (typeof window.computeWeightedShotScore === 'function' && shot?.poseSnapshot) {
-            return Math.round(window.computeWeightedShotScore(shot.poseSnapshot));
+            const computed = normalizeScore(window.computeWeightedShotScore(shot.poseSnapshot));
+            if (computed != null) return computed;
         }
+
         const last = window.shotLog?.at?.(-1);
-        if (Number.isFinite(last?.weightedScore)) return Math.round(last.weightedScore);
+        const fallback = normalizeScore(last?.weightedScore);
+        if (fallback != null) return fallback;
     } catch { }
     return null;
 }
@@ -2885,6 +2895,10 @@ Draft to refine (optional): '${draftLine}'` : ''}
         const golden = mem.golden;
         const tips = window.summarizePoseIssues?.(shot, golden) || [];
         const rating = window.computeShotRating?.(shot.poseSnapshot, golden) ?? 50;
+        const weightedScore = Number.isFinite(shot?.weightedScore) ? Math.round(shot.weightedScore * 100) : null;
+        const poseLine = weightedScore != null
+            ? `<div style="font-size: 16px; margin-bottom: 6px;">🎯 Pose Score: <strong>${weightedScore}</strong> / 100</div>`
+            : '';
 
         let html = `
       <strong> Doach Feedback</strong><br>
@@ -2892,6 +2906,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
         🏅 Shot Rating: <strong style="color:${rating >= 80 ? 'lightgreen' : rating >= 50 ? 'orange' : 'red'}">${rating}/100</strong>
         ${golden ? `<span style="opacity:.7;">(vs ${golden.count} reference shots)</span>` : ``}
       </div>
+      ${poseLine}
       ${tips.length ? `<ul>${tips.map(t => `<li>${t}</li>`).join('')}</ul>`
                 : `<span style="color:lightgreen;">✅ No major pose issues detected.</span>`}
     `;

@@ -80,9 +80,8 @@ function speakWeb(text) {
 }
 
 export function speak(text) {
-    if (IS_IOS) return false;
-    speakWeb(text);
-    return true;
+    if (IS_IOS) return Promise.resolve(false);
+    return speakWeb(text);
 }
 
 function sanitizeName(n) {
@@ -273,9 +272,10 @@ const SILENT_PRIME_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEA
 
         async enqueue(src, label = 'tts') {
             await this.unlock();
-            this.q.push({ src, label });
-            this._drain();
-            return true;
+            return new Promise((resolve, reject) => {
+                this.q.push({ src, label, resolve, reject });
+                this._drain();
+            });
         },
 
         async _drain() {
@@ -283,14 +283,17 @@ const SILENT_PRIME_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEA
             this.playing = true;
             const el = this.getEl();
             while (this.q.length) {
-                const { src, label } = this.q.shift();
+                const { src, label, resolve, reject } = this.q.shift();
                 try {
                     await this._playOnce(el, src, label);
+                    resolve?.(true);
                 } catch (err) {
                     try { console.warn('[CoachAudio] playback failed', err); } catch { }
+                    reject?.(err);
                 }
             }
             this.playing = false;
+            if (this.q.length) this._drain();
         },
 
         async _playOnce(el, src, label) {
@@ -470,8 +473,7 @@ async function speakViaWebSpeech(text) {
     if (!('speechSynthesis' in window)) return false;
 
     try {
-        speakWeb(text);
-        return true;
+        return await speakWeb(text);
     } catch (err) {
         try { console.warn('[coach] web speech failed', err); } catch { }
         return false;
@@ -498,19 +500,18 @@ export async function doachSpeak(text, opts = {}) {
             if (ok) return true;
         } else if (engine === 'webspeech') {
             // Web Speech is pointless on iOS; route through server there
-            const ok = IS_IOS ? await speakViaOpenAI(text, opts) : await speakViaWebSpeech(text);
-            if (ok) return true;
+            if (!IS_IOS) {
+                const ok = await speakViaWebSpeech(text);
+                if (ok) return true;
+            } else {
+                const ok = await speakViaOpenAI(text, opts);
+                if (ok) return true;
+            }
         }
     } catch (err) {
         try { console.warn('[coach] doachSpeak engine error', err); } catch { }
     }
 
-    // 4) Last resort: desktop-only Web Speech fallback
-    if (!IS_IOS) {
-        return speakViaWebSpeech(text);
-    }
-
-    // iOS: no-op rather than throwing more spaghetti
     return false;
 }
 

@@ -161,13 +161,14 @@ export function animateOverlayLoop(frame) {
     updateBall(ball, idx);
 
     // (optional) net motion flag if you have a processing canvas available
-    const sourceCanvas =
-      document.getElementById('processingCanvas') ||
-      document.getElementById('videoCanvas') ||
-      null;
-    if (sourceCanvas) {
-      ballState.netMoved = detectNetMotion(sourceCanvas, lockedHoopBox);
-      drawNetMotionStatus(sourceCanvas, ballState.netMoved);
+    const cap = window.__videoCanvas || null;
+    if (cap) {
+      // prefer the canonical API
+      const dm = (window.detectNetMotionFromCanvas || window.detectNetMotion);
+      ballState.netMoved = dm ? dm(cap, lockedHoopBox) : false;
+
+      // draw onto the same capture canvas so you see what was measured
+      window.drawNetMotionStatus?.(cap, ballState.netMoved);
     }
 
     // 💡 Single source of truth for shot start/end + scoring

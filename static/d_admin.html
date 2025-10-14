@@ -1,10 +1,11 @@
-<!doctype html>
+<!DOCTYPE html>
+
 <html>
 <head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Doach Admin</title>
-  <style>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1" name="viewport"/>
+<title>Doach Admin</title>
+<style>
     :root { color-scheme: dark; }
     body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Arial; background:#0b0f14; color:#e6edf3; min-height:100vh; display:flex; flex-direction:column; }
     header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; background:#0f1621; border-bottom:1px solid #1f2a36; flex-shrink:0; }
@@ -33,11 +34,15 @@
     .toolbar { display:flex; gap:8px; align-items:center; }
     .debug-header { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px; }
     .debug-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-    #dbg-json { background:#0b0f12; color:#cfe8ff; border:1px solid #2a6; border-radius:8px; padding:12px; margin:0; flex:1 1 auto; min-height:240px; max-height:48vh; overflow:auto; font:12px/1.4 monospace; }
-    .shots-wrap { margin-top:16px; }
+    #dbg-json { background:#0b0f12; color:#cfe8ff; border:1px solid #2a6; border-radius:8px; padding:12px; margin:0; flex:0 1 auto; min-height:120px; max-height:35vh; overflow:auto; font:12px/1.4 monospace; }
+    .shots-wrap { margin:0 0 10px; display:flex; flex-direction:column; gap:8px; flex:1 0 auto; min-height:480px; max-height:65vh; }
     .shots-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
     .shots-header h3 { margin:0; font-size:14px; }
     .shots-meta { font-size:12px; color:#94a3b8; }
+    #shotsTableWrap,
+    .shots-table-wrap { flex:1 1 auto; min-height:0; overflow:auto; border:1px solid #1f2a36; border-radius:8px; background:#0b0f12; }
+    #shotsTableWrap.shots-empty,
+    .shots-table-wrap.shots-empty { display:flex; align-items:center; justify-content:center; padding:10px; border-style:dashed; color:#94a3b8; font-style:italic; }
     .shots-table { width:100%; border-collapse:collapse; font-size:12px; }
     .shots-table th, .shots-table td { padding:6px 8px; border-bottom:1px solid #1f2a36; text-align:left; vertical-align:top; }
     .shots-table tbody tr:hover { background:#101a29; }
@@ -63,14 +68,20 @@
     .shots-pill.make { border-color:#1e7a42; background:#11331f; color:#34d399; }
     .shots-pill.miss { border-color:#7a1e1e; background:#2a1111; color:#f87171; }
     .shots-pill.pending { border-color:#54535c; background:#1c1b24; color:#d1d5db; }
+    .shots-pill.manual { border-color:#f59e0b; background:#422006; color:#facc15; }
     #sessionPane { display:flex; flex-direction:column; min-height:0; max-height:100%; }
     #sessionPane .list { max-height:100%; overflow-y:auto; }
     #sessionsList { max-height:100%; overflow-y:auto; }
-    #viewer { flex:1 1 auto; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; padding:10px; min-height:0; }
+    #viewer { flex:1 1 auto; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; padding:10px; min-height:0; gap:16px; }
     iframe { width:100%; height:100%; border:none; border-radius:10px; background:#0b0f14; min-height:0; }
     .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; flex-shrink:0; }
     pre { background:#0b0f14; border:1px solid #1f2a36; border-radius:8px; padding:8px; overflow:auto; max-height:320px; }
     input[type="text"] { background:#0b0f14; color:#e6edf3; border:1px solid #1f2a36; padding:6px 8px; border-radius:8px; width:200px; }
+    .shots-table td.actions-cell { white-space:nowrap; }
+    .shot-action-btn { background:#1f2933; color:#e2e8f0; border:1px solid #374151; padding:4px 10px; border-radius:6px; font-size:11px; cursor:pointer; }
+    .shot-action-btn:hover { background:#273449; }
+    .shot-action-btn:disabled { opacity:.6; cursor:default; }
+    .override-note { margin-top:6px; font-size:11px; color:#facc15; }
     @media (max-width: 1040px) {
       main { grid-template-columns:1fr; }
       #viewer { min-height:320px; }
@@ -78,46 +89,44 @@
   </style>
 </head>
 <body>
-  <header>
-    <h1>Doach Admin</h1>
-    <div class="toolbar">
-      <input id="filterTxt" type="text" placeholder="Filter sessions..."/>
-      <button class="btn" id="btnRefresh">Refresh</button>
-    </div>
-  </header>
-  <main>
-    <section id="sessionPane">
-      <h2>Sessions</h2>
-      <div class="list" id="sessionsList"></div>
-    </section>
-    <section>
-      <h2>Details</h2>
+<header>
+<h1>Doach Admin</h1>
+<div class="toolbar">
+<input id="filterTxt" placeholder="Filter sessions..." type="text"/>
+<button class="btn" id="btnRefresh">Refresh</button>
+</div>
+</header>
+<main>
+<section id="sessionPane">
+<h2>Sessions</h2>
+<div class="list" id="sessionsList"></div>
+</section>
+<section>
+<h2>Details</h2>
       <div id="viewer">
-        <div class="debug-header">
-          <div>
-            <h2 style="margin:0;">Doach Live Debug</h2>
-            <div id="dbg-session-label" class="muted" style="font-size:12px;">No session selected.</div>
-          </div>
-          <div class="debug-actions">
-            <button id="dbg-open-observe" disabled>Observe</button>
-            <button id="dbg-open-json" disabled>Open JSON</button>
-            <button id="adm-dbg-download" disabled>Download</button>
-            <button id="dbg-copy" disabled>Copy</button>
-          </div>
-        </div>
-        <pre id="dbg-json">(select a session to load debug details)</pre>
         <div class="shots-wrap">
-          <div class="shots-header">
-            <h3>Shots</h3>
-            <span id="shotsMeta" class="shots-meta">0/0</span>
-          </div>
-          <div id="shotsTableWrap" class="shots-empty">Select a session to view shots.</div>
-        </div>
-      </div>
+<div class="shots-header">
+<h3>Shots</h3>
+          <span class="shots-meta" id="shotsMeta">0 of 0 made</span>
+</div>
+<div class="shots-table-wrap shots-empty" id="shotsTableWrap">Select a session to view shots.</div>
+</div>
+<div class="debug-header">
+<div>
+<h2 style="margin:0;">Doach Live Debug</h2>
+<div class="muted" id="dbg-session-label" style="font-size:12px;">No session selected.</div>
+</div>
+<div class="debug-actions">
+<button disabled="" id="dbg-open-observe">Observe</button>
+<button disabled="" id="dbg-open-json">Open JSON</button>
+<button disabled="" id="adm-dbg-download">Download</button>
+<button disabled="" id="dbg-copy">Copy</button>
+</div>
+</div>
+<pre id="dbg-json">(select a session to load debug details)</pre>
 
-
-
-  <script src="/static/js/admin_dashboard.js"></script>
-  <script src="/static/js/d_admin_opg.js"></script>
-</body>
+</div>
+<script src="/static/js/admin_dashboard.js"></script>
+<script src="/static/js/d_admin_opg.js"></script>
+</section></main></body>
 </html>

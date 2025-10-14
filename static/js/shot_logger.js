@@ -44,6 +44,9 @@ let __lastScoredCount = 0; // how many frozen shots we've already scored
 window.__shotFinalizeLock = false;
 let __releaseEventSent = false;
 
+// legacy alias for any older callers
+if (!window.videoCanvas && window.__videoCanvas) window.videoCanvas = window.__videoCanvas;
+
 
 if (window.updateCoachNotes && window.summarizePoseIssues) {
   updateCoachNotes(shotLog.at(-1));
@@ -461,14 +464,20 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
         (frozen?.trail?.length >= 3) ? frozen.trail :
         (ballStateRef?.trail?.length >= 3 ? ballStateRef.trail.slice(-28) : null);
 
-      if (!shouldDeferSummaries()) {
-        if (trailForLog) {
-          try {
-            shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null;
-          } catch {}
-        }
-        if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
+  if (!shouldDeferSummaries()) {
+    if (trailForLog) {
+      try {
+        shotRecord = results?.(trailForLog, frameIndex, hoopBox, { force: true }) || null;
+      } catch (err) {
+        console.warn('[score:results:error]', err);
       }
+    } else {
+      console.warn('[score:results:skip]', { reason: 'no-trail', shotId: frozen?.id ?? s?.shotId ?? null });
+    }
+    if (!shotRecord && window.shotLog?.length) shotRecord = window.shotLog.at(-1);
+  } else {
+    console.warn('[score:results:deferred]', { frameIndex, shotId: frozen?.id ?? s?.shotId ?? null, deferFlag: window.DEFER_FE_SUMMARY });
+  }
 
       try { window.dispatchEvent(new CustomEvent('shot:end', { detail: { frame: frameIndex } })); } catch {}
       try { window.dispatchEvent(new CustomEvent('fbf:stop', { detail: { frame: frameIndex } })); } catch {}
@@ -491,6 +500,12 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
         if (!shouldDeferSummaries()) {
           try {
             if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'exit-finalize', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
+            console.debug('[score:shot_logger:emit]', {
+              via: 'exit-finalize',
+              shotId: shotRecord?.shotId ?? shotRecord?.id ?? null,
+              weightedScore: shotRecord?.weightedScore ?? null,
+              poseScore: shotRecord?.poseScore ?? null
+            }, shotRecord);
             window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));
           } catch {}
         }
@@ -562,6 +577,12 @@ export function checkShotConditions(ballStateRef, hoopBox, frameIndex) {
           if (!shouldDeferSummaries()) {
             try {
               if (window.SUM_TRACE === true) console.log('[SUM:emit]', { via:'auto-gap', made: !!(shotRecord&&shotRecord.made), arc: shotRecord?.arcHeight, entry: shotRecord?.entryAngle, release: shotRecord?.releaseAngle, frame: frameIndex });
+              console.debug('[score:shot_logger:emit]', {
+                via: 'auto-gap',
+                shotId: shotRecord?.shotId ?? shotRecord?.id ?? null,
+                weightedScore: shotRecord?.weightedScore ?? null,
+                poseScore: shotRecord?.poseScore ?? null
+              }, shotRecord);
               window.dispatchEvent(new CustomEvent('shot:summary', { detail: shotRecord || null }));
             } catch {}
           }
@@ -882,7 +903,7 @@ export function summarizeShot(trail, __frameIdx, hoopBox, opts = {}) {
   // net motion (compute-only)
   let netMoved = null;
   try {
-    const canvas = window.videoCanvas || window.__videoCanvas || null;
+    const canvas = window.__videoCanvas || null;
     if (canvas && typeof detectNetMotionFromCanvas === 'function') {
       netMoved = detectNetMotionFromCanvas(canvas, hoopBox);
     }
@@ -897,8 +918,21 @@ export function summarizeShot(trail, __frameIdx, hoopBox, opts = {}) {
   let weightedScore = 0, weightMade = false;
   try {
     weightedScore = computeWeightedShotScore(t);
+    if (!Number.isFinite(weightedScore)) weightedScore = 0;
+    weightedScore = Math.max(0, Math.min(1, weightedScore));
     weightMade    = weightedScore >= (window.WEIGHTED_THRESH ?? 0.65);
-  } catch {}
+    console.log('[score:compute]', {
+      mode,
+      trailPoints: t.length,
+      weightedScore,
+      regionMade,
+      weightMade,
+      hoop: window.getLockedHoopBox?.() || null
+    });
+  } catch (err) {
+    console.warn('[score:compute:error]', err);
+    weightedScore = 0;
+  }
 
   // geometry classifier (pure rim/trail)
   let geo = { made:false, reason:null };
@@ -940,6 +974,7 @@ export function summarizeShot(trail, __frameIdx, hoopBox, opts = {}) {
     missReason: reason,
     netMoved: !!netMoved,
     weightedScore,
+    poseScore: Number.isFinite(weightedScore) ? Math.round(weightedScore * 100) : null,
     scorerMode: mode,
     regionMade,
     weightMade,
@@ -1004,10 +1039,15 @@ export function results(trail, frameIndex, hoopBox, opts = {}) {
   } catch {}
 
   console.log('[shot]', {
-    id: rec?.id, made: shotRecord.made, reason: shotRecord.missReason,
-    regionMade: shotRecord.regionMade, weightMade: shotRecord.weightMade,
+    id: rec?.id,
+    made: shotRecord.made,
+    reason: shotRecord.missReason,
+    regionMade: shotRecord.regionMade,
+    weightMade: shotRecord.weightMade,
     weightedScore: shotRecord.weightedScore,
-    frameStart: shotRecord.frameStart, frameEnd: shotRecord.frameEnd
+    poseScore: shotRecord.poseScore ?? (shotRecord.weightedScore != null ? shotRecord.weightedScore * 100 : null),
+    frameStart: shotRecord.frameStart,
+    frameEnd: shotRecord.frameEnd
   });
 
   try { drawShotStatsTable?.(); updateBottomStats?.(); } catch {}
@@ -1207,7 +1247,10 @@ function swirlSignChanges(trail, H) {
 export function computeWeightedShotScore(trail) {
   const locked = getLockedHoopBox?.();
   const H = normHoopFlexible(locked);
-  if (!H || !trail || trail.length < 2) return 0;
+  if (!H || !trail || trail.length < 2) {
+    console.warn('[score:compute:skip]', { reason: 'no-hoop-or-trail', hasHoop: !!H, trailLen: trail?.length || 0 });
+    return 0;
+  }
 
   const [nx1, ny1, nx2, ny2] = getRecentNetRegionSafe(H);
 
@@ -1275,6 +1318,8 @@ export function computeWeightedShotScore(trail) {
   return s;
 }
 
+try { window.computeWeightedShotScore = computeWeightedShotScore; } catch {}
+
 
 // Use recent tail to look for "net evidence" (rim-line cross OR tube run)
 function hasNetEvidence(trail, hoopBox) {
@@ -1315,7 +1360,7 @@ export function scoringTick(__frameIdx) {
     const last = s.shots.at(-1);
     if (last?.trail?.length >= 3) {
       try {
-        const canvas = window.videoCanvas || window.__videoCanvas || null;
+        const canvas = window.__videoCanvas || null;
         if (canvas && typeof detectNetMotionFromCanvas === 'function') {
           s.netMoved = !!detectNetMotionFromCanvas(canvas, hoopBox);
         }

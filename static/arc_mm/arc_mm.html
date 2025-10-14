@@ -192,7 +192,7 @@
         // How many VIDEO FRAMES you want to step per second of WALL time.
         // For true frame-by-frame on a 30 fps clip, set 30 so we step by 1/30s each tick.
         const FBF_ANALYSIS_FPS = 30;     // default analysis fps if we can't detect/aren't told
-        const FBF_WALL_MS = 1000;   // 1000 = visibly 1 fps; use 333 for ~3× chew
+        const FBF_WALL_MS = 333;   // 1000 = visibly 1 fps; use 333 for ~3× faster
 
         // Derive seconds of VIDEO advanced per tick.
         // If you know the clip fps, set video.dataset.fps = "30" in the pipeline.
@@ -287,7 +287,7 @@
                 summarize: !!g.shotLogger?.summarize,
                 results: !!g.shotLogger?.results
             });
-        } catch {}
+        } catch { }
 
         // Minimal sanity logs (quiet unless something’s missing)
         if (!g.analyzeVideoFrameByFrame) console.warn('[bridge] analyzeVideoFrameByFrame not available');
@@ -401,6 +401,7 @@
 
         async function seekVideoTime(v, t, tol = 0.015, timeout = 2500) {
             await ensureVideoReady(v);
+            lockViewOnce(v, ui.overlay);
             try { v.pause?.(); } catch { }
 
             t = Number.isFinite(t) ? Math.max(0, Math.min(v.duration - 0.001, t)) : 0;
@@ -494,19 +495,19 @@
         }
 
         function drawArcOverlay(ctx) {
-        const arc = window.ballArc || {};
-        const frozen  = arc.refinedTrailFrozen;
-        const current = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
-        const trail = (frozen && frozen.length) ? frozen : current;
-        if (!trail || !trail.length) return;
+            const arc = window.ballArc || {};
+            const frozen = arc.refinedTrailFrozen;
+            const current = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+            const trail = (frozen && frozen.length) ? frozen : current;
+            if (!trail || !trail.length) return;
 
-        ctx.save();
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = 'rgba(255,165,0,0.95)';
-        ctx.beginPath(); ctx.moveTo(trail[0].x, trail[0].y);
-        for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
-        ctx.stroke();
-        ctx.restore();
+            ctx.save();
+            ctx.lineWidth = 4;
+            ctx.strokeStyle = 'rgba(255,165,0,0.95)';
+            ctx.beginPath(); ctx.moveTo(trail[0].x, trail[0].y);
+            for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
+            ctx.stroke();
+            ctx.restore();
         }
 
 
@@ -525,11 +526,11 @@
             ctx.restore();
         }
 
-        (function freezeOnEnd(){
-        if (window.__freezeOnEndWired) return; window.__freezeOnEndWired = true;
-        function snap(){ try { freezeArcTrail(); } catch {} }
-        window.addEventListener('shot:end',     snap, { once: false });
-        window.addEventListener('shot:summary', snap, { once: false });
+        (function freezeOnEnd() {
+            if (window.__freezeOnEndWired) return; window.__freezeOnEndWired = true;
+            function snap() { try { freezeArcTrail(); } catch { } }
+            window.addEventListener('shot:end', snap, { once: false });
+            window.addEventListener('shot:summary', snap, { once: false });
         })();
 
 
@@ -553,27 +554,27 @@
 
         // deep clone utility for trails
         function cloneTrail(trail) {
-        return Array.isArray(trail) ? trail.map(p => ({...p})) : [];
+            return Array.isArray(trail) ? trail.map(p => ({ ...p })) : [];
         }
 
         // freeze the currently best trail for rendering
         function freezeArcTrail() {
-        const arc = (window.ballArc ||= {});
-        let live = (Array.isArray(arc.refinedTrail) && arc.refinedTrail.length)
-            ? arc.refinedTrail
-            : (Array.isArray(arc.trail) ? arc.trail : []);
+            const arc = (window.ballArc ||= {});
+            let live = (Array.isArray(arc.refinedTrail) && arc.refinedTrail.length)
+                ? arc.refinedTrail
+                : (Array.isArray(arc.trail) ? arc.trail : []);
 
-        if (!live.length && Array.isArray(window.ballState?.trail) && window.ballState.trail.length) {
-            live = window.ballState.trail.map((p, idx) => ({
-                x: p.x,
-                y: p.y,
-                frame: Number.isFinite(p.frame) ? p.frame : idx
-            }));
-        }
+            if (!live.length && Array.isArray(window.ballState?.trail) && window.ballState.trail.length) {
+                live = window.ballState.trail.map((p, idx) => ({
+                    x: p.x,
+                    y: p.y,
+                    frame: Number.isFinite(p.frame) ? p.frame : idx
+                }));
+            }
 
-        if (live && live.length) {
-            arc.refinedTrailFrozen = cloneTrail(live);
-        }
+            if (live && live.length) {
+                arc.refinedTrailFrozen = cloneTrail(live);
+            }
         }
 
 
@@ -679,6 +680,7 @@
 
             // Make sure canvases match the video pixels
             await ensureVideoReady(v);
+            lockViewOnce(v, ui.overlay);
             syncSizesOnce();
 
             // Small helper: seek -> settle -> draw to temp canvas -> detect
@@ -741,18 +743,23 @@
 
         /* ---------- Auto one-time hoop pic ---------- */
 
-        // Score hoop-like objects: bigger + more confident + nearer to frame center
+        // Area-dominant score: biggest rim wins; slight tie-break by center + confidence
         function scoreHoopCandidate(obj, W, H) {
             if (!obj?.box) return -Infinity;
             const [x1, y1, x2, y2] = obj.box;
             const w = Math.max(0, x2 - x1), h = Math.max(0, y2 - y1);
             const area = w * h;
+
+            // tiny tie-breakers (don’t let them overrule size)
             const cx = (x1 + x2) / 2, cy = (y1 + y2) / 2;
             const dx = (cx - W / 2) / (W / 2), dy = (cy - H / 2) / (H / 2);
-            const prox = 1 - Math.min(1, Math.hypot(dx, dy)); // 1 = center, 0 = corner
+            const nearCenter = 1 - Math.min(1, Math.hypot(dx, dy));
             const conf = Math.max(0, Number(obj.confidence ?? 0));
-            return area * (0.6 + 0.4 * prox) * (0.5 + 0.5 * conf); // tuned bias toward center and confidence
+
+            // sqrt(area) keeps numbers sane; 0.1 weights are gentle nudges
+            return Math.sqrt(area) * (1 + 0.10 * nearCenter + 0.10 * conf);
         }
+
 
         function filterHoopLabels(list) {
             const L = normalizeDetections(list);
@@ -768,6 +775,7 @@
             if (!det || !ov) return false;
 
             await ensureVideoReady(v);
+            lockViewOnce(v, ui.overlay);
             syncSizesOnce();
 
             // temp canvas cache
@@ -905,71 +913,66 @@
 
         // Deterministic driver: seek -> settle -> draw -> emit, @ 1/fps video-time per tick
         function makeFbfDriver(v, overlay, { wallMs = FBF_WALL_MS } = {}) {
-            // hard block native playback during FBF
+            // block native playback during FBF; save original
             v.autoplay = false; v.loop = false; v.muted = true;
+            if (!v.__origPlay) v.__origPlay = v.play;
             v.play = () => Promise.resolve();
 
             let abort = false;
-
-            // global loop token to prevent concurrent loops on the same element
             const token = (v.__fbfToken = (v.__fbfToken || 0) + 1);
-
             const sleep = (ms) => new Promise(r => setTimeout(r, ms));
             const rAF = () => new Promise(r => requestAnimationFrame(r));
-
-            // cache context once
             const ctx = overlay.getContext('2d', { willReadFrequently: true });
 
             async function loop() {
-            let t = 0;
-            const stepSec = getStepSec(v);        // ≈ 1/30
-            const margin  = stepSec + 0.0005;
-            let nextWall  = performance.now() + wallMs;
+                let t = 0;
+                const stepSec = getStepSec(v);
+                const margin = stepSec + 0.0005;
+                let nextWall = performance.now() + wallMs;
+                let frameIdx = 0;
 
-            // NEW: logical frame counter to enforce 90 ticks
-            let frameIdx = 0;
+                while (!abort && v.__fbfToken === token) {
+                    if (!Number.isFinite(v.duration)) break;
 
-            while (!abort && v.__fbfToken === token) {
-                if (!Number.isFinite(v.duration)) break;
+                    await seekVideoTime(v, t);
+                    await rAF(); await rAF();
 
-                await seekVideoTime(v, t);
-                await rAF(); await rAF();
+                    try {
+                        const w = overlay.width, h = overlay.height;
+                        if (w && h && ctx) { ctx.clearRect(0, 0, w, h); ctx.drawImage(v, 0, 0, w, h); }
+                    } catch { }
 
-                // draw
-                try {
-                const w = overlay.width, h = overlay.height;
-                if (w && h && ctx) { ctx.clearRect(0, 0, w, h); ctx.drawImage(v, 0, 0, w, h); }
-                } catch {}
+                    const detail = { via: 'fbf', t, frameCanvas: overlay, frameIdx };
+                    window.dispatchEvent(new CustomEvent('video:frame', { detail }));
+                    window.dispatchEvent(new CustomEvent('analyzer:frame-done', { detail }));
 
-                const detail = { via: 'fbf', t, frameCanvas: overlay, frameIdx };
-                window.dispatchEvent(new CustomEvent('video:frame',        { detail }));
-                window.dispatchEvent(new CustomEvent('analyzer:frame-done',{ detail }));
+                    frameIdx += 1;
+                    if (frameIdx >= FBF_KNOWN_TOTAL_FRAMES || t >= (v.duration - margin)) {
+                        freezeArcTrail();
+                        window.dispatchEvent(new CustomEvent('shot:end', { detail: { via: 'fbf-90' } }));
+                        break;
+                    }
 
-                // === NEW: end when we've processed exactly 90 frames ===
-                frameIdx += 1;
-                if (frameIdx >= FBF_KNOWN_TOTAL_FRAMES || t >= (v.duration - margin)) {
-                // freeze trail before we end, so nothing decays
-                freezeArcTrail();
-                window.dispatchEvent(new CustomEvent('shot:end', { detail: { via: 'fbf-90' } }));
-                break;
+                    const now = performance.now();
+                    let delay = nextWall - now;
+                    if (delay < 0 || document.hidden) { nextWall = now + wallMs; delay = wallMs; }
+                    if (delay > 0) await sleep(delay);
+                    nextWall += wallMs;
+
+                    t = Math.min(v.duration - 0.001, t + stepSec);
                 }
-
-                const now = performance.now();
-                let delay = nextWall - now;
-                if (delay < 0 || document.hidden) { nextWall = now + wallMs; delay = wallMs; }
-                if (delay > 0) await sleep(delay);
-                nextWall += wallMs;
-
-                t = Math.min(v.duration - 0.001, t + stepSec);
             }
-            }
-
 
             return {
                 start() { abort = false; try { v.pause(); } catch { }; loop(); },
-                stop() { abort = true; }
+                stop() {
+                    abort = true;
+                    // restore play so preview works even on early stop
+                    try { if (v.__origPlay) { v.play = v.__origPlay; delete v.__origPlay; } } catch { }
+                }
             };
         }
+
 
 
 
@@ -979,20 +982,20 @@
             // 0) kill any previous run cleanly
             try { window.removeEventListener('analyzer:frame-done', window.__onFrameOnce); } catch { }
             try { window.__fbfDriver?.stop(); } catch { }
-        try { window.stopFrameAnalysis?.(); } catch { }
-        try { window.shotArc?.resetShotFSM?.(); } catch { }
-        window.__onFrameOnce = null;
+            try { window.stopFrameAnalysis?.(); } catch { }
+            try { window.shotArc?.resetShotFSM?.(); } catch { }
+            window.__onFrameOnce = null;
 
-        const runnerCfg = window.arcmmRunner || {};
-        const requireFullRun = runnerCfg.forceFullRun === true;
+            const runnerCfg = window.arcmmRunner || {};
+            const requireFullRun = runnerCfg.forceFullRun === true;
 
-        // reset prox tail for this clip
-        window.__resetProxTail?.();
-        try { window.__lastSummaryEventSent = false; } catch {}
-        try { window.__lastSummaryEmitted = new WeakSet(); } catch {}
+            // reset prox tail for this clip
+            window.__resetProxTail?.();
+            try { window.__lastSummaryEventSent = false; } catch { }
+            try { window.__lastSummaryEmitted = new WeakSet(); } catch { }
 
-        // 1) prep video element (no native playback allowed during FBF)
-        const v = ui.video;
+            // 1) prep video element (no native playback allowed during FBF)
+            const v = ui.video;
             v.srcObject = null;
             v.removeAttribute('src');
             Object.assign(v, { autoplay: false, loop: false, muted: true, controls: false });
@@ -1000,8 +1003,18 @@
             v.src = url;
             v.preload = 'auto';
 
+            // ▶ reset all live trail buffers for this clip
+            window.__ballTrail = [];
+            if (window.ballState) window.ballState.trail = [];
+            window.__ballTrailTs = 0;
+            // optional hygiene while we’re here
+            try { window.shotArc?.resetShotFSM?.(); } catch { }
+            try { window.resetNetMotion?.(); } catch { }
+
             // 2) wait for metadata, then size canvases exactly once
             await ensureVideoReady(v);
+
+            lockViewOnce(v, ui.overlay);
             // enable guarded currentTime writes
             (function guardSeeks(el) {
                 if (!el || el.__seekGuard) return;
@@ -1047,242 +1060,308 @@
             let recHandle = null;
             let started = false;
 
-            const onFrame = () => {
-                if (!started) {
-                    recHandle = startCompositeRecorder(ui.exportCan, { fps: 30, timesliceMs: 200 });
-                    started = true;
+            // --- FBF per-frame ingest: detect ball → write trail (no factories, no promises) ---
+
+            // cache a capture canvas that mirrors the visible overlay pixels
+            const __cap = (window.__videoCanvas ||= document.createElement('canvas'));
+            const __capCtx = __cap.getContext('2d', { willReadFrequently: true });
+
+            // tolerant bbox→center
+            function __fbfCenter(o, W, H) {
+                let x = o.x ?? o.left ?? o.box?.x ?? o.bbox?.x, y = o.y ?? o.top ?? o.box?.y ?? o.bbox?.y;
+                let w = o.w ?? o.width ?? o.box?.w ?? o.bbox?.w, h = o.h ?? o.height ?? o.box?.h ?? o.bbox?.h;
+                if (o.right != null && o.left != null && o.bottom != null && o.top != null) { x = o.left; y = o.top; w = o.right - o.left; h = o.bottom - o.top; }
+                if (Array.isArray(o.bbox) && o.bbox.length === 4) {
+                    const [a, b, c, d] = o.bbox;
+                    if (c <= 1 && d <= 1) { x = a * W; y = b * H; w = c * W; h = d * H; }
+                    else if (c > a && d > b) { x = a; y = b; w = c - a; h = d - b; }
+                    else { x = a; y = b; w = c; h = d; }
                 }
+                if (w <= 1 && h <= 1 && x <= 1 && y <= 1) { x *= W; y *= H; w *= W; h *= H; }
+                const cx = (o.cx ?? o.centerX ?? (x + w / 2)), cy = (o.cy ?? o.centerY ?? (y + h / 2));
+                return { cx, cy };
+            }
+
+            // single real function (no async factory nonsense)
+            async function onFrame() {
+                // start recorder on first frame, draw the compositor frame you already have
+                if (!started) { recHandle = startCompositeRecorder(ui.exportCan, { fps: 30, timesliceMs: 200 }); started = true; }
                 compositeFrame();
-            };
-            // keep a reference so we can unhook across runs
+
+                // copy current visible frame → detector canvas
+                __cap.width = ui.overlay.width || 1280;
+                __cap.height = ui.overlay.height || 720;
+                try { __capCtx.drawImage(ui.overlay, 0, 0, __cap.width, __cap.height); } catch { }
+
+                // detect and write one trail point
+                try {
+                    const raw = await window.sendFrameToDetect?.(__cap, 1);
+                    const arr = Array.isArray(raw) ? raw : (raw?.objects || raw?.detections || []);
+                    const ball = arr.find(o => /(basket|ball)/i.test(String(o.label || o.class || o.name)));
+                    if (ball) {
+                        const { cx, cy } = __fbfCenter(ball, __cap.width, __cap.height);
+                        if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                            const t = (window.__ballTrail ||= []);
+                            t.push({ x: cx, y: cy, t: performance.now() });
+                            if (t.length > 180) t.splice(0, t.length - 180);
+                            window.__ballTrailTs = performance.now();
+                            window.BALL_TRACKER_ENABLED = true;
+                        }
+                    }
+                } catch { }
+            }
+
+            // clean any stale listener from previous runs, then attach the real one
+            try { window.removeEventListener('analyzer:frame-done', window.__onFrameOnce); } catch { }
             window.__onFrameOnce = onFrame;
             window.addEventListener('analyzer:frame-done', onFrame);
+
 
             // 7) finalize exactly once (freeze trail, force MAKE/MISS, clean up)
             let finished = false;
 
             // tiny helper: freeze best available trail so it can't decay post-end
             function freezeArcTrail() {
-            const arc = (window.ballArc ||= {});
-            const live = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
-            if (live && live.length) {
-                arc.refinedTrailFrozen = live.map(p => ({ ...p }));
-            }
+                const arc = (window.ballArc ||= {});
+                const live = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+                if (live && live.length) {
+                    arc.refinedTrailFrozen = live.map(p => ({ ...p }));
+                }
             }
 
             function computeMakeMiss(arc, hoop) {
-            const trail = (arc?.refinedTrailFrozen?.length ? arc.refinedTrailFrozen
-                        : (arc?.refinedTrail?.length ? arc.refinedTrail : arc?.trail)) || [];
-            if (!trail.length || !hoop) return null;
+                const trail = (arc?.refinedTrailFrozen?.length ? arc.refinedTrailFrozen
+                    : (arc?.refinedTrail?.length ? arc.refinedTrail : arc?.trail)) || [];
+                if (!trail.length || !hoop) return null;
 
-            const H  = hoop;
-            const hx = H.x ?? (H.cx - H.w/2);
-            const hy = H.rimY ?? (H.y ?? (H.cy - H.h/2));
-            const hw = H.w ?? 80, hh = H.h ?? 80;
+                const H = hoop;
+                const hx = H.x ?? (H.cx - H.w / 2);
+                const hy = H.rimY ?? (H.y ?? (H.cy - H.h / 2));
+                const hw = H.w ?? 80, hh = H.h ?? 80;
 
-            const tubeW = Math.max(24, Math.round(hw * 0.45));
-            const tubeH = Math.max(40, Math.round(hh * 1.10));
-            const cx    = H.cx ?? (hx + hw/2);
+                const tubeW = Math.max(24, Math.round(hw * 0.45));
+                const tubeH = Math.max(40, Math.round(hh * 1.10));
+                const cx = H.cx ?? (hx + hw / 2);
 
-            const tx1 = Math.round(cx - tubeW/2), ty1 = Math.round(hy);
-            const tx2 = tx1 + tubeW,              ty2 = ty1 + tubeH;
+                const tx1 = Math.round(cx - tubeW / 2), ty1 = Math.round(hy);
+                const tx2 = tx1 + tubeW, ty2 = ty1 + tubeH;
 
-            const hits = trail.some(p => p.x >= tx1 && p.x <= tx2 && p.y >= ty1 && p.y <= ty2);
-            return hits ? true : false;
+                const hits = trail.some(p => p.x >= tx1 && p.x <= tx2 && p.y >= ty1 && p.y <= ty2);
+                return hits ? true : false;
             }
 
             async function finishNow(via = 'unknown') {
-            if (finished) return; finished = true;
+                if (finished) return; finished = true;
 
-            // unhook frame compositor first so nothing else draws
-            try { window.removeEventListener('analyzer:frame-done', onFrame); } catch {}
-            try { window.__fbfDriver?.stop(); } catch {}
-            try { window.shotArc?.refineBallTrajectory?.(); } catch {}
+                // unhook frame compositor first so nothing else draws
+                try { window.removeEventListener('analyzer:frame-done', onFrame); } catch { }
+                try { window.__fbfDriver?.stop(); } catch { }
+                try { window.shotArc?.refineBallTrajectory?.(); } catch { }
 
-            // restore seek guard if we installed it
-            try {
-                const proto = (typeof HTMLMediaElement !== 'undefined') ? HTMLMediaElement.prototype : null;
-                const d = proto ? Object.getOwnPropertyDescriptor(proto, 'currentTime') : null;
-                if (v.__seekGuard && d && d.configurable) {
-                delete v.currentTime; // restores prototype accessor
-                v.__seekGuard = false;
-                try { delete v.__setCurrentTimeSafely; } catch {}
-                }
-            } catch {}
+                // restore seek guard
+                try {
+                    const proto = (typeof HTMLMediaElement !== 'undefined') ? HTMLMediaElement.prototype : null;
+                    const d = proto ? Object.getOwnPropertyDescriptor(proto, 'currentTime') : null;
+                    if (v.__seekGuard && d && d.configurable) {
+                        delete v.currentTime; // restores prototype accessor
+                        v.__seekGuard = false;
+                        try { delete v.__setCurrentTimeSafely; } catch { }
+                    }
+                } catch { }
 
-            // freeze trail BEFORE summarizing to stop any post-end decay
-            freezeArcTrail();
+                // native play so preview works
+                try {
+                    if (v.__origPlay) { v.play = v.__origPlay; delete v.__origPlay; }
+                } catch { }
 
-            const hoop = getHoopInVideoSpace() || window.getLockedHoopBox?.();
-            const proxTail = Array.isArray(window.__proxTail) ? window.__proxTail : undefined;
+                // freeze trail BEFORE summarizing to stop any post-end decay
+                freezeArcTrail();
 
-            const arc = window.ballArc || {};
-            const trail = Array.isArray(arc.refinedTrailFrozen) && arc.refinedTrailFrozen.length ? arc.refinedTrailFrozen
-                        : Array.isArray(arc.refinedTrail) && arc.refinedTrail.length ? arc.refinedTrail
+                const hoop = getHoopInVideoSpace() || window.getLockedHoopBox?.();
+                const proxTail = Array.isArray(window.__proxTail) ? window.__proxTail : undefined;
+
+                const arc = window.ballArc || {};
+                const trail = Array.isArray(arc.refinedTrailFrozen) && arc.refinedTrailFrozen.length ? arc.refinedTrailFrozen
+                    : Array.isArray(arc.refinedTrail) && arc.refinedTrail.length ? arc.refinedTrail
                         : Array.isArray(arc.trail) ? arc.trail
-                        : [];
-            const stateTrail = Array.isArray(window.ballState?.trail) ? window.ballState.trail.map((p, idx) => ({
-                x: p?.x,
-                y: p?.y,
-                frame: Number.isFinite(p?.frame) ? Number(p.frame) : idx
-            })) : [];
-            const shotTrail = trail.length ? trail : stateTrail;
-            if (!trail.length && shotTrail.length) {
-                try { arc.refinedTrailFrozen = cloneTrail(shotTrail); } catch {}
-            }
-            const lastTrailFrame = (() => {
-                if (!shotTrail.length) return Number(window.ballState?.trail?.at?.(-1)?.frame) || 0;
-                const last = shotTrail[shotTrail.length - 1];
-                if (Number.isFinite(last?.frame)) return Number(last.frame);
-                const bsLast = window.ballState?.trail?.at?.(-1);
-                if (Number.isFinite(bsLast?.frame)) return Number(bsLast.frame);
-                return shotTrail.length;
-            })();
-            const frameIndexForSummary = Math.max(lastTrailFrame || 0, FBF_KNOWN_TOTAL_FRAMES);
+                            : [];
+                const stateTrail = Array.isArray(window.ballState?.trail) ? window.ballState.trail.map((p, idx) => ({
+                    x: p?.x,
+                    y: p?.y,
+                    frame: Number.isFinite(p?.frame) ? Number(p.frame) : idx
+                })) : [];
+                const shotTrail = trail.length ? trail : stateTrail;
+                if (!trail.length && shotTrail.length) {
+                    try { arc.refinedTrailFrozen = cloneTrail(shotTrail); } catch { }
+                }
+                const lastTrailFrame = (() => {
+                    if (!shotTrail.length) return Number(window.ballState?.trail?.at?.(-1)?.frame) || 0;
+                    const last = shotTrail[shotTrail.length - 1];
+                    if (Number.isFinite(last?.frame)) return Number(last.frame);
+                    const bsLast = window.ballState?.trail?.at?.(-1);
+                    if (Number.isFinite(bsLast?.frame)) return Number(bsLast.frame);
+                    return shotTrail.length;
+                })();
+                const frameIndexForSummary = Math.max(lastTrailFrame || 0, FBF_KNOWN_TOTAL_FRAMES);
 
-            // try module summary, then force MAKE/MISS if needed
-            let summary = null;
-            let summaryFromShotLogger = null;
-            const logger = window.shotLogger || {};
-            try {
-                if (hoop && shotTrail.length) {
-                    const opts = { force: true, proxTail };
-                    if (typeof logger.results === 'function') {
-                        summary = logger.results(shotTrail, frameIndexForSummary, hoop, opts) || null;
-                    } else if (typeof logger.summarize === 'function') {
-                        summary = logger.summarize(shotTrail, frameIndexForSummary, hoop, opts) || null;
+                // If UI trail is empty, backfill from the final shot trail so health isn’t 0
+                try {
+                    const uiTrail = (window.__ballTrail ||= []);
+                    if (uiTrail.length === 0 && Array.isArray(shotTrail) && shotTrail.length) {
+                        for (const p of shotTrail) {
+                            if (Number.isFinite(p.x) && Number.isFinite(p.y)) {
+                                uiTrail.push({ x: p.x, y: p.y, t: performance.now() });
+                            }
+                        }
+                        if (uiTrail.length > 180) uiTrail.splice(0, uiTrail.length - 180);
+                        window.__ballTrailTs = performance.now();
                     }
-                    summaryFromShotLogger = summary ? { ...summary } : null;
+                } catch { }
+
+
+                // try module summary, then force MAKE/MISS if needed
+                let summary = null;
+                let summaryFromShotLogger = null;
+                const logger = window.shotLogger || {};
+                try {
+                    if (hoop && shotTrail.length) {
+                        const opts = { force: true, proxTail };
+                        if (typeof logger.results === 'function') {
+                            summary = logger.results(shotTrail, frameIndexForSummary, hoop, opts) || null;
+                        } else if (typeof logger.summarize === 'function') {
+                            summary = logger.summarize(shotTrail, frameIndexForSummary, hoop, opts) || null;
+                        }
+                        summaryFromShotLogger = summary ? { ...summary } : null;
+                        try {
+                            console.log('[arc-mm] shot_logger returned', { hasSummary: !!summary, fromResults: typeof logger.results === 'function' });
+                        } catch { }
+                    }
+                } catch (err) {
+                    console.warn('[arc-mm] shot_logger call failed', err);
+                }
+                if (!summary) summary = { made: null };
+
+                if (typeof summary.made !== 'boolean') {
+                    const arcForDecision = shotTrail.length
+                        ? { refinedTrailFrozen: shotTrail, refinedTrail: shotTrail, trail: shotTrail }
+                        : window.ballArc;
+                    summary.made = computeMakeMiss(arcForDecision, hoop);
+                }
+                summary.result = summary.made === true ? 'MAKE' : summary.made === false ? 'MISS' : null;
+
+                const toDegrees = (val) => Number.isFinite(val) ? Math.round(val) : null;
+                const toNumber = (val) => Number.isFinite(val) ? Math.round(val) : null;
+                const rawReleaseAngle = summary?.releaseAngle ?? summaryFromShotLogger?.releaseAngle ?? null;
+                const rawEntryAngle = summary?.entryAngle ?? summaryFromShotLogger?.entryAngle ?? null;
+                const rawApexHeight = summary?.apexHeight ?? summaryFromShotLogger?.apexHeight ?? null;
+                const releaseAngle = toDegrees(rawReleaseAngle);
+                const entryAngle = toDegrees(rawEntryAngle);
+                const apexHeight = toNumber(rawApexHeight);
+                if (summary) {
+                    if (releaseAngle != null) summary.releaseAngle = releaseAngle;
+                    if (entryAngle != null) summary.entryAngle = entryAngle;
+                    if (apexHeight != null) summary.apexHeight = apexHeight;
+                }
+
+                try {
+                    const hoopDebug = hoop ? {
+                        x: hoop.x ?? null,
+                        y: hoop.y ?? null,
+                        w: hoop.w ?? null,
+                        h: hoop.h ?? null,
+                        cx: hoop.cx ?? null,
+                        cy: hoop.cy ?? null,
+                        rimY: hoop.rimY ?? null
+                    } : null;
+                    console.log('[arc-mm] shot summary', {
+                        shotId: id,
+                        via: summaryFromShotLogger ? 'shot_logger' : 'fallback',
+                        summaryFromShotLogger,
+                        appliedSummary: summary,
+                        releaseAngle,
+                        entryAngle,
+                        apexHeight,
+                        trailPoints: shotTrail.length,
+                        lastTrailFrame,
+                        frameIndexForSummary,
+                        hoopROI: hoopDebug,
+                        proxTailFrames: Array.isArray(proxTail) ? proxTail.length : 0
+                    });
+                } catch { }
+
+                window.__lastSummary = summary;
+
+                // render a few final HUD frames with the frozen trail
+                for (let i = 0; i < 8; i++) { compositeFrame(); await new Promise(r => requestAnimationFrame(r)); }
+
+                // if shot_logger didn't emit an event, broadcast once here
+                try {
+                    if (!window.__lastSummaryEmitted) window.__lastSummaryEmitted = new WeakSet();
+                } catch { }
+                const needsSummaryEvent = (() => {
                     try {
-                        console.log('[arc-mm] shot_logger returned', { hasSummary: !!summary, fromResults: typeof logger.results === 'function' });
-                    } catch {}
+                        const lock = window.__lastSummaryEmitted;
+                        if (!lock || typeof lock.has !== 'function' || typeof lock.add !== 'function') return !window.__lastSummaryEventSent;
+                        if (summary && !lock.has(summary)) {
+                            lock.add(summary);
+                            return true;
+                        }
+                        return false;
+                    } catch { return !window.__lastSummaryEventSent; }
+                })();
+                if (summary && needsSummaryEvent) {
+                    try {
+                        window.__lastSummaryEventSent = true;
+                        window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
+                    } catch { }
                 }
-            } catch (err) {
-                console.warn('[arc-mm] shot_logger call failed', err);
-            }
-            if (!summary) summary = { made: null };
 
-            if (typeof summary.made !== 'boolean') {
-                const arcForDecision = shotTrail.length
-                    ? { refinedTrailFrozen: shotTrail, refinedTrail: shotTrail, trail: shotTrail }
-                    : window.ballArc;
-                summary.made = computeMakeMiss(arcForDecision, hoop);
-            }
-            summary.result = summary.made === true ? 'MAKE' : summary.made === false ? 'MISS' : null;
-
-            const toDegrees = (val) => Number.isFinite(val) ? Math.round(val) : null;
-            const toNumber  = (val) => Number.isFinite(val) ? Math.round(val) : null;
-            const rawReleaseAngle = summary?.releaseAngle ?? summaryFromShotLogger?.releaseAngle ?? null;
-            const rawEntryAngle   = summary?.entryAngle   ?? summaryFromShotLogger?.entryAngle   ?? null;
-            const rawApexHeight   = summary?.apexHeight   ?? summaryFromShotLogger?.apexHeight   ?? null;
-            const releaseAngle = toDegrees(rawReleaseAngle);
-            const entryAngle   = toDegrees(rawEntryAngle);
-            const apexHeight   = toNumber(rawApexHeight);
-            if (summary) {
-                if (releaseAngle != null) summary.releaseAngle = releaseAngle;
-                if (entryAngle   != null) summary.entryAngle   = entryAngle;
-                if (apexHeight   != null) summary.apexHeight   = apexHeight;
-            }
-
-            try {
-                const hoopDebug = hoop ? {
-                    x: hoop.x ?? null,
-                    y: hoop.y ?? null,
-                    w: hoop.w ?? null,
-                    h: hoop.h ?? null,
-                    cx: hoop.cx ?? null,
-                    cy: hoop.cy ?? null,
-                    rimY: hoop.rimY ?? null
-                } : null;
-                console.log('[arc-mm] shot summary', {
-                    shotId: id,
-                    via: summaryFromShotLogger ? 'shot_logger' : 'fallback',
-                    summaryFromShotLogger,
-                    appliedSummary: summary,
-                    releaseAngle,
-                    entryAngle,
-                    apexHeight,
-                    trailPoints: shotTrail.length,
-                    lastTrailFrame,
-                    frameIndexForSummary,
-                    hoopROI: hoopDebug,
-                    proxTailFrames: Array.isArray(proxTail) ? proxTail.length : 0
-                });
-            } catch {}
-
-            window.__lastSummary = summary;
-
-            // render a few final HUD frames with the frozen trail
-            for (let i = 0; i < 8; i++) { compositeFrame(); await new Promise(r => requestAnimationFrame(r)); }
-
-            // if shot_logger didn't emit an event, broadcast once here
-            try {
-                if (!window.__lastSummaryEmitted) window.__lastSummaryEmitted = new WeakSet();
-            } catch {}
-            const needsSummaryEvent = (() => {
+                // stop recorder and attach preview + status
                 try {
-                    const lock = window.__lastSummaryEmitted;
-                    if (!lock || typeof lock.has !== 'function' || typeof lock.add !== 'function') return !window.__lastSummaryEventSent;
-                    if (summary && !lock.has(summary)) {
-                    lock.add(summary);
-                    return true;
+                    const { blob, url, revoke } = await (recHandle?.stop?.() || Promise.resolve({}));
+                    const overlayName = `${outBasename || id || 'shot'}.results.webm`;
+                    const resultDetail = {
+                        id,
+                        outBasename,
+                        summary,
+                        hoop,
+                        proxTail,
+                        trail: shotTrail,
+                        arcTrailFrozen: Array.isArray(arc?.refinedTrailFrozen) ? cloneTrail(arc.refinedTrailFrozen) : null,
+                        overlay: {
+                            name: overlayName,
+                            url,
+                            mime: blob?.type || null,
+                            blob,
+                        },
+                    };
+                    try { window.arcmmRunner?.onResult?.(resultDetail); } catch { }
+                    try { window.dispatchEvent(new CustomEvent('arcmm:result', { detail: resultDetail })); } catch { }
+                    const row = document.querySelector(`[data-shot="${id}"]`);
+                    if (url && row) {
+                        const a = document.createElement('a'); a.href = url;
+                        a.download = overlayName; a.textContent = 'Download';
+                        const pv = document.createElement('video');
+                        pv.src = url; pv.controls = true; pv.muted = true; pv.style.maxWidth = '360px'; pv.style.display = 'block';
+                        row.appendChild(document.createTextNode(' · '));
+                        row.appendChild(a); row.appendChild(document.createElement('br')); row.appendChild(pv);
+                        pv.addEventListener('loadeddata', () => revoke?.(), { once: true });
                     }
-                    return false;
-                } catch { return !window.__lastSummaryEventSent; }
-            })();
-            if (summary && needsSummaryEvent) {
-                try {
-                    window.__lastSummaryEventSent = true;
-                    window.dispatchEvent(new CustomEvent('shot:summary', { detail: summary }));
-                } catch {}
-            }
-
-            // stop recorder and attach preview + status
-            try {
-                const { blob, url, revoke } = await (recHandle?.stop?.() || Promise.resolve({}));
-                const overlayName = `${outBasename || id || 'shot'}.results.webm`;
-                const resultDetail = {
-                    id,
-                    outBasename,
-                    summary,
-                    hoop,
-                    proxTail,
-                    trail: shotTrail,
-                    arcTrailFrozen: Array.isArray(arc?.refinedTrailFrozen) ? cloneTrail(arc.refinedTrailFrozen) : null,
-                    overlay: {
-                        name: overlayName,
-                        url,
-                        mime: blob?.type || null,
-                        blob,
-                    },
-                };
-                try { window.arcmmRunner?.onResult?.(resultDetail); } catch {}
-                try { window.dispatchEvent(new CustomEvent('arcmm:result', { detail: resultDetail })); } catch {}
-                const row = document.querySelector(`[data-shot="${id}"]`);
-                if (url && row) {
-                    const a  = document.createElement('a'); a.href = url;
-                    a.download = overlayName; a.textContent = 'Download';
-                    const pv = document.createElement('video');
-                    pv.src = url; pv.controls = true; pv.muted = true; pv.style.maxWidth = '360px'; pv.style.display = 'block';
-                    row.appendChild(document.createTextNode(' · '));
-                    row.appendChild(a); row.appendChild(document.createElement('br')); row.appendChild(pv);
-                    pv.addEventListener('loadeddata', () => revoke?.(), { once: true });
-                }
-                const st = document.querySelector(`[data-shot="${id}"] .status`);
-                if (st) st.textContent = summary.made === true ? '✓ MAKE' : summary.made === false ? '✗ MISS' : '—';
-            } catch {}
+                    const st = document.querySelector(`[data-shot="${id}"] .status`);
+                    if (st) st.textContent = summary.made === true ? '✓ MAKE' : summary.made === false ? '✗ MISS' : '—';
+                } catch { }
             }
 
             // fire exactly once
             const removeFinishListeners = () => {
-                try { window.removeEventListener('shot:summary', onSummaryFinish); } catch {}
-                try { window.removeEventListener('shot:end', onEndFinish); } catch {}
+                try { window.removeEventListener('shot:summary', onSummaryFinish); } catch { }
+                try { window.removeEventListener('shot:end', onEndFinish); } catch { }
             };
 
             const finishIfAllowed = (via = 'unknown', detail) => {
                 if (requireFullRun) {
-                const viaTag = String(via || (detail?.via ?? '') || '').toLowerCase();
-                if (viaTag !== 'fbf-90' && viaTag !== 'frame-limit' && viaTag !== 'arcmm-result') return;
+                    const viaTag = String(via || (detail?.via ?? '') || '').toLowerCase();
+                    if (viaTag !== 'fbf-90' && viaTag !== 'frame-limit' && viaTag !== 'arcmm-result') return;
                 }
                 removeFinishListeners();
                 finishNow(via);
@@ -1302,6 +1381,144 @@
             window.__fbfDriver.start();
 
         }
+
+        // ========= arc_mm: permanent detector + trail feed =========
+        (function installArcFbf() {
+            const v = document.getElementById('videoPlayer') || document.querySelector('video');
+            if (!v) return;
+
+            // === FBF per-frame ingest: detect on RAW VIDEO → write trail, draw compositor ===
+            const cap = (window.__videoCanvas ||= document.createElement('canvas'));
+            const capCtx = cap.getContext('2d', { willReadFrequently: true });
+
+            function _center(o, W, H){
+            let x=o.x??o.left??o.box?.x??o.bbox?.x, y=o.y??o.top??o.box?.y??o.bbox?.y;
+            let w=o.w??o.width??o.box?.w??o.bbox?.w, h=o.h??o.height??o.box?.h??o.bbox?.h;
+            if (o.right!=null && o.left!=null && o.bottom!=null && o.top!=null){ x=o.left; y=o.top; w=o.right-o.left; h=o.bottom-o.top; }
+            if (Array.isArray(o.bbox) && o.bbox.length===4){
+                const [a,b,c,d]=o.bbox;
+                if (c<=1 && d<=1){ x=a*W; y=b*H; w=c*W; h=d*H; }
+                else if (c>a && d>b){ x=a; y=b; w=c-a; h=d-b; }
+                else { x=a; y=b; w=c; h=d; }
+            }
+            if (w<=1 && h<=1 && x<=1 && y<=1){ x*=W; y*=H; w*=W; h*=H; }
+            const cx=(o.cx??o.centerX??(x+w/2)), cy=(o.cy??o.centerY??(y+h/2));
+            return {cx,cy};
+            }
+
+            async function onFrame(){
+            // start recorder and composite what you already draw
+            if (!started) { recHandle = startCompositeRecorder(ui.exportCan, { fps: 30, timesliceMs: 200 }); started = true; }
+            compositeFrame();
+
+            // copy the RAW VIDEO frame (not the overlay) into the capture canvas
+            const v = ui.video;
+            cap.width  = v.videoWidth  || ui.overlay.width  || 1280;
+            cap.height = v.videoHeight || ui.overlay.height || 720;
+            try { capCtx.drawImage(v, 0, 0, cap.width, cap.height); } catch {}
+
+            // detect ball and push one trail point now
+            try {
+                const raw = await window.sendFrameToDetect?.(cap, 1);
+                const arr = Array.isArray(raw) ? raw : (raw?.objects || raw?.detections || []);
+                const ball = arr.find(o => /(basket|ball)/i.test(String(o.label||o.class||o.name)));
+                if (ball) {
+                const { cx, cy } = _center(ball, cap.width, cap.height);
+                if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                    const t = (window.__ballTrail ||= []);
+                    t.push({ x: cx, y: cy, t: performance.now() });
+                    if (t.length > 180) t.splice(0, t.length - 180);
+                    window.__ballTrailTs = performance.now();
+                    window.BALL_TRACKER_ENABLED = true;
+                }
+                }
+            } catch {}
+            }
+
+            // clean stale handler then attach the real one for this run
+            try { window.removeEventListener('analyzer:frame-done', window.__onFrameOnce); } catch {}
+            window.__onFrameOnce = onFrame;
+            window.addEventListener('analyzer:frame-done', onFrame);
+
+
+
+
+            async function tick() {
+                if (!window.__FBF_ACTIVE) return;
+                try {
+                    cap.width = v.videoWidth || 1280;
+                    cap.height = v.videoHeight || 720;
+                    ctx.drawImage(v, 0, 0, cap.width, cap.height);
+
+                    const raw = await window.sendFrameToDetect(cap, 1);
+                    window.__detectFrameCount = (window.__detectFrameCount || 0) + 1;
+
+                    const arr = Array.isArray(raw) ? raw : (raw.objects || raw.detections || []);
+                    const ball = arr.find(o => String(o.label || o.class || o.name).toLowerCase().includes('ball'));
+                    if (ball) {
+                        const { cx, cy } = toCenter(ball, cap.width, cap.height);
+                        if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                            const t = (window.__ballTrail ||= []);
+                            t.push({ x: cx, y: cy, t: performance.now() });
+                            if (t.length > 160) t.splice(0, t.length - 160);
+                            window.__ballTrailTs = performance.now();
+                            window.BALL_TRACKER_ENABLED = true;
+                        }
+                    }
+                } catch { }
+                setTimeout(tick, 60);
+            }
+
+            function startLoop() {
+                if (window.__FBF_ACTIVE) return;
+                window.__FBF_ACTIVE = true;
+                tick();
+            }
+            function stopLoop() { window.__FBF_ACTIVE = false; }
+
+            // Start when metadata is ready (frame size known) or on play.
+            v.addEventListener('loadedmetadata', startLoop);
+            v.addEventListener('play', startLoop);
+            v.addEventListener('pause', stopLoop);
+            v.addEventListener('ended', stopLoop);
+
+            // DO NOT auto-play here. Let the Process click call play().
+            // v.muted = true;  // you can still set these in the Process handler
+            // v.play?.().catch(()=>{});
+
+            clearInterval(window.__detBeat);
+            window.__detBeat = setInterval(() => console.log(
+                '[beat] calls', window.__detectFrameCount || 0,
+                'trail', window.__ballTrail?.length || 0,
+                'active', !!window.__FBF_ACTIVE,
+                'paused', v.paused
+            ), 1000);
+
+            // allow Process to rebind after it swaps src or element
+            window.rebindArcLoop = function (videoEl) {
+                stopLoop();
+                videoEl.addEventListener('loadedmetadata', startLoop, { once: true });
+                // if it’s already ready, start immediately
+                if (videoEl.readyState >= 1) startLoop();
+            };
+
+            console.log('[arc-mm] FBF detector feed installed (safe)');
+        })();
+
+        // Lock view scaling exactly once per clip to stop per-frame resize jitter
+        function lockViewOnce(videoEl, overlay) {
+            if (window.__VIEW && window.__VIEW.__locked) return;
+            const vw = videoEl.videoWidth || 1280;
+            const vh = videoEl.videoHeight || 720;
+            overlay.width = vw;
+            overlay.height = vh;
+            window.__VIEW = { vw, vh, sx: 1, sy: 1, scale: 1, __locked: true };
+            // If something tries to re-sync sizes, ignore it until this clip ends
+            window.syncSizesOnce = function () { /* locked */ };
+        }
+
+
+
 
         /* ---------- boot UI (idempotent, sequential, sane) ---------- */
         (function bootOnce() {
@@ -1326,8 +1543,8 @@
                     };
                     const onShotEnd = (ev) => {
                         if (requireFull) {
-                        const via = String(ev?.detail?.via || '').toLowerCase();
-                        if (via !== 'fbf-90' && via !== 'frame-limit') return;
+                            const via = String(ev?.detail?.via || '').toLowerCase();
+                            if (via !== 'fbf-90' && via !== 'frame-limit') return;
                         }
                         resolveWith('shot:end', ev);
                     };
@@ -1371,6 +1588,26 @@
                 maybeAutoStart();
             }
 
+            async function ensurePlayable(videoEl) {
+                if (!videoEl) return;
+                videoEl.muted = true;
+                videoEl.playsInline = true;
+                videoEl.setAttribute('playsinline', '');
+                videoEl.crossOrigin = 'anonymous';
+                videoEl.preload = 'auto';
+
+                const p = videoEl.play?.();
+                if (p && p.catch) {
+                    await p.catch(() => {
+                        const unlock = () => {
+                            videoEl.play().catch(() => { });
+                            window.removeEventListener('pointerdown', unlock, { capture: true });
+                        };
+                        window.addEventListener('pointerdown', unlock, { once: true, capture: true });
+                    });
+                }
+            }
+
             async function handleOneButtonClick(b) {
                 if (!b || b.disabled) return;
                 b.disabled = true; b.textContent = 'Processing…';
@@ -1400,12 +1637,54 @@
                 }
             }
 
-            // Wire per-row clicks once
-            ui.list.addEventListener('click', (e) => {
+            // Click handler: Shift-click = PREVIEW (plays video), plain click = PROCESS (FBF)
+            ui.list.addEventListener('click', async (e) => {
                 const b = e.target.closest('button.go');
                 if (!b || b.disabled) return;
+
+                const row = b.closest('.shot');
+                const id = b.dataset.id;
+                const shot = SHOTS.find(x => String(x.id) === String(id));
+                const st = row?.querySelector('.status');
+                const v = ui.video;
+
+                if (e.shiftKey) {
+                    // PREVIEW mode: play the clip and rebind detector loop immediately
+                    try {
+                        // PREVIEW mode: play the clip and rebind detector loop immediately
+                        b.textContent = 'Previewing…';
+                        st && (st.textContent = 'playing…');
+
+                        v.pause();
+                        v.srcObject = null;
+                        v.removeAttribute('src');
+                        v.src = shot.url;
+                        v.load();
+
+                        // ▶ reset all live trail buffers for this clip
+                        window.__ballTrail = [];
+                        if (window.ballState) window.ballState.trail = [];
+                        window.__ballTrailTs = 0;
+                        // optional hygiene
+                        try { window.shotArc?.resetShotFSM?.(); } catch { }
+                        try { window.resetNetMotion?.(); } catch { }
+
+                        await ensurePlayable(v);        // call play() in the same user gesture
+                        window.rebindArcLoop?.(v);
+                        b.textContent = 'Process';
+
+                    } catch (err) {
+                        console.warn('preview failed', err);
+                        st && (st.textContent = 'preview failed');
+                        b.textContent = 'Process';
+                    }
+                    return; // don’t start FBF on preview
+                }
+
+                // PROCESS mode: run deterministic FBF pipeline (no native playback)
                 handleOneButtonClick(b);
             });
+
 
             // Process all, sequentially, with progress
             let processingAll = false;
@@ -1450,7 +1729,7 @@
                     g.arcmmRunner.shotsRendered = true;
                     g.arcmmRunner.onReady?.({ shots: SHOTS.slice() });
                 }
-            } catch {}
+            } catch { }
         })();
 
     </script>

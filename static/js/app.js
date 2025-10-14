@@ -5,6 +5,81 @@
 // Leaves: session start/end, cap, persistence, table rendering to other modules.
 
 try { window.__appJsLoaded = true; } catch { }
+try { window.DEFER_FE_SUMMARY = false; } catch {}
+
+function computePoseScoreFallback(snapshot, baseWeighted = null, debugTag = null) {
+    if (!snapshot || typeof snapshot !== 'object') return null;
+
+    const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
+    const zeroGuard = (v, fallback = 0.45) => Number.isFinite(v) ? v : fallback;
+
+    const scaleUp = (value, low, high) => {
+        if (!Number.isFinite(value)) return 0.45;
+        if (value <= low) return 0;
+        if (value >= high) return 1;
+        return (value - low) / (high - low);
+    };
+
+    const scaleDown = (value, low, high) => {
+        if (!Number.isFinite(value)) return 0.45;
+        if (value <= low) return 1;
+        if (value >= high) return 0;
+        return (high - value) / (high - low);
+    };
+
+    const scaleBand = (value, target, tolNeg, tolPos) => {
+        if (!Number.isFinite(value)) return 0.45;
+        const low = target - tolNeg;
+        const high = target + tolPos;
+        if (value <= low || value >= high) return 0;
+        if (value === target) return 1;
+        return value < target
+            ? (value - low) / (target - low)
+            : (high - value) / (high - target);
+    };
+
+    const golden = typeof window.DOACH_MEM?.golden === 'function' ? window.DOACH_MEM.golden() : null;
+    const target = (name, fallback) => {
+        const val = Number(golden?.[name]);
+        return Number.isFinite(val) ? val : fallback;
+    };
+
+    const components = [];
+    const addComponent = (score, weight) => {
+        components.push({ score: clamp(zeroGuard(score), 0, 1), weight });
+    };
+
+    addComponent(scaleUp(Number(snapshot.elbowExtDeg), target('elbowExtDeg', 136), target('elbowExtDeg', 160)), 0.22);
+    addComponent(scaleDown(Number(snapshot.armVerticalityDeg), target('armVerticalityDeg', 10), target('armVerticalityDeg', 32)), 0.15);
+    addComponent(scaleBand(Number(snapshot.kneeFlex), target('kneeFlex', 32), 14, 18), 0.12);
+    addComponent(scaleBand(Number(snapshot.stanceRatio), target('stanceRatio', 0.68), 0.16, 0.18), 0.08);
+    addComponent(scaleBand(Number(snapshot.stanceWidthFeet), target('stanceWidthFeet', 16), 5, 7), 0.06);
+    addComponent(scaleDown(Number(snapshot.feetAngleDiff), target('feetAngleDiff', 8), 20), 0.08);
+    addComponent(scaleDown(Number(snapshot.headToHoopDeg), target('headToHoopDeg', 12), 36), 0.08);
+    addComponent(scaleDown(Math.abs(Number(snapshot.torsoLeanAngle)), 0, 14), 0.05);
+    addComponent(scaleDown(Number(snapshot.footStagger), 0, 18), 0.04);
+    addComponent(scaleUp(Number(snapshot.footLiftPx), 0, 12), 0.04);
+    addComponent(Number(snapshot.followThroughHoldFrames) >= 2 ? 1 : Number(snapshot.followThroughHoldFrames) >= 1 ? 0.7 : 0.15, 0.05);
+    addComponent(snapshot.releaseAboveShoulder === false ? 0.15 : 1, 0.04);
+    addComponent(scaleBand(Number(snapshot.shoulderToWristAngle), target('shoulderToWristAngle', 58), 18, 20), 0.06);
+
+    const totals = components.reduce((acc, c) => {
+        acc.score += c.score * c.weight;
+        acc.weight += c.weight;
+        return acc;
+    }, { score: 0, weight: 0 });
+
+    if (totals.weight === 0) return null;
+    const poseComposite = clamp(totals.score / totals.weight, 0, 1);
+    const weightedBase = Number.isFinite(baseWeighted) ? clamp(baseWeighted, 0, 1) : null;
+    const final = weightedBase != null ? clamp(poseComposite * 0.7 + weightedBase * 0.3, 0, 1) : poseComposite;
+
+    if (window.SCORE_DEBUG === true) {
+        console.log('[score:fallback:pose:detail]', { debugTag, poseComposite, weightedBase, components });
+    }
+
+    return Math.round(final * 100);
+}
 
 
 // ---------- Imports (only what this file actually uses) ----------
@@ -31,7 +106,6 @@ import {
 
 import { showPromptMessage as uiShowPromptMessage } from './video_ui.js';
 import { setReleaseKnobs } from './release_gate.js';
-import { speak } from './coach_voice.js';
 
 
 window.HOOP_RENDER_MODE = "none";
@@ -103,7 +177,11 @@ function localHidePrompt() {
 }
 function showPromptCompat(text, duration = 4000, opts = {}) {
     const voice = opts.voice !== false;
-    if (voice) { try { speak(text); } catch { } }
+    if (voice) {
+        try {
+            if (typeof window.doachSpeak === 'function') window.doachSpeak(text);
+        } catch { }
+    }
     if (typeof uiShowPromptMessage === 'function') uiShowPromptMessage(text, duration);
     else localShowPrompt(text, duration);
 }
@@ -243,9 +321,149 @@ window.poseDetectSerial = poseDetectSerial;
             const sum = {
                 id: shotId,
                 shotId,
-                made: null, arcHeight: null, entryAngle: null, releaseAngle: null,
+                made: null,
+                arcHeight: null,
+                entryAngle: null,
+                releaseAngle: null,
                 poseSnapshot: snap || null
             };
+
+            // Populate pose/weighted score from the richest available source so persistence/UI get real values.
+            const idNum = Number(shotId);
+            const seen = new WeakSet();
+            const applyScoresFrom = (source) => {
+                if (!source || typeof source !== 'object') return;
+                if (seen.has(source)) return;
+                seen.add(source);
+                const toNumber = (val) => {
+                    const n = Number(val);
+                    return Number.isFinite(n) ? n : null;
+                };
+                const poseScoreCandidate = [
+                    source.poseScore,
+                    source.pose_score,
+                    source.score,
+                    source.pose?.score
+                ].map(toNumber).find((v) => v != null);
+                if (!Number.isFinite(sum.poseScore) && poseScoreCandidate != null) {
+                    sum.poseScore = poseScoreCandidate;
+                }
+                const weightedCandidate = [
+                    source.weightedScore,
+                    source.weighted_score,
+                    source.poseScoreRaw,
+                    source.summary?.weightedScore,
+                    source.data?.weightedScore
+                ].map(toNumber).find((v) => v != null);
+                if (!Number.isFinite(sum.weightedScore) && weightedCandidate != null) {
+                    sum.weightedScore = weightedCandidate;
+                }
+                const nested = [
+                    source.summary,
+                    source.data,
+                    source.arcmm,
+                    source.arcmm?.summary
+                ];
+                for (const next of nested) {
+                    if (next && typeof next === 'object') applyScoresFrom(next);
+                }
+            };
+
+            applyScoresFrom(row);
+
+            const lastSummary = window.__lastSummary;
+            const lastSummaryId = Number(lastSummary?.id ?? lastSummary?.shotId);
+            if (Number.isFinite(idNum) && Number.isFinite(lastSummaryId) && idNum === lastSummaryId) {
+                applyScoresFrom(lastSummary);
+            }
+
+            const shotLog = Array.isArray(window.shotLog) ? window.shotLog : [];
+            const logMatch = Number.isFinite(idNum)
+                ? shotLog.find((entry) => Number(entry?.id) === idNum)
+                : shotLog.at?.(-1);
+            applyScoresFrom(logMatch);
+
+            // Normalize/cross-fill between poseScore (0-100) and weightedScore (0-1).
+            if (Number.isFinite(sum.weightedScore) && sum.weightedScore > 1) {
+                sum.weightedScore = sum.weightedScore / 100;
+            }
+
+            if (!Number.isFinite(sum.weightedScore)) {
+                try {
+                    const rec = window.shotLog?.find?.((entry) => Number(entry?.id) === idNum);
+                    if (rec && Number.isFinite(rec.weightedScore)) {
+                        sum.weightedScore = Math.max(0, Math.min(1, rec.weightedScore));
+                        console.log('[score:fallback:shotLog]', { shotId, weightedScore: sum.weightedScore });
+                    }
+                } catch (err) {
+                    console.warn('[score:fallback:shotLog:error]', { shotId, error: String(err) });
+                }
+            }
+
+            if (!Number.isFinite(sum.weightedScore)) {
+                try {
+                    let trail = Array.isArray(window.ballState?.trail) ? window.ballState.trail.slice(-28) : null;
+                    if (!trail || trail.length < 3) {
+                        const frozen = window.ballState?.shots?.at?.(-1);
+                        if (Array.isArray(frozen?.trail) && frozen.trail.length >= 3) {
+                            trail = frozen.trail.slice(-28);
+                        }
+                    }
+                    const hoop = window.getLockedHoopBox?.();
+                    if (typeof window.computeWeightedShotScore === 'function' && trail?.length >= 3 && hoop) {
+                        const w = window.computeWeightedShotScore(trail);
+                        if (Number.isFinite(w)) {
+                            sum.weightedScore = Math.max(0, Math.min(1, w));
+                            console.log('[score:fallback:trail]', { shotId, weightedScore: sum.weightedScore, trailLen: trail.length });
+                        } else {
+                            console.warn('[score:fallback:trail]', { shotId, reason: 'non-finite result', weightedScore: w });
+                        }
+                    } else {
+                        console.warn('[score:fallback:trail]', {
+                            shotId,
+                            hasFn: typeof window.computeWeightedShotScore === 'function',
+                            trailLen: trail?.length || 0,
+                            hasHoop: !!hoop
+                        });
+                    }
+                } catch (err) {
+                    console.warn('[score:fallback:trail:error]', { shotId, error: String(err) });
+                }
+            }
+
+            const computedPoseScore = sum.poseSnapshot
+                ? computePoseScoreFallback(sum.poseSnapshot, Number.isFinite(sum.weightedScore) ? sum.weightedScore : null, shotId)
+                : null;
+
+            if (Number.isFinite(computedPoseScore)) {
+                sum.poseScore = computedPoseScore;
+                if (!Number.isFinite(sum.weightedScore)) {
+                    sum.weightedScore = computedPoseScore / 100;
+                } else {
+                    sum.weightedScore = Math.max(0, Math.min(1, sum.weightedScore));
+                }
+            } else {
+                if (!Number.isFinite(sum.poseScore) && Number.isFinite(sum.weightedScore)) {
+                    sum.poseScore = Math.round(sum.weightedScore * 100);
+                }
+                if (!Number.isFinite(sum.weightedScore) && Number.isFinite(sum.poseScore)) {
+                    sum.weightedScore = Math.max(0, Math.min(1, sum.poseScore / 100));
+                }
+            }
+
+            if (!Number.isFinite(sum.weightedScore)) {
+                sum.weightedScore = 0;
+                console.warn('[score:fallback:default-zero]', { shotId });
+            }
+            if (!Number.isFinite(sum.poseScore)) {
+                sum.poseScore = Math.round(sum.weightedScore * 100);
+            }
+
+console.log('[score:microclip:final]', {
+                shotId,
+                poseScore: sum.poseScore ?? null,
+                weightedScore: sum.weightedScore ?? null
+            });
             window.recordShotSummary?.(sum);
             window.dispatchEvent(new CustomEvent('shot:summary', { detail: sum }));
         } catch (err) {
@@ -511,6 +729,15 @@ function setPoseIfMissing(shotId, snap) {
         const hoopBox = (window.getLockedHoopBox?.()) || (typeof getLockedHoopBox === 'function' ? getLockedHoopBox() : null);
         if (!hoopBox) { console.warn('[safeEmitRelease] no hoop'); return false; }
 
+        const faceMgr = window.FaceLock || window.faceLockManager || null;
+        if (faceMgr?.requiresLock?.()) {
+            const locked = faceMgr.lockSatisfied?.();
+            if (!locked) {
+                faceMgr.notifyLockNeeded?.('release_block');
+                return false;
+            }
+        }
+
         // cooldown vs last fire
         const since = now - (Number(window.__REL_LAST_FIRE_MS || 0));
         const need = Number(window.REL_COOLDOWN_MS || 1200);
@@ -626,7 +853,8 @@ function setPoseIfMissing(shotId, snap) {
 
         // Emit release (with identity)
         const prox = shotArcProx(hoopBox);
-        window.dispatchEvent(new CustomEvent('shot:release', { detail: { shotId, frame: fnum, via, prox, poseApproved: !!opts.poseApproved } }));
+        const lockTrackId = faceMgr?.lock?.trackId ?? window.__playerLock?.trackId ?? null;
+        window.dispatchEvent(new CustomEvent('shot:release', { detail: { shotId, frame: fnum, via, prox, poseApproved: !!opts.poseApproved, trackId: lockTrackId } }));
 
         // Microclip or summary fallback
         if (window.USE_MICROCLIP && window.__CLIPS_AVAILABLE) {
@@ -853,10 +1081,9 @@ export function enableHoopPickOnce() {
         window.__hoopConfirmed = true;
         clearHoopReminders();
         // Say a clean confirmation and avoid the goofy rectangle if we’re hiding it
-        try {
-            const talk = window.doachSpeak || window.coachSpeak || window.speakTTS;
-            if (typeof talk === 'function') talk('Target hoop selected');
-        } catch { }
+        if (typeof window.doachSpeak === 'function') {
+            try { window.doachSpeak('Target hoop selected'); } catch { }
+        }
         resumeHoopTrackingLoops();
     };
 
@@ -1163,6 +1390,7 @@ function startPreDetectWarm(videoEl) {
                 } catch { }
                 stabilizeLockedHoop?.(objects);
                 objects = filterObjectsToLockedHoop?.(objects) ?? objects;
+                objects = window.faceLockFilterDetections?.(objects) ?? objects;
                 window.lastDetectedFrame = { __frameIdx: nextIdx, objects, poses: [] };
                 callOverlay(objects, playerState);
             } catch { }

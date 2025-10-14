@@ -532,6 +532,7 @@ def _try_init_db():
             arc_height = Column(Float)
             miss_reason = Column(String(128))
             clip_url = Column(String(512))
+            pose_score = Column(Float)
             data = Column(MyJSON)
 
         class PoseSnapshotRow(Base):
@@ -557,6 +558,7 @@ def _try_init_db():
             model = Column(String(64))
             latency_ms = Column(Integer)
             text = Column(Text)
+            score = Column(Float)
 
         Base.metadata.create_all(engine)
         DBSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)

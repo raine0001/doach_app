@@ -6,7 +6,8 @@
   const btnRefresh = document.getElementById('btnRefresh');
   const dbgJson = document.getElementById('dbg-json');
   const sessionLabel = document.getElementById('dbg-session-label');
-  const shotsWrap = document.getElementById('shotsTableWrap');
+  const shotsWrap = document.querySelector('.shots-wrap');
+  const shotsTableWrap = document.getElementById('shotsTableWrap');
   const shotsMeta = document.getElementById('shotsMeta');
   const btnObserve = document.getElementById('dbg-open-observe');
   const btnOpenJson = document.getElementById('dbg-open-json');
@@ -220,12 +221,25 @@
 
 
 
-  const resultPill = (result) => {
+  const resultPill = (result, overrideInfo = null) => {
     let cls = 'pending';
     let text = 'pending';
-    if (result === true || result === 'made' || result === 'make') { cls = 'make'; text = 'make'; }
+    if (isMadeResult(result)) { cls = 'make'; text = 'make'; }
     else if (result === false || result === 'miss') { cls = 'miss'; text = 'miss'; }
-    return `<span class="shots-pill ${cls}">${text}</span>`;
+    let titleAttr = '';
+    if (overrideInfo && typeof overrideInfo === 'object') {
+      cls += ' manual';
+      text = `${text}*`;
+      const parts = [];
+      if (overrideInfo.by) parts.push(`by ${overrideInfo.by}`);
+      if (overrideInfo.updated_at) {
+        const when = fmtDate(overrideInfo.updated_at);
+        if (when) parts.push(when);
+      }
+      if (overrideInfo.reason) parts.push(`reason: ${overrideInfo.reason}`);
+      if (parts.length) titleAttr = ` title="${escapeHtml(parts.join(' | '))}"`;
+    }
+    return `<span class="shots-pill ${cls}"${titleAttr}>${text}</span>`;
   };
 
   const getLastActivityTimestamp = (session) => {
@@ -400,6 +414,7 @@
         if (!entry.pose && shot?.pose) entry.pose = shot.pose;
         if (!entry.poseMetrics && shot?.poseMetrics) entry.poseMetrics = shot.poseMetrics;
         if (!entry.poseSource && shot?.poseSource) entry.poseSource = shot.poseSource;
+        if (!entry.adminOverride && shot?.adminOverride) entry.adminOverride = shot.adminOverride;
         if (shot?.arcmm && typeof shot.arcmm === 'object') {
           entry.arcmm = { ...(entry.arcmm || {}), ...shot.arcmm };
           if (shot.arcmm.summary && typeof shot.arcmm.summary === 'object') {
@@ -436,6 +451,7 @@
         if (shot.arcHeight != null) entry.arcHeight = shot.arcHeight;
         if (shot.entryAngle != null) entry.entryAngle = shot.entryAngle;
         if (shot.releaseAngle != null) entry.releaseAngle = shot.releaseAngle;
+        if (!entry.adminOverride && shot.adminOverride) entry.adminOverride = shot.adminOverride;
       });
     }
 
@@ -457,17 +473,76 @@
     return map;
   };
 
+  async function handleShotToggleClick(event) {
+    event.preventDefault();
+    const btn = event.currentTarget;
+    if (!btn || !activeSid) return;
+    const idx = Number(btn.dataset.idx);
+    if (!Number.isFinite(idx) || idx <= 0) return;
+    const current = btn.dataset.current === 'true';
+    const next = current ? false : true;
+    let reason;
+    if (!next) {
+      const input = window.prompt('Reason for marking as miss? (optional)', '');
+      if (input != null) {
+        const trimmed = input.trim();
+        if (trimmed) reason = trimmed;
+      }
+    }
+    clearTimers();
+    const originalText = btn.textContent;
+    let success = false;
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+      const body = reason ? { made: next, reason } : { made: next };
+      const res = await fetch(`/admin/session/${encodeURIComponent(activeSid)}/shot/${idx}/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const resJson = await res.json().catch(() => null);
+      if (resJson?.totals && shotsMeta) {
+        const attempts = Number(resJson.totals.attempts);
+        const made = Number(resJson.totals.made);
+        if (Number.isFinite(attempts) && Number.isFinite(made)) {
+          shotsMeta.textContent = `${made} of ${attempts} made`;
+        }
+      }
+      await loadClips(activeSid, { silent: false });
+      await loadDebug(activeSid, { silent: true });
+      success = true;
+    } catch (err) {
+      console.error('[admin] shot override failed', err);
+      alert(`Failed to update shot ${idx}: ${err.message || err}`);
+    } finally {
+      if (!success && btn.isConnected) {
+        btn.disabled = false;
+        btn.textContent = originalText;
+      }
+    }
+  }
+
   const renderShots = (payload) => {
-    if (!shotsWrap) return;
+    if (!shotsWrap || !shotsTableWrap) return;
 
     lastClipsPayload = payload;
 
+    const showMessage = (message) => {
+      shotsWrap.className = 'shots-wrap';
+      shotsTableWrap.className = 'shots-table-wrap shots-empty';
+      shotsTableWrap.textContent = message;
+    };
+
     if (!payload || !Array.isArray(payload.clips) || !payload.clips.length) {
-      shotsWrap.className = 'shots-empty';
-      shotsWrap.textContent = activeSid ? 'Waiting for clips...' : 'No clips yet.';
-      if (shotsMeta) shotsMeta.textContent = '0';
+      showMessage(activeSid ? 'Waiting for clips...' : 'No clips yet.');
+      if (shotsMeta) shotsMeta.textContent = '0 of 0 made';
       return;
     }
+
+    shotsWrap.className = 'shots-wrap';
+    shotsTableWrap.className = 'shots-table-wrap';
 
     const totals = payload.totals || cachedDebug?.sessionFile?.totals || {};
     const shotMeta = collectShotMeta();
@@ -497,6 +572,8 @@
       const shotIdx = deriveShotIdx(clip, index + 1);
       const meta = shotMeta.get(shotIdx) || {};
 
+      if (!meta.adminOverride && clip.adminOverride) meta.adminOverride = clip.adminOverride;
+
       const arcmmData = {
         ...(meta.arcmm || {}),
         ...(clip.arcmm && typeof clip.arcmm === 'object' ? clip.arcmm : {}),
@@ -510,6 +587,9 @@
       if (!arcmmData.processed_clip && clip.processedUrl) {
         arcmmData.processed_clip = clip.processedUrl;
       }
+      if (!arcmmData.adminOverride && meta.adminOverride) {
+        arcmmData.adminOverride = meta.adminOverride;
+      }
 
       let resultValue = meta.result ?? clip.result;
       if (arcmmData.summary && typeof arcmmData.summary.made === 'boolean') {
@@ -517,9 +597,14 @@
       } else if (typeof arcmmData.made === 'boolean') {
         resultValue = arcmmData.made;
       }
+      const overrideInfo = meta.adminOverride || clip.adminOverride || arcmmData.adminOverride || null;
+      if (overrideInfo && typeof overrideInfo.made === 'boolean') {
+        resultValue = overrideInfo.made;
+      }
 
       shotResults.push({ idx: shotIdx, result: resultValue });
-      const pillHtml = resultPill(resultValue);
+      meta.result = resultValue;
+      const pillHtml = resultPill(resultValue, overrideInfo);
 
       const metricsSource = meta.poseMetrics || meta.pose || clip.poseMetrics || clip.pose;
       const summaryLine = meta.summary || clip.poseSummary || '';
@@ -548,6 +633,23 @@
         : `<span class="clip-link clip-link-disabled">${escapeHtml(linkText)}</span>`;
 
       const arcmmCell = renderArcmmStatusCell(arcmmData, meta, clip);
+      const currentMade = isMadeResult(resultValue);
+      const nextMade = currentMade ? false : true;
+      const actionLabel = nextMade ? 'Mark Make' : 'Mark Miss';
+      const overrideTimeRaw = overrideInfo?.updated_at;
+      let overrideTime = '';
+      if (overrideTimeRaw) {
+        const timeCandidate = fmtTime(overrideTimeRaw);
+        overrideTime = timeCandidate !== '--' ? timeCandidate : fmtDate(overrideTimeRaw);
+      }
+      const overrideNote = overrideInfo
+        ? `<div class="override-note">Override ${escapeHtml(overrideInfo.by || 'admin')} &rarr; ${overrideInfo.made ? 'MAKE' : 'MISS'}${overrideTime ? ` @ ${escapeHtml(overrideTime)}` : ''}${overrideInfo.reason ? ` (${escapeHtml(overrideInfo.reason)})` : ''}</div>`
+        : '';
+      const actionsCell = `
+        <div>
+          <button class="shot-action-btn" data-idx="${shotIdx}" data-current="${currentMade ? 'true' : 'false'}">${escapeHtml(actionLabel)}</button>
+          ${overrideNote}
+        </div>`;
 
       shotRows.push(`
         <tr>
@@ -558,15 +660,19 @@
           <td>${poseCell}</td>
           <td>${saved}</td>
           <td>${size}</td>
+          <td class="actions-cell">${actionsCell}</td>
         </tr>`);
     });
 
-    shotsWrap.className = '';
-    shotsWrap.innerHTML = `
+    shotsTableWrap.innerHTML = `
       <table class='shots-table'>
-        <thead><tr><th>#</th><th>Result</th><th>Clip</th><th>ArcMM</th><th>Pose Highlights</th><th>Saved</th><th>Size</th></tr></thead>
+        <thead><tr><th>#</th><th>Result</th><th>Clip</th><th>ArcMM</th><th>Pose Highlights</th><th>Saved</th><th>Size</th><th>Actions</th></tr></thead>
         <tbody>${shotRows.join('')}</tbody>
       </table>`;
+
+    shotsTableWrap.querySelectorAll('.shot-action-btn').forEach((btn) => {
+      btn.addEventListener('click', handleShotToggleClick);
+    });
 
     if (shotsMeta) {
       const attempts = Number.isFinite(totals.attempts) && totals.attempts > 0 ? totals.attempts : shotResults.length;
@@ -581,9 +687,10 @@
 
   const loadClips = async (sid, { silent = false } = {}) => {
     if (!sid || sid !== activeSid) return;
-    if (!silent && shotsWrap) {
-      shotsWrap.className = 'shots-empty';
-      shotsWrap.textContent = 'Loading clips...';
+    if (!silent && shotsWrap && shotsTableWrap) {
+      shotsWrap.className = 'shots-wrap';
+      shotsTableWrap.className = 'shots-table-wrap shots-empty';
+      shotsTableWrap.textContent = 'Loading clips...';
       if (shotsMeta) shotsMeta.textContent = '--';
     }
     try {
@@ -593,9 +700,11 @@
       if (sid !== activeSid) return;
       renderShots(data);
     } catch (err) {
-      if (!silent && shotsWrap) {
-        shotsWrap.className = 'shots-empty';
-        shotsWrap.textContent = `Clip load failed: ${err.message || err}`;
+      if (!silent && shotsWrap && shotsTableWrap) {
+        shotsWrap.className = 'shots-wrap';
+        shotsTableWrap.className = 'shots-table-wrap shots-empty';
+        shotsTableWrap.textContent = `Clip load failed: ${err.message || err}`;
+        if (shotsMeta) shotsMeta.textContent = '--';
       }
     } finally {
       scheduleClipRefresh(sid);

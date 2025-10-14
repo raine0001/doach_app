@@ -4,7 +4,7 @@
 // Emits:  hud:start-session (on explicit start), hud:end-session (on end)
 // Does NOT: generate releases, record clips, enforce UI, open tables automatically.
 
-import { speak, doachSpeak, primeCoachAudio, listenForEndSession } from '/static/js/coach_voice.js';
+import { doachSpeak, primeCoachAudio, listenForEndSession } from '/static/js/coach_voice.js';
 
 /* ------------------------ tiny helpers ------------------------ */
 async function postJSON(url, body) {
@@ -160,16 +160,16 @@ async function startSession() {
                     if (job && typeof job.then === 'function') {
                         try { window.__GREETING_PROMISE = greetingPromise || job; } catch { }
                         const ok = await job;
-                        if (!ok) speak(greeting);
+                        if (!ok) console.warn('[coach:greeting] TTS failed');
                     } else {
-                        speak(greeting);
+                        console.warn('[coach:greeting] TTS handler returned non-promise');
                     }
                 } catch (err) {
-                    speak(greeting);
+                    console.warn('[coach:greeting] error', err);
                     throw err;
                 }
             } else {
-                speak(greeting);
+                console.warn('[coach:greeting] doachSpeak not available');
             }
         } catch { }
         finally {
@@ -232,6 +232,110 @@ async function persistShotFromSummary(detail) {
     let idx = shotId;
     if (!Number.isFinite(idx) || idx <= 0) idx = nextShotIndex();
 
+    let weightedScoreRaw = Number(detail?.weightedScore);
+    let poseScoreRaw = Number(detail?.poseScore);
+
+    const tryNumber = (val) => {
+        const n = Number(val);
+        return Number.isFinite(n) ? n : null;
+    };
+    const idForLookup = Number.isFinite(shotId) ? shotId : tryNumber(detail?.id);
+    if (!Number.isFinite(weightedScoreRaw) || !Number.isFinite(poseScoreRaw)) {
+        const seen = new WeakSet();
+        const consider = (source, requireIdMatch = false) => {
+            if (!source || typeof source !== 'object') return;
+            if (seen.has(source)) return;
+            if (requireIdMatch) {
+                const srcId = tryNumber(source.id ?? source.shotId);
+                if (Number.isFinite(idForLookup) && Number.isFinite(srcId) && srcId !== idForLookup) return;
+            }
+            seen.add(source);
+            if (!Number.isFinite(poseScoreRaw)) {
+                const poseCandidate = [
+                    source.poseScore,
+                    source.pose_score,
+                    source.score,
+                    source.pose?.score
+                ].map(tryNumber).find((v) => v != null);
+                if (poseCandidate != null) poseScoreRaw = poseCandidate;
+            }
+            if (!Number.isFinite(weightedScoreRaw)) {
+                const weightedCandidate = [
+                    source.weightedScore,
+                    source.weighted_score,
+                    source.poseScoreRaw,
+                    source.summary?.weightedScore,
+                    source.data?.weightedScore
+                ].map(tryNumber).find((v) => v != null);
+                if (weightedCandidate != null) weightedScoreRaw = weightedCandidate;
+            }
+            const nestedSources = [
+                source.summary,
+                source.data,
+                source.arcmm,
+                source.arcmm?.summary
+            ];
+            for (const next of nestedSources) consider(next, false);
+        };
+
+        consider(detail);
+        if (Number.isFinite(idForLookup)) {
+            const list = Array.isArray(window.__shotList) ? window.__shotList : [];
+            const listMatch = list.find((entry) => Number(entry?.id ?? entry?.idx) === idForLookup);
+            consider(listMatch, true);
+
+            const shotLog = Array.isArray(window.shotLog) ? window.shotLog : [];
+            const logMatch = shotLog.find((entry) => Number(entry?.id) === idForLookup);
+            consider(logMatch, true);
+
+            const lastSummary = window.__lastSummary;
+            consider(lastSummary, true);
+        }
+    }
+
+    if (Number.isFinite(weightedScoreRaw) && weightedScoreRaw > 1) {
+        weightedScoreRaw = weightedScoreRaw / 100;
+    }
+    if (Number.isFinite(poseScoreRaw) && poseScoreRaw <= 1) {
+        poseScoreRaw = poseScoreRaw * 100;
+    }
+    if (!Number.isFinite(poseScoreRaw) && Number.isFinite(weightedScoreRaw)) {
+        poseScoreRaw = weightedScoreRaw * 100;
+    }
+    if (!Number.isFinite(weightedScoreRaw) && Number.isFinite(poseScoreRaw)) {
+        weightedScoreRaw = poseScoreRaw / 100;
+    }
+
+    if (!Number.isFinite(detail?.weightedScore) && Number.isFinite(weightedScoreRaw)) {
+        detail.weightedScore = weightedScoreRaw;
+    }
+    if (!Number.isFinite(detail?.poseScore) && Number.isFinite(poseScoreRaw)) {
+        detail.poseScore = poseScoreRaw;
+    }
+
+    try {
+        console.debug('[score:persist:detail]', {
+            shotId,
+            poseScoreRaw,
+            weightedScoreRaw,
+            detailPose: detail?.poseScore ?? null,
+            detailWeighted: detail?.weightedScore ?? null,
+            source: {
+                summary: detail?.summary?.poseScore ?? null,
+                dataWeighted: detail?.data?.weightedScore ?? null
+            }
+        }, detail);
+    } catch { }
+
+    const hasWeighted = Number.isFinite(weightedScoreRaw);
+    const hasPoseScore = Number.isFinite(poseScoreRaw);
+    const normalizedPoseScore = hasPoseScore
+        ? (poseScoreRaw <= 1 ? poseScoreRaw * 100 : poseScoreRaw)
+        : null;
+    const normalizedWeightedScore = hasWeighted
+        ? (weightedScoreRaw <= 1 ? weightedScoreRaw * 100 : weightedScoreRaw)
+        : null;
+
     const payload = {
         idx,
         t: Date.now(),
@@ -241,6 +345,25 @@ async function persistShotFromSummary(detail) {
         releaseAngle: Number.isFinite(detail?.releaseAngle) ? Number(detail.releaseAngle) : null,
         pose: poseSnapshot || null   // optional, server can ignore
     };
+    if (normalizedPoseScore != null) {
+        payload.poseScore = normalizedPoseScore;
+    } else if (normalizedWeightedScore != null) {
+        payload.poseScore = normalizedWeightedScore;
+    }
+    if (hasWeighted) {
+        payload.weightedScore = weightedScoreRaw;
+    }
+
+    console.log('[score:persist:payload]', {
+        shotId,
+        idx,
+        poseScore: payload.poseScore ?? null,
+        weightedScore: payload.weightedScore ?? null,
+        normalizedPoseScore,
+        normalizedWeightedScore,
+        hasPoseScore,
+        hasWeighted
+    });
 
     try {
         await postJSON(`/api/sessions/${__sid}/shot`, payload);
@@ -284,10 +407,10 @@ async function endSession(reason = 'normal') {
                 if (typeof doachSpeak === 'function') {
                     await doachSpeak(line);
                 } else {
-                    speak(line);
+                    console.warn('[coach:end-session] doachSpeak not available');
                 }
             } catch {
-                speak(line);
+                console.warn('[coach:end-session] TTS failed');
             }
         }
     } catch { }

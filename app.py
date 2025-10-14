@@ -35,6 +35,7 @@ from datetime import date, datetime, timezone
 from collections import defaultdict
 import threading
 from queue import Queue
+from PIL import Image
 from arcmm_api import arcmm_api
 try:
     from sqlalchemy import create_engine, Column, Integer, String, DateTime, Float, Boolean, Text, ForeignKey
@@ -43,6 +44,11 @@ try:
     SQLA_AVAILABLE = True
 except Exception:
     SQLA_AVAILABLE = False
+
+def _truthy(val, default=False):
+    if val is None:
+        return default
+    return str(val).strip().lower() in ('1', 'true', 'yes', 'on')
 
 try:
     if TORCH_AVAILABLE:
@@ -70,6 +76,10 @@ try:
     app.secret_key = os.getenv('SECRET_KEY') or os.urandom(24)
 except Exception:
     app.secret_key = os.urandom(24)
+
+# Stub auth fallback is disabled by default when a DB URI is present.
+_default_stub = '0' if os.getenv('SQLALCHEMY_DATABASE_URI') else '1'
+ALLOW_STUB_AUTH = _truthy(os.getenv('ALLOW_STUB_AUTH', _default_stub), default=(_default_stub == '1'))
 
 # Simple trace flag (enable with DOACH_TRACE=1)
 try:
@@ -840,6 +850,19 @@ def _try_init_db():
             sports = Column(MyJSON)
             goals  = Column(MyJSON)
 
+        class UserFaceLock(Base):
+            __tablename__ = 'user_face_lock'
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            user_id = Column(Integer, ForeignKey('users.user_id', ondelete='CASCADE'), unique=True, nullable=False)
+            consent_face_lock = Column(Boolean, default=False, nullable=False)
+            embedding = Column(MyJSON)
+            embedding_dims = Column(Integer)
+            strategy = Column(String(32))
+            created_at = Column(DateTime, default=datetime.utcnow)
+            updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+            metadata_json = Column('metadata', MyJSON)
+            user = relationship('User', backref='face_lock', uselist=False)
+
         class SessionRow(Base):
             __tablename__ = 'sessions'
             sid = Column(String(64), primary_key=True)
@@ -873,6 +896,7 @@ def _try_init_db():
             arc_height = Column(Float)
             miss_reason = Column(String(128))
             clip_url = Column(String(512))
+            pose_score = Column(Float)
             data = Column(MyJSON)
 
         class PoseSnapshotRow(Base):
@@ -898,6 +922,7 @@ def _try_init_db():
             model = Column(String(64))
             latency_ms = Column(Integer)
             text = Column(Text)
+            score = Column(Float)
 
 
         class Event(Base):
@@ -957,7 +982,20 @@ def _try_init_db():
         DBSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
         # attach to app for reuse
-        app.db = { 'engine': engine, 'Session': DBSessionLocal, 'User': User, 'SessionRow': SessionRow, 'ShotRow': ShotRow, 'PoseSnapshotRow': PoseSnapshotRow, 'CoachFeedbackRow': CoachFeedbackRow, 'Event': Event, 'EventRegistration': EventRegistration, 'EventSession': EventSession, 'EventUserStats': EventUserStats }
+        app.db = {
+            'engine': engine,
+            'Session': DBSessionLocal,
+            'User': User,
+            'UserFaceLock': UserFaceLock,
+            'SessionRow': SessionRow,
+            'ShotRow': ShotRow,
+            'PoseSnapshotRow': PoseSnapshotRow,
+            'CoachFeedbackRow': CoachFeedbackRow,
+            'Event': Event,
+            'EventRegistration': EventRegistration,
+            'EventSession': EventSession,
+            'EventUserStats': EventUserStats
+        }
         print('✅ SQLAlchemy connected')
         return app.db
     except Exception as e:
@@ -1002,12 +1040,32 @@ def _db_add_shot(sid, idx, payload):
         db = getattr(app, 'db', None)
         if not db:
             return
+        def _resolve_score(src):
+            score_val = src.get('poseScore')
+            if score_val is None:
+                score_val = src.get('weightedScore')
+            try:
+                return float(score_val)
+            except (TypeError, ValueError):
+                return None
+
+        def _apply_score(row, score_val):
+            if score_val is None:
+                return
+            for attr in ('pose_score', 'weighted_score', 'score'):
+                if hasattr(row, attr):
+                    try:
+                        setattr(row, attr, score_val)
+                    except Exception:
+                        pass
+
         with db['Session']() as s:
             from sqlalchemy import select, func, case
             ShotRow = db['ShotRow']
             # Upsert by (sid, idx)
             existing = s.execute(select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)).scalar_one_or_none()
             queue_idx = None
+            score_val = _resolve_score(payload)
             if existing is not None:
                 m_in = payload.get('made')
                 if m_in is not None:
@@ -1017,12 +1075,13 @@ def _db_add_shot(sid, idx, payload):
                 existing.arc_height = payload.get('arcHeight')
                 existing.miss_reason = payload.get('missReason')
                 existing.data = payload
+                _apply_score(existing, score_val)
                 row = existing
                 queue_idx = int(existing.idx)
             else:
                 m_in = payload.get('made')
                 made_val = (None if m_in is None else bool(m_in))
-                row = ShotRow(
+                init_kwargs = dict(
                     sid=sid,
                     idx=idx,
                     made=made_val,
@@ -1031,6 +1090,13 @@ def _db_add_shot(sid, idx, payload):
                     arc_height=payload.get('arcHeight'),
                     miss_reason=payload.get('missReason'),
                     data=payload,
+                )
+                if score_val is not None:
+                    for attr in ('pose_score', 'weighted_score', 'score'):
+                        if hasattr(ShotRow, attr):
+                            init_kwargs[attr] = score_val
+                row = ShotRow(
+                    **init_kwargs
                 )
                 s.add(row)
                 queue_idx = int(idx)
@@ -1065,6 +1131,20 @@ def _db_add_shot(sid, idx, payload):
                     sess.accuracy = int(round((sess.makes / max(1, sess.shots_count)) * 100))
             except Exception as e_tot:
                 _trace('db_add_shot: totals error:', e_tot)
+
+            # Upsert baseline metrics into ai_feedback for easy reporting
+            try:
+                FB = db.get('CoachFeedbackRow')
+                if FB is not None and score_val is not None:
+                    fb_row = s.execute(
+                        select(FB).where(FB.sid == sid, FB.shot_idx == idx).order_by(FB.id.desc())
+                    ).scalars().first()
+                    if fb_row:
+                        fb_row.score = score_val
+                    else:
+                        s.add(FB(sid=sid, shot_idx=idx, provider='auto-metrics', model='auto', score=score_val, text=None))
+            except Exception as e_fb:
+                _trace('db_add_shot: feedback score error:', e_fb)
 
             # Commit regardless of whether totals were updated
             s.commit()
@@ -1237,7 +1317,239 @@ def _db_event_register(user_id: int, event_slug: str, dob_iso: str|None=None):
 # ---------------------- Auth (register/login/logout) ---------------------
 
 def _db_get():
-    return getattr(app, 'db', None)
+    db = getattr(app, 'db', None)
+    if db is None and not getattr(app, '_db_retrying', False):
+        try:
+            app._db_retrying = True
+            db = _try_init_db()
+        except Exception:
+            db = None
+        finally:
+            app._db_retrying = False
+    elif db is None:
+        db = getattr(app, 'db', None)
+    return db
+
+def _serialize_face_lock(row, include_embedding=False):
+    if not row:
+        payload = {
+            'consent': False,
+            'has_embedding': False,
+            'embedding_dims': None,
+            'updated_at': None,
+            'strategy': None,
+            'metadata': {}
+        }
+        if include_embedding:
+            payload['embedding'] = []
+        return payload
+    ts = row.updated_at or row.created_at
+    payload = {
+        'consent': bool(getattr(row, 'consent_face_lock', False)),
+        'has_embedding': bool(row.embedding) and len(row.embedding or []) > 0,
+        'embedding_dims': int(row.embedding_dims) if row.embedding_dims else None,
+        'updated_at': ts.isoformat() if ts else None,
+        'strategy': row.strategy,
+        'metadata': row.metadata_json or {}
+    }
+    if include_embedding and row.embedding:
+        payload['embedding'] = [float(x) for x in row.embedding]
+    elif include_embedding:
+        payload['embedding'] = []
+    return payload
+
+def _session_face_lock_set(payload):
+    try:
+        session['_face_lock'] = payload
+    except Exception:
+        pass
+
+def _session_face_lock_get():
+    try:
+        data = session.get('_face_lock') or {}
+        return dict(data)
+    except Exception:
+        return {}
+
+def _serialize_session_face_lock(data, include_embedding=False):
+    consent = bool(data.get('consent_face_lock'))
+    embedding = data.get('embedding') or []
+    dims = data.get('embedding_dims')
+    updated_at = data.get('updated_at')
+    payload = {
+        'consent': consent,
+        'has_embedding': bool(embedding),
+        'embedding_dims': int(dims) if dims else (len(embedding) if embedding else None),
+        'updated_at': updated_at,
+        'strategy': data.get('strategy'),
+        'metadata': data.get('metadata') or {}
+    }
+    if include_embedding:
+        payload['embedding'] = [float(x) for x in embedding] if embedding else []
+    return payload
+
+def _get_stub_user():
+    try:
+        data = session.get('_stub_user')
+        return dict(data) if data else None
+    except Exception:
+        return None
+
+def _set_stub_user(user, password=None):
+    try:
+        session['_stub_user'] = user or {}
+        if user is None:
+            session.pop('_stub_pw', None)
+        elif password is not None:
+            session['_stub_pw'] = generate_password_hash(password)
+    except Exception:
+        pass
+
+def _check_stub_credentials(email, password):
+    user = _get_stub_user()
+    if not user:
+        return None
+    stored_pw = session.get('_stub_pw')
+    if user.get('email') != email:
+        return None
+    if stored_pw is None:
+        return user
+    try:
+        if check_password_hash(stored_pw, password):
+            return user
+    except Exception:
+        if stored_pw == password:
+            return user
+    return None
+
+def _write_face_lock(user_id, *, embedding=None, dims=None, strategy=None, metadata=None, consent=None, clear=False, include_embedding=False):
+    db = _db_get()
+    if not db:
+        if not ALLOW_STUB_AUTH:
+            return False, 'db not configured'
+        data = _session_face_lock_get()
+        if clear:
+            data = {}
+        if embedding is not None:
+            vec = [float(x) for x in embedding]
+            data.update({
+                'embedding': vec,
+                'embedding_dims': int(dims or len(vec)),
+                'strategy': strategy,
+                'metadata': metadata or {},
+                'consent_face_lock': True if consent is None else bool(consent),
+                'updated_at': datetime.utcnow().isoformat()
+            })
+        if consent is not None:
+            data['consent_face_lock'] = bool(consent)
+            data['updated_at'] = datetime.utcnow().isoformat()
+        _session_face_lock_set(data)
+        return True, _serialize_session_face_lock(data, include_embedding=include_embedding)
+    FaceLock = db.get('UserFaceLock')
+    if not FaceLock:
+        return False, 'face lock storage unavailable'
+    with db['Session']() as s:
+        row = s.query(FaceLock).filter(FaceLock.user_id == user_id).one_or_none()
+        if not row:
+            row = FaceLock(user_id=user_id)
+            s.add(row)
+            s.flush()
+        if clear:
+            row.embedding = None
+            row.embedding_dims = None
+            row.strategy = None
+            row.metadata_json = None
+            row.updated_at = datetime.utcnow()
+        if embedding is not None:
+            vec = [float(x) for x in embedding]
+            row.embedding = vec
+            row.embedding_dims = int(dims or len(vec))
+            row.strategy = strategy
+            row.metadata_json = metadata or {}
+            row.updated_at = datetime.utcnow()
+            if consent is None:
+                row.consent_face_lock = True
+        if consent is not None:
+            row.consent_face_lock = bool(consent)
+            row.updated_at = datetime.utcnow()
+        s.commit()
+        return True, _serialize_face_lock(row, include_embedding=include_embedding)
+
+def _read_face_lock(user_id, include_embedding=False):
+    db = _db_get()
+    if not db:
+        if not ALLOW_STUB_AUTH:
+            return False, 'db not configured', None
+        data = _session_face_lock_get()
+        return True, None, _serialize_session_face_lock(data, include_embedding=include_embedding)
+    FaceLock = db.get('UserFaceLock')
+    if not FaceLock:
+        return False, 'face lock storage unavailable', None
+    with db['Session']() as s:
+        row = s.query(FaceLock).filter(FaceLock.user_id == user_id).one_or_none()
+        return True, None, _serialize_face_lock(row, include_embedding=include_embedding)
+
+def _decode_data_url(data_url):
+    if not data_url:
+        return None
+    if isinstance(data_url, bytes):
+        return data_url
+    if ',' in data_url:
+        _, data = data_url.split(',', 1)
+    else:
+        data = data_url
+    data = data.strip()
+    try:
+        return base64.b64decode(data)
+    except Exception:
+        return None
+
+def _cheap_face_embedding(image: Image.Image, dims: int = 512):
+    try:
+        dims = int(dims or 512)
+    except Exception:
+        dims = 512
+    dims = max(64, min(1024, dims))
+    base_side = 32
+    gray = image.convert('L').resize((base_side, base_side), Image.BILINEAR)
+    arr = np.asarray(gray, dtype=np.float32).reshape(-1)
+    if arr.size == 0:
+        return np.zeros((dims,), dtype=np.float32)
+    arr = arr / 255.0
+    arr = arr - float(arr.mean())
+    base = arr / (np.linalg.norm(arr) or 1.0)
+    if dims == base.shape[0]:
+        vec = base
+    else:
+        idx = np.linspace(0, base.shape[0] - 1, num=dims)
+        vec = np.interp(idx, np.arange(base.shape[0]), base)
+    vec = np.asarray(vec, dtype=np.float32)
+    norm = float(np.linalg.norm(vec))
+    if norm > 0:
+        vec = vec / norm
+    return vec.astype(np.float32)
+
+def _face_crop_quality(image: Image.Image):
+    try:
+        w, h = image.size
+    except Exception:
+        return {'width': None, 'height': None}
+    gray = np.asarray(image.convert('L'), dtype=np.float32)
+    if gray.size == 0:
+        return {'width': w, 'height': h, 'brightness': None, 'contrast': None, 'sharpness': None}
+    brightness = float(gray.mean() / 255.0)
+    contrast = float(gray.std() / 255.0)
+    try:
+        sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    except Exception:
+        sharpness = None
+    return {
+        'width': w,
+        'height': h,
+        'brightness': round(brightness, 4),
+        'contrast': round(contrast, 4),
+        'sharpness': round(sharpness, 4) if sharpness is not None else None
+    }
 
 @app.post('/api/auth/register')
 def api_register():
@@ -1249,7 +1561,23 @@ def api_register():
         return jsonify({'error':'email and password required'}), 400
     db = _db_get()
     if not db:
-        return jsonify({'error':'db not configured'}), 500
+        if not ALLOW_STUB_AUTH:
+            return jsonify({'error':'db not configured'}), 500
+        user_id = session.get('user_id') or int(datetime.utcnow().timestamp() * 1000)
+        user = {
+            'user_id': user_id,
+            'name': name or email.split('@')[0],
+            'email': email
+        }
+        session['user_id'] = user_id
+        _set_stub_user(user, password=pw)
+        _session_face_lock_set({})
+        return jsonify({
+            'user_id': user_id,
+            'name': user['name'],
+            'email': user['email'],
+            'face_lock': _serialize_session_face_lock(_session_face_lock_get(), include_embedding=False)
+        })
     with db['Session']() as s:
         from sqlalchemy import select
         exists = s.execute(select(db['User']).where(db['User'].email==email)).scalar_one_or_none()
@@ -1259,7 +1587,12 @@ def api_register():
         s.add(row)
         s.commit()
         session['user_id'] = row.user_id
-        return jsonify({'user_id': row.user_id, 'name': row.name, 'email': row.email})
+        return jsonify({
+            'user_id': row.user_id,
+            'name': row.name,
+            'email': row.email,
+            'face_lock': _serialize_face_lock(getattr(row, 'face_lock', None))
+        })
 
 @app.post('/api/auth/login')
 def api_login():
@@ -1268,14 +1601,30 @@ def api_login():
     pw = (b.get('password') or '')
     db = _db_get()
     if not db:
-        return jsonify({'error':'db not configured'}), 500
+        if not ALLOW_STUB_AUTH:
+            return jsonify({'error':'db not configured'}), 500
+        user = _check_stub_credentials(email, pw)
+        if not user:
+            return jsonify({'error':'invalid credentials'}), 401
+        session['user_id'] = user['user_id']
+        return jsonify({
+            'user_id': user['user_id'],
+            'name': user.get('name'),
+            'email': user.get('email'),
+            'face_lock': _serialize_session_face_lock(_session_face_lock_get(), include_embedding=False)
+        })
     from sqlalchemy import select
     with db['Session']() as s:
         row = s.execute(select(db['User']).where(db['User'].email==email)).scalar_one_or_none()
         if not row or not check_password_hash(row.password_hash or '', pw):
             return jsonify({'error':'invalid credentials'}), 401
         session['user_id'] = row.user_id
-        return jsonify({'user_id': row.user_id, 'name': row.name, 'email': row.email})
+        return jsonify({
+            'user_id': row.user_id,
+            'name': row.name,
+            'email': row.email,
+            'face_lock': _serialize_face_lock(getattr(row, 'face_lock', None))
+        })
 
 @app.post('/api/auth/logout')
 def api_logout():
@@ -1289,12 +1638,152 @@ def api_me():
         return jsonify({'user': None})
     db = _db_get()
     if not db:
-        return jsonify({'user': None})
+        if not ALLOW_STUB_AUTH:
+            return jsonify({'user': None})
+        user = _get_stub_user()
+        if not user:
+            return jsonify({'user': None})
+        return jsonify({'user': {
+            'user_id': user.get('user_id'),
+            'name': user.get('name'),
+            'email': user.get('email'),
+            'face_lock': _serialize_session_face_lock(_session_face_lock_get(), include_embedding=False)
+        }})
     with db['Session']() as s:
         row = s.get(db['User'], uid)
         if not row:
             return jsonify({'user': None})
-        return jsonify({'user': {'user_id': row.user_id, 'name': row.name, 'email': row.email}})
+        return jsonify({'user': {
+            'user_id': row.user_id,
+            'name': row.name,
+            'email': row.email,
+            'face_lock': _serialize_face_lock(getattr(row, 'face_lock', None))
+        }})
+
+
+@app.get('/api/face/status')
+def api_face_status():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'error': 'not authenticated'}), 401
+    include = (request.args.get('include') or '')
+    include_embedding = any(part.strip().lower() == 'embedding' for part in include.split(',') if part.strip())
+    ok, err, payload = _read_face_lock(uid, include_embedding=include_embedding)
+    if not ok:
+        return jsonify({'error': err or 'face lock unavailable'}), 500
+    return jsonify({'status': payload})
+
+@app.post('/api/face/consent')
+def api_face_consent():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'error': 'not authenticated'}), 401
+    body = request.get_json(force=True) or {}
+    consent = bool(body.get('consent'))
+    ok, result = _write_face_lock(uid, consent=consent)
+    if not ok:
+        return jsonify({'error': result or 'face lock unavailable'}), 500
+    return jsonify({'status': result})
+
+@app.post('/api/face/enroll')
+def api_face_enroll_client():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'error': 'not authenticated'}), 401
+    body = request.get_json(force=True) or {}
+    embedding = body.get('embedding')
+    dims = body.get('dims')
+    strategy = (body.get('strategy') or 'client').strip() or 'client'
+    if not isinstance(embedding, list) or not embedding:
+        return jsonify({'error': 'embedding required'}), 400
+    try:
+        dims = int(dims or len(embedding))
+    except Exception:
+        dims = len(embedding)
+    if len(embedding) != dims:
+        if len(embedding) < dims:
+            return jsonify({'error': 'embedding length mismatch'}), 400
+        embedding = embedding[:dims]
+    if dims < 64 or dims > 1024:
+        return jsonify({'error': 'embedding dims out of bounds'}), 400
+    metadata = body.get('metadata') or {}
+    samples = int(body.get('samples') or metadata.get('samples') or 0)
+    if samples:
+        metadata['samples'] = samples
+    include_embed = bool(body.get('return_embedding'))
+    ok, result = _write_face_lock(uid, embedding=embedding, dims=dims, strategy=strategy, metadata=metadata, include_embedding=include_embed)
+    if not ok:
+        return jsonify({'error': result or 'face lock unavailable'}), 500
+    resp = {'status': result}
+    if include_embed:
+        resp['embedding'] = result.get('embedding') or []
+    return jsonify(resp)
+
+@app.post('/api/face/enroll_server')
+def api_face_enroll_server():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'error': 'not authenticated'}), 401
+    body = request.get_json(force=True) or {}
+    crops = body.get('crops') or []
+    if not isinstance(crops, list) or not crops:
+        return jsonify({'error': 'crops required'}), 400
+    try:
+        dims = int(body.get('dims') or 512)
+    except Exception:
+        dims = 512
+    dims = max(64, min(1024, dims))
+    vectors = []
+    qualities = []
+    max_bytes = int(body.get('max_bytes') or 2_500_000)
+    for raw in crops:
+        blob = _decode_data_url(raw)
+        if not blob:
+            continue
+        if max_bytes and len(blob) > max_bytes:
+            continue
+        try:
+            img = Image.open(io.BytesIO(blob))
+            img = img.convert('RGB')
+        except Exception:
+            continue
+        qual = _face_crop_quality(img)
+        qualities.append(qual)
+        min_side = min(img.size)
+        if min_side < max(96, int(body.get('min_side') or 96)):
+            continue
+        vec = _cheap_face_embedding(img, dims=dims)
+        vectors.append(vec)
+    if len(vectors) < 2:
+        return jsonify({'error': 'insufficient usable crops'}), 422
+    stacked = np.stack(vectors, axis=0).astype(np.float32)
+    avg = stacked.mean(axis=0)
+    norm = float(np.linalg.norm(avg))
+    if norm > 0:
+        avg = avg / norm
+    avg_list = avg.astype(np.float32).tolist()
+    metadata = body.get('metadata') or {}
+    metadata.update({
+        'samples': len(vectors),
+        'qualities': qualities,
+        'source': 'server'
+    })
+    ok, result = _write_face_lock(uid, embedding=avg_list, dims=len(avg_list), strategy=body.get('strategy') or 'server', metadata=metadata)
+    if not ok:
+        return jsonify({'error': result or 'face lock unavailable'}), 500
+    if body.get('return_embedding'):
+        return jsonify({'status': result, 'embedding': avg_list, 'qualities': qualities})
+    return jsonify({'status': result, 'qualities': qualities})
+
+@app.delete('/api/face/enroll')
+def api_face_clear():
+    uid = session.get('user_id')
+    if not uid:
+        return jsonify({'error': 'not authenticated'}), 401
+    ok, result = _write_face_lock(uid, clear=True)
+    if not ok:
+        return jsonify({'error': result or 'face lock unavailable'}), 500
+    return jsonify({'status': result})
 
 @app.route('/my_doach')
 def my_doach():
@@ -1495,6 +1984,21 @@ def api_coach():
     dt_ms = int((time.time() - t0) * 1000)
     text = (resp.choices[0].message.content or "").strip()
 
+    def _extract_score(obj):
+        if not isinstance(obj, dict):
+            return None
+        for key in ('poseScore', 'weightedScore', 'score'):
+            val = obj.get(key)
+            if val is None:
+                continue
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    score_val = _extract_score(shot)
+
     # Persist feedback when DB is available; also mirror brief coach text into the shot's JSON data
     try:
         db = getattr(app, 'db', None)
@@ -1502,7 +2006,7 @@ def api_coach():
             with db['Session']() as sdb:
                 FB = db.get('CoachFeedbackRow')
                 if FB is not None:
-                    row = FB(sid=sid, shot_idx=(shot_idx or 0), provider='openai', model=model, latency_ms=dt_ms, text=text)
+                    row = FB(sid=sid, shot_idx=(shot_idx or 0), provider='openai', model=model, latency_ms=dt_ms, text=text, score=score_val)
                     sdb.add(row)
                 # Mirror summary onto the shot row's JSON for easier joins later
                 try:
@@ -1517,9 +2021,14 @@ def api_coach():
                         try:
                             d = dict(sr.data or {})
                             d['coach_summary'] = text
+                            if score_val is not None:
+                                d['poseScore'] = score_val
                             sr.data = d
                         except Exception:
-                            sr.data = {'coach_summary': text}
+                            base = {'coach_summary': text}
+                            if score_val is not None:
+                                base['poseScore'] = score_val
+                            sr.data = base
                 except Exception as e2:
                     print('coach mirror to shot failed:', e2)
                 sdb.commit()
@@ -1537,6 +2046,14 @@ def api_coach_finalize():
     provider = data.get('provider') or 'client-final'
     model = data.get('model') or 'coach-final'
     latency_ms = int(data.get('latency_ms') or 0)
+    score_val = None
+    for key in ('score', 'poseScore', 'weightedScore'):
+        if key in data and data[key] is not None:
+            try:
+                score_val = float(data[key])
+            except (TypeError, ValueError):
+                score_val = None
+            break
     if not sid or text == '' or shot_idx_raw is None:
         return jsonify({'error': 'sid, shot_idx, and text are required'}), 400
     try:
@@ -1555,12 +2072,14 @@ def api_coach_finalize():
                 if row:
                     row.text = text
                     row.provider = provider
+                    if score_val is not None:
+                        row.score = score_val
                     if model: 
                         row.model = model
                     if latency_ms: 
                         row.latency_ms = latency_ms
                 else:
-                    sdb.add(FB(sid=sid, shot_idx=shot_idx, provider=provider, model=model, latency_ms=latency_ms, text=text))
+                    sdb.add(FB(sid=sid, shot_idx=shot_idx, provider=provider, model=model, latency_ms=latency_ms, text=text, score=score_val))
             Shot = db.get('ShotRow')
             if Shot is not None:
                 sr = sdb.execute(select(Shot).where(Shot.sid == sid, Shot.idx == shot_idx)).scalar_one_or_none()
@@ -1570,9 +2089,14 @@ def api_coach_finalize():
                 try:
                     payload = dict(sr.data or {})
                     payload['coach_summary'] = text
+                    if score_val is not None:
+                        payload['poseScore'] = score_val
                     sr.data = payload
                 except Exception:
-                    sr.data = {'coach_summary': text}
+                    base = {'coach_summary': text}
+                    if score_val is not None:
+                        base['poseScore'] = score_val
+                    sr.data = base
             sdb.commit()
         return jsonify({'ok': True})
     except Exception as e:
@@ -2064,11 +2588,21 @@ def admin_session_debug(sid):
                 # shots
                 ShotRow = db['ShotRow']
                 rows = s.execute(select(ShotRow).where(ShotRow.sid==sid).order_by(ShotRow.idx.asc())).scalars().all()
-                out['shotsDB'] = [
-                    {'idx': r.idx, 'made': r.made, 'entryAngle': r.entry_angle, 'releaseAngle': r.release_angle, 'arcHeight': r.arc_height,
-                     'missReason': r.miss_reason, 'created_at': r.created_at.isoformat() if r.created_at else None}
-                    for r in rows
-                ]
+                out['shotsDB'] = []
+                for r in rows:
+                    data = r.data if isinstance(r.data, dict) else {}
+                    override = data.get('adminOverride') if isinstance(data, dict) else None
+                    out['shotsDB'].append({
+                        'idx': r.idx,
+                        'made': r.made,
+                        'entryAngle': r.entry_angle,
+                        'releaseAngle': r.release_angle,
+                        'arcHeight': r.arc_height,
+                        'missReason': r.miss_reason,
+                        'created_at': r.created_at.isoformat() if r.created_at else None,
+                            'adminOverride': override,
+                        'poseScore': getattr(r, 'pose_score', None),
+                    })
                 # pose snapshots
                 PS = db.get('PoseSnapshotRow')
                 if PS:
@@ -2083,7 +2617,7 @@ def admin_session_debug(sid):
                 if FB:
                     fbs = s.execute(select(FB).where(FB.sid==sid).order_by(FB.id.asc())).scalars().all()
                     out['feedback'] = [
-                        {'id': r.id, 'shot_idx': r.shot_idx, 'provider': r.provider, 'model': r.model, 'latency_ms': r.latency_ms, 'text': r.text,
+                        {'id': r.id, 'shot_idx': r.shot_idx, 'provider': r.provider, 'model': r.model, 'latency_ms': r.latency_ms, 'text': r.text, 'score': r.score,
                          'created_at': r.created_at.isoformat() if r.created_at else None}
                         for r in fbs
                     ]
@@ -2102,11 +2636,21 @@ def admin_session_debug(sid):
                     with db['Session']() as s:
                         ShotRow = db['ShotRow']
                         rows = s.execute(select(ShotRow).where(ShotRow.sid==sid).order_by(ShotRow.idx.asc())).scalars().all()
-                        out['shotsDB'] = [
-                            {'idx': r.idx, 'made': r.made, 'entryAngle': r.entry_angle, 'releaseAngle': r.release_angle, 'arcHeight': r.arc_height,
-                             'missReason': r.miss_reason, 'created_at': r.created_at.isoformat() if r.created_at else None}
-                            for r in rows
-                        ]
+                        out['shotsDB'] = []
+                        for r in rows:
+                            data = r.data if isinstance(r.data, dict) else {}
+                            override = data.get('adminOverride') if isinstance(data, dict) else None
+                            out['shotsDB'].append({
+                                'idx': r.idx,
+                                'made': r.made,
+                                'entryAngle': r.entry_angle,
+                                'releaseAngle': r.release_angle,
+                            'arcHeight': r.arc_height,
+                            'missReason': r.miss_reason,
+                            'created_at': r.created_at.isoformat() if r.created_at else None,
+                            'adminOverride': override,
+                            'poseScore': getattr(r, 'pose_score', None),
+                        })
     except Exception:
         pass
     # Fallback: read JSONL snapshots from filesystem if DB empty
@@ -2155,6 +2699,19 @@ def admin_session_clips(sid):
     if not clips_dir.exists():
         return jsonify({'sid': sid, 'count': 0, 'clips': []})
 
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value >= 1
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {'1', 'true', 'made', 'make', 'y', 'yes'}:
+                return True
+            if v in {'0', 'false', 'miss', 'no', 'n'}:
+                return False
+        return None
+
     arcmm_meta: dict[int, dict] = {}
     try:
         db = _db_get()
@@ -2184,12 +2741,29 @@ def admin_session_clips(sid):
                     # fall back to DB columns when summary missing
                     if getattr(row, 'made', None) is not None:
                         meta.setdefault('made', bool(row.made))
+                        meta.setdefault('result', bool(row.made))
                     if getattr(row, 'entry_angle', None) is not None:
                         meta.setdefault('entryAngle', row.entry_angle)
                     if getattr(row, 'release_angle', None) is not None:
                         meta.setdefault('releaseAngle', row.release_angle)
                     if getattr(row, 'arc_height', None) is not None:
                         meta.setdefault('arcHeight', row.arc_height)
+                    if getattr(row, 'pose_score', None) is not None:
+                        meta.setdefault('poseScore', row.pose_score)
+                    if isinstance(data, dict):
+                        data_made = _coerce_bool(data.get('made'))
+                        if data_made is not None:
+                            meta['made'] = data_made
+                            meta['result'] = data_made
+                        override = data.get('adminOverride')
+                        if isinstance(override, dict):
+                            meta['adminOverride'] = override
+                        score_val = data.get('poseScore')
+                        try:
+                            if score_val is not None:
+                                meta['poseScore'] = float(score_val)
+                        except Exception:
+                            pass
                     arcmm_meta[idx] = meta
     except Exception as exc:
         _trace('admin_session_clips: arcmm meta error', {'sid': sid, 'error': str(exc)})
@@ -2223,12 +2797,18 @@ def admin_session_clips(sid):
                 arcmm = arcmm_meta.get(idx) or arcmm_meta.get(idx if idx >= 0 else idx + 1)
                 if arcmm:
                     info['arcmm'] = arcmm
+                    if 'poseScore' in arcmm:
+                        info['poseScore'] = arcmm['poseScore']
                     processed_clip = arcmm.get('processed_clip')
                     if processed_clip:
                         info['processedUrl'] = processed_clip
                     summary = arcmm.get('summary')
                     if isinstance(summary, dict):
                         info['summary'] = summary
+                    if 'result' not in info and 'result' in arcmm:
+                        info['result'] = arcmm['result']
+                    if 'adminOverride' in arcmm:
+                        info['adminOverride'] = arcmm['adminOverride']
             items.append(info)
     except Exception as exc:
         _trace('admin_session_clips error', {'sid': sid, 'error': str(exc)})
@@ -2237,6 +2817,169 @@ def admin_session_clips(sid):
     for clip in items:
         clip.pop('_mtime', None)
     return jsonify({'sid': sid, 'count': len(items), 'clips': items})
+
+@app.route('/admin/session/<path:sid>/shot/<int:idx>/result', methods=['POST'])
+def admin_override_shot_result(sid, idx):
+    """Allow an admin to override the make/miss call for a shot."""
+    payload = request.get_json(force=True, silent=True) or {}
+    if 'made' not in payload:
+        return jsonify({'error': 'made flag required'}), 400
+
+    def _coerce_bool(value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value >= 1
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in {'1', 'true', 'made', 'make', 'y', 'yes'}:
+                return True
+            if v in {'0', 'false', 'miss', 'no', 'n'}:
+                return False
+        return None
+
+    made_val = _coerce_bool(payload.get('made'))
+    if made_val is None:
+        return jsonify({'error': 'made must be truthy/falsey'}), 400
+    reason = payload.get('reason')
+    if reason is not None and isinstance(reason, str):
+        reason = reason.strip()
+        if not reason:
+            reason = None
+    if not made_val and reason is None:
+        reason = 'Admin override'
+    by = (payload.get('by') or '').strip() or 'admin'
+    timestamp = datetime.now(timezone.utc).isoformat()
+
+    override_info = {
+        'made': bool(made_val),
+        'updated_at': timestamp,
+        'by': by
+    }
+    if reason:
+        override_info['reason'] = reason
+
+    # Update session JSON (filesystem copy)
+    session_json = _read_session(sid) or {}
+    shots_list = session_json.get('shots')
+    if isinstance(shots_list, list):
+        matched = False
+        for idx0, shot in enumerate(shots_list, start=1):
+            entry_idx = None
+            if isinstance(shot, dict):
+                for key in ('idx', 'shotId', 'shot_id', 'shot', 'id'):
+                    if key in shot:
+                        try:
+                            entry_idx = int(shot[key])
+                            if entry_idx <= 0:
+                                entry_idx = idx0
+                            break
+                        except Exception:
+                            continue
+            if entry_idx is None:
+                entry_idx = idx0
+            if entry_idx == idx:
+                matched = True
+                shot['made'] = 1 if made_val else 0
+                if made_val:
+                    shot.pop('missReason', None)
+                elif reason:
+                    shot['missReason'] = reason
+                shot['adminOverride'] = override_info
+                arcmm = shot.get('arcmm')
+                if isinstance(arcmm, dict):
+                    summary = arcmm.get('summary')
+                    if isinstance(summary, dict):
+                        summary['made'] = bool(made_val)
+                    else:
+                        arcmm['summary'] = {'made': bool(made_val)}
+                break
+        # Update totals regardless
+        attempts = len(shots_list)
+        makes = sum(1 for shot in shots_list if _coerce_bool(shot.get('made')) is True)
+        accuracy = int(round((makes / attempts) * 100)) if attempts else 0
+        session_json['totals'] = {'attempts': attempts, 'made': makes, 'accuracy': accuracy}
+        _write_session(sid, session_json)
+    else:
+        attempts = makes = accuracy = 0
+
+    # Update database rows
+    totals = {'attempts': attempts, 'made': makes, 'accuracy': accuracy}
+    db = _db_get()
+    if db:
+        from sqlalchemy import select, func, case
+        with db['Session']() as s:
+            ShotRow = db['ShotRow']
+            row = s.execute(select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)).scalar_one_or_none()
+            if row is None:
+                row = ShotRow(sid=sid, idx=idx)
+                s.add(row)
+            row.made = bool(made_val)
+            row.miss_reason = None if made_val else reason
+            data_obj = row.data if isinstance(row.data, dict) else {}
+            data_map = dict(data_obj) if isinstance(data_obj, dict) else {}
+            data_map['made'] = bool(made_val)
+            if reason is not None and not made_val:
+                data_map['missReason'] = reason
+            elif made_val:
+                data_map.pop('missReason', None)
+            data_map['adminOverride'] = override_info
+            arcmm = data_map.get('arcmm')
+            if isinstance(arcmm, dict):
+                summary = arcmm.get('summary')
+                if isinstance(summary, dict):
+                    summary['made'] = bool(made_val)
+                else:
+                    arcmm['summary'] = {'made': bool(made_val)}
+            row.data = data_map
+
+            SessionRow = db['SessionRow']
+            sess_row = s.get(SessionRow, sid)
+            if sess_row:
+                total, made_count = s.execute(
+                    select(
+                        func.count(ShotRow.id),
+                        func.sum(case((ShotRow.made == True, 1), else_=0))
+                    ).where(ShotRow.sid == sid)
+                ).one()
+                sess_row.shots_count = int(total or 0)
+                sess_row.makes = int(made_count or 0)
+                sess_row.accuracy = int(round((sess_row.makes / max(1, sess_row.shots_count)) * 100))
+                totals = {'attempts': sess_row.shots_count, 'made': sess_row.makes, 'accuracy': sess_row.accuracy}
+
+            # Record override in feedback log for traceability
+            FB = db.get('CoachFeedbackRow')
+            if FB is not None:
+                score_val = None
+                for key in ('poseScore', 'weightedScore', 'score'):
+                    val = data_map.get(key)
+                    if val is None:
+                        continue
+                    try:
+                        score_val = float(val)
+                        break
+                    except (TypeError, ValueError):
+                        continue
+                s.add(FB(
+                    sid=sid,
+                    shot_idx=idx,
+                    provider='admin',
+                    model='manual-override',
+                    latency_ms=0,
+                    text=f'[ADMIN] Result set to {"MAKE" if made_val else "MISS"}',
+                    score=score_val
+                ))
+
+            s.commit()
+
+    return jsonify({
+        'ok': True,
+        'sid': sid,
+        'idx': idx,
+        'made': bool(made_val),
+        'override': override_info,
+        'totals': totals
+    })
 
 @app.get('/admin/users')
 def admin_users():
@@ -4053,7 +4796,9 @@ def _db_event_today_status(user_id: int, event_slug: str):
 def api_list_events():
     db = getattr(app, 'db', None)
     if not db:
-        return jsonify({'ok': False, 'err': 'db unavailable'}), 503
+        if not ALLOW_STUB_AUTH:
+            return jsonify({'ok': False, 'err': 'db unavailable'}), 503
+        return jsonify({'ok': True, 'events': []})
     with db['Session']() as s:
         Event = db['Event']
         events = (

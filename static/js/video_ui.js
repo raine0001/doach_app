@@ -4,7 +4,6 @@
 //          autoEndSessionAndSummarize (callable, not auto-triggered).
 
 import { setOverlayInteractive, syncOverlayToVideo } from './fix_overlay_display.js';
-import { speak } from './coach_voice.js';
 import { enableHoopPickOnce } from './app.js';
 import { getLockedHoopBox, handleHoopSelection, canonHoop } from '/static/arc_mm/hoop_tracker.js';
 
@@ -281,10 +280,9 @@ export function mountSessionHUD() {
                     }
                 }
 
-                try {
-                    const speaker = window.doachSpeak || window.coachSpeak || window.speak;
-                    if (typeof speaker === 'function') speaker(muted ? 'Voice off.' : 'Voice on.');
-                } catch { }
+                if (typeof window.doachSpeak === 'function') {
+                    try { window.doachSpeak(muted ? 'Voice off.' : 'Voice on.'); } catch { }
+                }
             }
 
             function wire(btn) {
@@ -640,10 +638,72 @@ function ensureShotTableStyles() {
     #fullShotModal .hud-table thead th{ position:sticky; top:0; background:rgba(0,0,0,0.85); z-index:2; backdrop-filter:blur(2px); }
     #fullShotModal .hud-table th, #fullShotModal .hud-table td{ padding:8px 10px; vertical-align:top; text-align:left; border-bottom:1px solid rgba(255,255,255,.12); }
     #fullShotModal .hud-table tbody tr:nth-child(even) td{ background:rgba(255,255,255,.03); }
-    #fullShotModal td.num, #fullShotModal td.clip { text-align:center; }
+    #fullShotModal td.num, #fullShotModal td.score, #fullShotModal td.clip { text-align:center; }
     #fullShotModal td.coach{ white-space:normal; word-break:break-word; line-height:1.25; }
+    #fullShotModal .hud-table #cScore { width:70px; }
   `;
     document.head.appendChild(css);
+}
+
+function deriveShotScore(shot) {
+    if (!shot || typeof shot !== 'object') return null;
+    const candidates = [
+        shot.poseScore,
+        shot.pose_score,
+        shot.score,
+        shot.weightedScore,
+        shot.weighted_score,
+        shot.arcmm?.summary?.poseScore,
+        shot.arcmm?.poseScore,
+        shot.pose?.score,
+    ];
+    for (const candidate of candidates) {
+        const val = Number(candidate);
+        if (Number.isFinite(val)) {
+            const normalized = val <= 1 ? val * 100 : val;
+            return normalized;
+        }
+    }
+    return null;
+}
+
+function normalizeShotScore(shot) {
+    if (!shot || typeof shot !== 'object') return shot;
+    const val = deriveShotScore(shot);
+    if (val != null) shot.poseScore = val;
+    return shot;
+}
+
+function updateShotTableTotalsFromDOM(modal) {
+    if (!modal) return;
+    const tbody = modal.querySelector('tbody');
+    if (!tbody) return;
+    let total = 0;
+    let count = 0;
+    tbody.querySelectorAll('tr[data-shot-idx] .score').forEach((cell) => {
+        const val = Number(cell.textContent);
+        if (Number.isFinite(val)) {
+            total += val;
+            count += 1;
+        }
+    });
+    let totalRow = tbody.querySelector('tr.totals');
+    if (count === 0) {
+        if (totalRow) totalRow.remove();
+        return;
+    }
+    if (!totalRow) {
+        totalRow = document.createElement('tr');
+        totalRow.className = 'totals';
+        totalRow.innerHTML = '<td class="num">Σ</td><td class="coach">Total Pose Score</td><td class="score"></td><td class="clip"></td>';
+    } else {
+        totalRow.remove();
+    }
+    const scoreCell = totalRow.querySelector('.score');
+    if (scoreCell) scoreCell.textContent = Math.round(total);
+    const reviewRow = tbody.querySelector('#sessionReviewRow');
+    if (reviewRow) tbody.insertBefore(totalRow, reviewRow);
+    else tbody.appendChild(totalRow);
 }
 
 function getClipHrefForShot(idx1Based, shot) {
@@ -657,7 +717,9 @@ function getClipHrefForShot(idx1Based, shot) {
 
 export function renderFullShotTable() {
     const list = (window.__shotList ||= []);
+    list.forEach(normalizeShotScore);
     const root = ensureHudRoot();
+    list.forEach(normalizeShotScore);
     const minimal = true; // skinny table only
 
     ensureShotTableStyles();
@@ -686,8 +748,8 @@ export function renderFullShotTable() {
     </div>
     <div id="sessReviewLine" style="display:none;opacity:.95;margin:4px 0 10px;line-height:1.35"></div>
     <table class="hud-table">
-      <colgroup><col id="cNum"><col id="cCoach"><col id="cClip"></colgroup>
-      <thead><tr><th>#</th><th>Coach Pose Assessment</th><th>Clip</th></tr></thead>
+      <colgroup><col id="cNum"><col id="cCoach"><col id="cScore"><col id="cClip"></colgroup>
+      <thead><tr><th>#</th><th>Coach Pose Assessment</th><th>Score</th><th>Clip</th></tr></thead>
       <tbody></tbody>
     </table>
   `;
@@ -702,8 +764,18 @@ export function renderFullShotTable() {
 
         const tr = document.createElement('tr');
         tr.setAttribute('data-shot-idx', idx + 1);
-        tr.innerHTML = `<td class="num">${idx + 1}</td><td class="coach"></td><td class="clip"></td>`;
+        tr.innerHTML = `<td class="num">${idx + 1}</td><td class="coach"></td><td class="score"></td><td class="clip"></td>`;
         tr.querySelector('.coach').textContent = coachText;
+
+        const tdScore = tr.querySelector('.score');
+        const scoreVal = deriveShotScore(shot);
+        if (scoreVal != null) {
+            const display = Math.round(scoreVal);
+            tdScore.textContent = display;
+            tdScore.dataset.value = display;
+        } else {
+            tdScore.textContent = '—';
+        }
 
         const tdClip = tr.querySelector('.clip');
         const href = getClipHrefForShot(idx + 1, shot);
@@ -716,6 +788,7 @@ export function renderFullShotTable() {
         }
         tbody.appendChild(tr);
     });
+    updateShotTableTotalsFromDOM(modal);
 
     modal.querySelector('#closeFull').onclick = () => { modal.style.display = 'none'; };
     modal.style.display = 'block';
@@ -728,15 +801,18 @@ export function renderFullShotTable() {
             if (!row) {
                 row = document.createElement('tr');
                 row.id = 'sessionReviewRow';
-                row.innerHTML = '<td class="num">~</td><td class="coach session-review"></td><td class="clip"></td>';
+                row.innerHTML = '<td class="num">~</td><td class="coach session-review"></td><td class="score"></td><td class="clip"></td>';
                 modal.querySelector('tbody')?.appendChild(row);
             }
             const cell = row.querySelector('.coach');
             if (cell) cell.textContent = detail.summary;
+            const scoreCell = row.querySelector('.score');
+            if (scoreCell) scoreCell.textContent = '—';
             row.style.display = 'table-row';
             row.dataset.visible = 'true';
         }
     } catch { }
+    updateShotTableTotalsFromDOM(modal);
 
     return modal;
 }
@@ -756,31 +832,108 @@ window.__finalizedShotIds ||= new Set();
 
 // Record a finalized shot summary (UI only, no server)
 window.recordShotSummary = function recordShotSummary(summary) {
-    // de-dupe by shotId first
+    summary = normalizeShotScore(summary);
+    try {
+        const derived = deriveShotScore(summary);
+        const shotId = summary?.shotId ?? summary?.id ?? null;
+        const idxDbg = summary?.__idx ?? null;
+        const dbg = {
+            shotId,
+            idx: idxDbg,
+            poseScore: summary?.poseScore ?? null,
+            weightedScore: summary?.weightedScore ?? summary?.weightScore ?? null,
+            derived
+        };
+        if (summary?.arcmm?.summary?.poseScore != null) dbg.arcmmPose = summary.arcmm.summary.poseScore;
+        if (summary?.data?.weightedScore != null) dbg.dataWeighted = summary.data.weightedScore;
+        console.log('[score:recordShotSummary]', dbg, summary);
+    } catch (err) {
+        console.warn('[score:recordShotSummary] failed to inspect summary', err);
+    }
+    // de-dupe by shotId first (but allow richer follow-up updates)
     const sid = Number(summary.shotId || 0);
     if (sid > 0) {
-        if (window.__finalizedShotIds.has(sid)) return;
-        window.__finalizedShotIds.add(sid);
+        if (!window.__finalizedShotIds.has(sid)) {
+            window.__finalizedShotIds.add(sid);
+        }
     }
 
-    // de-dupe minor repeats by value signature
+    const list = (window.__shotList ||= []);
+
+    // de-dupe minor repeats by value signature but allow richer follow-ups
     const key = `${sid || '?'}|${+!!summary.made}|${Math.round(summary.arcHeight || 0)}|${summary.entryAngle}|${summary.releaseAngle}`;
-    if (window.__lastShotKey === key) return;
+    if (window.__lastShotKey === key) {
+        const idxForKey = Number.isFinite(sid) && sid > 0 ? sid - 1 : -1;
+        const existingForKey = idxForKey >= 0 ? list[idxForKey] : null;
+        const hasExistingScore = Number.isFinite(existingForKey?.poseScore) || Number.isFinite(existingForKey?.weightedScore);
+        const incomingScore = Number.isFinite(summary?.poseScore) || Number.isFinite(summary?.weightedScore);
+        if (!incomingScore || hasExistingScore) {
+            return;
+        }
+    }
     window.__lastShotKey = key;
 
     // carry coach and via
     if (!summary.doach && window.__lastCoachText) summary.doach = window.__lastCoachText;
     if (!summary.via) summary.via = window.__lastReleaseVia || summary.via || '';
 
-    const list = (window.__shotList ||= []);
     let idx = sid;
     if (Number.isFinite(idx) && idx > 0) {
         while (list.length < idx) list.push({ pending: true });
-        Object.assign(list[idx - 1], summary, { pending: false });
+        const existing = list[idx - 1] || {};
+        Object.assign(existing, summary, { pending: false });
+        const newScore = deriveShotScore(existing);
+        if (newScore != null) {
+            existing.poseScore = newScore;
+            summary.poseScore ??= newScore;
+        }
+       if (!Number.isFinite(summary.weightedScore)) {
+           const w = Number(existing.weightedScore);
+           if (Number.isFinite(w)) summary.weightedScore = w;
+           else if (newScore != null) summary.weightedScore = newScore / 100;
+       }
+        if (!Number.isFinite(existing.weightedScore) && Number.isFinite(summary.weightedScore)) {
+            existing.weightedScore = summary.weightedScore;
+        }
+        list[idx - 1] = existing;
     } else {
         const p = list.findIndex(s => s?.pending === true);
-        if (p !== -1) Object.assign(list[p], summary, { pending: false }), idx = p + 1;
-        else list.push(Object.assign({ pending: false }, summary)), idx = list.length;
+        if (p !== -1) {
+            const existing = list[p] || {};
+            Object.assign(existing, summary, { pending: false });
+            const newScore = deriveShotScore(existing);
+            if (newScore != null) {
+                existing.poseScore = newScore;
+                summary.poseScore ??= newScore;
+            }
+           if (!Number.isFinite(summary.weightedScore)) {
+               const w = Number(existing.weightedScore);
+               if (Number.isFinite(w)) summary.weightedScore = w;
+               else if (newScore != null) summary.weightedScore = newScore / 100;
+           }
+            if (!Number.isFinite(existing.weightedScore) && Number.isFinite(summary.weightedScore)) {
+                existing.weightedScore = summary.weightedScore;
+            }
+            list[p] = existing;
+            idx = p + 1;
+        } else {
+            const entry = Object.assign({ pending: false }, summary);
+            const newScore = deriveShotScore(entry);
+            if (newScore != null) {
+                entry.poseScore = newScore;
+                summary.poseScore ??= newScore;
+            }
+           if (!Number.isFinite(summary.weightedScore)) {
+               const w = Number(entry.weightedScore);
+               if (Number.isFinite(w)) summary.weightedScore = w;
+               else if (newScore != null) summary.weightedScore = newScore / 100;
+           }
+            if (!Number.isFinite(entry.weightedScore) && Number.isFinite(summary.weightedScore)) {
+                entry.weightedScore = summary.weightedScore;
+            }
+            list.push(entry);
+            idx = list.length;
+        }
     }
     summary.__idx = idx;
 
@@ -792,26 +945,41 @@ window.recordShotSummary = function recordShotSummary(summary) {
         if (!tr) {
             tr = document.createElement('tr');
             tr.setAttribute('data-shot-idx', idx);
-            tr.innerHTML = `<td class="num">${idx}</td><td class="coach"></td><td class="clip"></td>`;
+            tr.innerHTML = `<td class="num">${idx}</td><td class="coach"></td><td class="score"></td><td class="clip"></td>`;
             tbody.appendChild(tr);
         }
-        const coach = String(summary.doach || '—');
+        const merged = (Number.isFinite(idx) && idx > 0 && list[idx - 1]) ? list[idx - 1] : summary;
+        const coach = String(merged.doach || '—');
         const tdCoach = tr.querySelector('.coach');
         if (tdCoach) { tdCoach.textContent = coach; tdCoach.title = coach; }
+
+        const scoreCell = tr.querySelector('.score');
+        if (scoreCell) {
+            const scoreVal = deriveShotScore(merged);
+            scoreCell.textContent = scoreVal != null ? Math.round(scoreVal) : '—';
+            console.log('[score:table:update]', {
+                shotIdx: idx,
+                shotId: merged?.shotId ?? merged?.id ?? null,
+                poseScore: merged?.poseScore ?? null,
+                weightedScore: merged?.weightedScore ?? null,
+                displayed: scoreCell.textContent
+            });
+        }
 
         const tdClip = tr.querySelector('.clip');
         if (tdClip) {
             tdClip.textContent = '';
-            const href = summary.clip?.path || (function () {
+            const href = merged.clip?.path || (function () {
                 try { const sid = window.__SESSION_ID; return sid != null ? `/api/sessions/${sid}/shot_video?index=${idx - 1}` : null; } catch { return null; }
             })();
             if (href) {
                 const a = document.createElement('a'); a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = 'clip';
                 tdClip.appendChild(a);
             } else {
-                tdClip.textContent = summary.clip?.status === 'recording' ? 'recording…' : 'processing…';
+                tdClip.textContent = merged.clip?.status === 'recording' ? 'recording…' : 'processing…';
             }
         }
+        updateShotTableTotalsFromDOM(modal);
     }
 
     // HUD counters — FINALIZED only
@@ -1069,7 +1237,6 @@ async function speakNewSessionInvite(line) {
             return;
         } catch { }
     }
-    try { speak(line); } catch { }
 }
 
 function requestNewSessionPrompt(options = {}) {
@@ -1242,7 +1409,15 @@ function startShotTrackingCountdown(sec = 5) {
             showGo(); setTimeout(hide, 700);
             window.__shotTrackingArmed = true;
             try { window.dispatchEvent(new CustomEvent('hud:armed')); } catch { }
-            try { (window.doachSpeak || window.coachSpeak || speak)('Shoot when ready.'); } catch { }
+            try {
+                if (typeof window.doachSpeak === 'function') {
+                    await window.doachSpeak('Shoot when ready.');
+                } else {
+                    console.warn('[countdown] doachSpeak unavailable for cue');
+                }
+            } catch (err) {
+                console.warn('[countdown] cue failed', err);
+            }
             try { window.__releaseEventSent = false; } catch { }
         } finally {
             window.__armCountdownActive = false;
