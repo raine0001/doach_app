@@ -1,4 +1,4 @@
-﻿// app.js — Single-owner: release + microclip. No cap checks. No enders. No UI table.
+// app.js - Single-owner: release + microclip. No cap checks. No enders. No UI table.
 // Emits:  shot:release, shot:summary
 // Reads:  getLockedHoopBox, releaseGate, playerState
 // Calls:  video_ui (for prompts only), microclip upload endpoint
@@ -7,81 +7,480 @@
 try { window.__appJsLoaded = true; } catch { }
 try { window.DEFER_FE_SUMMARY = false; } catch {}
 
-function computePoseScoreFallback(snapshot, baseWeighted = null, debugTag = null) {
+function computePoseScoreFallback(snapshot, baseWeighted = null, debugTag = null, opts = {}) {
     if (!snapshot || typeof snapshot !== 'object') return null;
 
     const clamp = (v, min, max) => Math.min(max, Math.max(min, v));
-    const zeroGuard = (v, fallback = 0.45) => Number.isFinite(v) ? v : fallback;
+    const clamp01 = (v) => clamp(v, 0, 1);
+    const logisticScore = (diff, sigma, cfg = {}) => {
+        const spread = Number.isFinite(cfg.spread) ? cfg.spread : 2.6;
+        const power = Number.isFinite(cfg.power) ? cfg.power : 1.45;
+        const floor = Number.isFinite(cfg.floor) ? cfg.floor : 0.02;
+        const denom = Math.max(1e-3, (Number.isFinite(sigma) ? sigma : 1) * spread);
+        const norm = Math.abs(diff) / denom;
+        let score = 1 / (1 + Math.pow(norm, power));
+        if (score < floor) score = floor;
+        if (score > 1) score = 1;
+        return score;
+    };
+    const absIfFinite = (v) => (Number.isFinite(v) ? Math.abs(v) : v);
 
-    const scaleUp = (value, low, high) => {
-        if (!Number.isFinite(value)) return 0.45;
-        if (value <= low) return 0;
-        if (value >= high) return 1;
-        return (value - low) / (high - low);
+    const safeGet = (fn, fallback = null) => {
+        try { return fn(); } catch { return fallback; }
     };
 
-    const scaleDown = (value, low, high) => {
-        if (!Number.isFinite(value)) return 0.45;
-        if (value <= low) return 1;
-        if (value >= high) return 0;
-        return (high - value) / (high - low);
+    const golden = safeGet(() => window.DOACH_MEM?.golden?.() ?? window.DOACH_MEM?.get?.()?.golden ?? null, null);
+    const goldenTargets = golden?.targets || null;
+
+    const targetOverrideSources = [];
+    const sigmaOverrideSources = [];
+    const weightOverrideSources = [];
+
+    if (opts?.targets) targetOverrideSources.push(opts.targets);
+    if (opts?.targetOverrides) targetOverrideSources.push(opts.targetOverrides);
+    if (snapshot?.poseScoreTargets) targetOverrideSources.push(snapshot.poseScoreTargets);
+    if (snapshot?.targetOverrides) targetOverrideSources.push(snapshot.targetOverrides);
+    if (opts?.sigmas) sigmaOverrideSources.push(opts.sigmas);
+    if (snapshot?.poseScoreSigmas) sigmaOverrideSources.push(snapshot.poseScoreSigmas);
+    if (opts?.weights) weightOverrideSources.push(opts.weights);
+    if (snapshot?.poseScoreWeights) weightOverrideSources.push(snapshot.poseScoreWeights);
+
+    safeGet(() => {
+        if (window.POSE_TARGET_OVERRIDES) targetOverrideSources.push(window.POSE_TARGET_OVERRIDES);
+        if (window.POSE_SCORE_TARGETS) targetOverrideSources.push(window.POSE_SCORE_TARGETS);
+        if (window.POSE_TARGETS) targetOverrideSources.push(window.POSE_TARGETS);
+        if (window.DOACH_POSE_TARGETS) targetOverrideSources.push(window.DOACH_POSE_TARGETS);
+        if (window.POSE_SCORE_SIGMAS) sigmaOverrideSources.push(window.POSE_SCORE_SIGMAS);
+        if (window.POSE_SIGMA_OVERRIDES) sigmaOverrideSources.push(window.POSE_SIGMA_OVERRIDES);
+        if (window.DOACH_POSE_SIGMAS) sigmaOverrideSources.push(window.DOACH_POSE_SIGMAS);
+        if (window.DOACH_POSE_SIGMA) sigmaOverrideSources.push(window.DOACH_POSE_SIGMA);
+        if (window.POSE_SCORE_WEIGHTS) weightOverrideSources.push(window.POSE_SCORE_WEIGHTS);
+        if (window.DOACH_POSE_WEIGHTS) weightOverrideSources.push(window.DOACH_POSE_WEIGHTS);
+    });
+
+    const pickOverride = (sources, key) => {
+        for (const src of sources) {
+            if (!src || typeof src !== 'object') continue;
+            if (Object.prototype.hasOwnProperty.call(src, key)) {
+                return src[key];
+            }
+        }
+        return undefined;
     };
 
-    const scaleBand = (value, target, tolNeg, tolPos) => {
-        if (!Number.isFinite(value)) return 0.45;
-        const low = target - tolNeg;
-        const high = target + tolPos;
-        if (value <= low || value >= high) return 0;
-        if (value === target) return 1;
-        return value < target
-            ? (value - low) / (target - low)
-            : (high - value) / (high - target);
-    };
+    const METRIC_CONFIG = [
+        {
+            key: 'elbowExtDeg',
+            label: 'elbowExtension',
+            mode: 'min',
+            weight: 0.18,
+            defaultTarget: 148,
+            defaultSigma: 22,
+            minSigma: 10,
+            spread: 3.6,
+            power: 1.3,
+            floor: 0.04
+        },
+        {
+            key: 'armVerticalityDeg',
+            label: 'armVerticality',
+            mode: 'target',
+            weight: 0.11,
+            defaultTarget: 12,
+            defaultSigma: 10,
+            minSigma: 4,
+            spread: 2.8,
+            power: 1.4,
+            floor: 0.04
+        },
+        {
+            key: 'shoulderToWristAngle',
+            label: 'shoulderToWrist',
+            mode: 'min',
+            weight: 0.1,
+            defaultTarget: 54,
+            defaultSigma: 12,
+            minSigma: 5,
+            spread: 3,
+            power: 1.35,
+            floor: 0.04
+        },
+        {
+            key: 'kneeFlex',
+            label: 'kneeFlex',
+            mode: 'target',
+            weight: 0.115,
+            defaultTarget: 34,
+            defaultSigma: 12,
+            minSigma: 5,
+            spread: 2.6,
+            power: 1.5,
+            floor: 0.04
+        },
+        {
+            key: 'stanceRatio',
+            label: 'stanceRatio',
+            mode: 'target',
+            weight: 0.07,
+            defaultTarget: 0.68,
+            defaultSigma: 0.12,
+            minSigma: 0.04,
+            spread: 2.4,
+            power: 1.6,
+            floor: 0.05
+        },
+        {
+            key: 'stanceWidthFeet',
+            label: 'stanceWidthFeet',
+            mode: 'target',
+            weight: 0.065,
+            defaultTarget: 16,
+            defaultSigma: 3.5,
+            minSigma: 1,
+            spread: 2.6,
+            power: 1.6,
+            floor: 0.05
+        },
+        {
+            key: 'feetAngleDiff',
+            label: 'feetAngleDiff',
+            mode: 'max',
+            weight: 0.05,
+            defaultTarget: 9,
+            defaultSigma: 5,
+            minSigma: 2,
+            spread: 2.4,
+            power: 1.45,
+            floor: 0.03
+        },
+        {
+            key: 'footStagger',
+            label: 'footStagger',
+            mode: 'max',
+            weight: 0.04,
+            defaultTarget: 6,
+            defaultSigma: 4,
+            minSigma: 1.5,
+            spread: 2.8,
+            power: 1.45,
+            floor: 0.03
+        },
+        {
+            key: 'headToHoopDeg',
+            label: 'headAlignment',
+            mode: 'max',
+            weight: 0.05,
+            defaultTarget: 14,
+            defaultSigma: 8,
+            minSigma: 3,
+            spread: 3.1,
+            power: 1.45,
+            floor: 0.04
+        },
+        {
+            key: 'torsoLeanAngle',
+            label: 'torsoLean',
+            mode: 'max',
+            transform: 'abs',
+            weight: 0.05,
+            defaultTarget: 9,
+            defaultSigma: 6,
+            minSigma: 2.5,
+            spread: 3,
+            power: 1.5,
+            floor: 0.04
+        },
+        {
+            key: 'footLiftPx',
+            label: 'footLift',
+            mode: 'min',
+            weight: 0.035,
+            defaultTarget: 2.4,
+            defaultSigma: 1.8,
+            minSigma: 0.4,
+            spread: 2.4,
+            power: 1.4,
+            floor: 0.05,
+            bonus: (value, target) => (value > target) ? Math.min((value - target) / 12, 0.08) : 0,
+            maxBonus: 0.1
+        },
+        {
+            key: 'followThroughHoldFrames',
+            label: 'followThrough',
+            mode: 'min',
+            weight: 0.075,
+            defaultTarget: 2,
+            defaultSigma: 0.9,
+            minSigma: 0.3,
+            spread: 2.1,
+            power: 1.45,
+            floor: 0.05,
+            bonus: (value, target) => (value > target) ? Math.min((value - target) / 6, 0.12) : 0,
+            maxBonus: 0.15
+        },
+        {
+            key: 'releaseAboveShoulder',
+            label: 'releaseAboveShoulder',
+            mode: 'boolean',
+            weight: 0.03,
+            defaultTarget: 0.85
+        },
+        {
+            key: 'hipRotationDeg',
+            label: 'hipRotation',
+            mode: 'max',
+            transform: 'abs',
+            weight: 0.03,
+            defaultTarget: 15,
+            defaultSigma: 8,
+            minSigma: 3,
+            spread: 3.2,
+            power: 1.45,
+            floor: 0.04
+        }
+    ];
 
-    const golden = typeof window.DOACH_MEM?.golden === 'function' ? window.DOACH_MEM.golden() : null;
-    const target = (name, fallback) => {
-        const val = Number(golden?.[name]);
-        return Number.isFinite(val) ? val : fallback;
-    };
-
+    const maxPoseWeight = METRIC_CONFIG.reduce((sum, cfg) => sum + (Number(cfg.weight) || 0), 0);
     const components = [];
-    const addComponent = (score, weight) => {
-        components.push({ score: clamp(zeroGuard(score), 0, 1), weight });
-    };
+    let weightedSum = 0;
+    let weightTotal = 0;
+    let poseWeightUsed = 0;
 
-    addComponent(scaleUp(Number(snapshot.elbowExtDeg), target('elbowExtDeg', 136), target('elbowExtDeg', 160)), 0.22);
-    addComponent(scaleDown(Number(snapshot.armVerticalityDeg), target('armVerticalityDeg', 10), target('armVerticalityDeg', 32)), 0.15);
-    addComponent(scaleBand(Number(snapshot.kneeFlex), target('kneeFlex', 32), 14, 18), 0.12);
-    addComponent(scaleBand(Number(snapshot.stanceRatio), target('stanceRatio', 0.68), 0.16, 0.18), 0.08);
-    addComponent(scaleBand(Number(snapshot.stanceWidthFeet), target('stanceWidthFeet', 16), 5, 7), 0.06);
-    addComponent(scaleDown(Number(snapshot.feetAngleDiff), target('feetAngleDiff', 8), 20), 0.08);
-    addComponent(scaleDown(Number(snapshot.headToHoopDeg), target('headToHoopDeg', 12), 36), 0.08);
-    addComponent(scaleDown(Math.abs(Number(snapshot.torsoLeanAngle)), 0, 14), 0.05);
-    addComponent(scaleDown(Number(snapshot.footStagger), 0, 18), 0.04);
-    addComponent(scaleUp(Number(snapshot.footLiftPx), 0, 12), 0.04);
-    addComponent(Number(snapshot.followThroughHoldFrames) >= 2 ? 1 : Number(snapshot.followThroughHoldFrames) >= 1 ? 0.7 : 0.15, 0.05);
-    addComponent(snapshot.releaseAboveShoulder === false ? 0.15 : 1, 0.04);
-    addComponent(scaleBand(Number(snapshot.shoulderToWristAngle), target('shoulderToWristAngle', 58), 18, 20), 0.06);
+    for (const config of METRIC_CONFIG) {
+        const rawValue = config.getValue ? config.getValue(snapshot) : snapshot?.[config.key];
+        const normalizedValue = config.transform === 'abs' ? absIfFinite(rawValue) : rawValue;
+        const value = Number.isFinite(normalizedValue) ? Number(normalizedValue) : null;
 
-    const totals = components.reduce((acc, c) => {
-        acc.score += c.score * c.weight;
-        acc.weight += c.weight;
-        return acc;
-    }, { score: 0, weight: 0 });
+        if (!Number.isFinite(value)) {
+            components.push({
+                key: config.key,
+                label: config.label,
+                weight: config.weight,
+                used: false,
+                reason: 'missing',
+                raw: rawValue
+            });
+            continue;
+        }
 
-    if (totals.weight === 0) return null;
-    const poseComposite = clamp(totals.score / totals.weight, 0, 1);
-    const weightedBase = Number.isFinite(baseWeighted) ? clamp(baseWeighted, 0, 1) : null;
-    const final = weightedBase != null ? clamp(poseComposite * 0.7 + weightedBase * 0.3, 0, 1) : poseComposite;
+        const overrideEntry = pickOverride(targetOverrideSources, config.key);
+        let target = null;
+        let sigma = null;
+        let weight = config.weight;
 
-    if (window.SCORE_DEBUG === true) {
-        console.log('[score:fallback:pose:detail]', { debugTag, poseComposite, weightedBase, components });
+        if (overrideEntry !== undefined && overrideEntry !== null) {
+            if (typeof overrideEntry === 'number') {
+                target = overrideEntry;
+            } else if (typeof overrideEntry === 'boolean') {
+                target = overrideEntry ? 1 : 0;
+            } else if (typeof overrideEntry === 'object') {
+                if (Number.isFinite(overrideEntry.target)) target = overrideEntry.target;
+                else if (Number.isFinite(overrideEntry.value)) target = overrideEntry.value;
+                if (Number.isFinite(overrideEntry.sigma)) sigma = overrideEntry.sigma;
+                if (Number.isFinite(overrideEntry.weight)) weight = overrideEntry.weight;
+            }
+        }
+
+        if (!Number.isFinite(target) && goldenTargets?.[config.key]) {
+            const gt = goldenTargets[config.key];
+            target = Number.isFinite(gt.median) ? gt.median : Number.isFinite(gt.mean) ? gt.mean : target;
+            if (!Number.isFinite(sigma) && Number.isFinite(gt.sigma)) sigma = gt.sigma;
+        }
+        if (!Number.isFinite(target) && Number.isFinite(golden?.[config.key])) {
+            target = golden[config.key];
+        }
+        if (!Number.isFinite(target)) {
+            if (typeof config.defaultTarget === 'function') target = config.defaultTarget({ snapshot, golden });
+            else target = config.defaultTarget;
+        }
+        if (!Number.isFinite(target)) {
+            components.push({
+                key: config.key,
+                label: config.label,
+                weight,
+                used: false,
+                reason: 'no-target',
+                raw: rawValue
+            });
+            continue;
+        }
+
+        const sigmaOverride = pickOverride(sigmaOverrideSources, config.key);
+        if (!Number.isFinite(sigma) && sigmaOverride !== undefined) {
+            if (typeof sigmaOverride === 'number') sigma = sigmaOverride;
+            else if (typeof sigmaOverride === 'object' && Number.isFinite(sigmaOverride.sigma)) sigma = sigmaOverride.sigma;
+        }
+        if (!Number.isFinite(sigma)) sigma = config.defaultSigma ?? 1;
+        if (config.minSigma) sigma = Math.max(config.minSigma, sigma);
+        if (config.maxSigma) sigma = Math.min(config.maxSigma, sigma);
+        if (!Number.isFinite(sigma) || sigma <= 0) sigma = config.minSigma ?? config.defaultSigma ?? 1;
+
+        const weightOverride = pickOverride(weightOverrideSources, config.key);
+        if (weightOverride !== undefined) {
+            if (typeof weightOverride === 'number') weight = weightOverride;
+            else if (typeof weightOverride === 'object' && Number.isFinite(weightOverride.weight)) weight = weightOverride.weight;
+        }
+        weight = Number(weight);
+        if (!Number.isFinite(weight) || weight <= 0) {
+            components.push({
+                key: config.key,
+                label: config.label,
+                weight,
+                used: false,
+                reason: 'weight<=0',
+                raw: rawValue,
+                target,
+                sigma
+            });
+            continue;
+        }
+
+        let componentScore = null;
+        let diff = null;
+        let bonusApplied = 0;
+        const logisticOpts = { spread: config.spread, power: config.power, floor: config.floor };
+
+        switch (config.mode) {
+            case 'min': {
+                diff = target - value;
+                if (diff <= 0) {
+                    componentScore = 1;
+                } else {
+                    componentScore = logisticScore(diff, sigma, logisticOpts);
+                }
+                break;
+            }
+            case 'max': {
+                diff = value - target;
+                if (diff <= 0) {
+                    componentScore = 1;
+                } else {
+                    componentScore = logisticScore(diff, sigma, logisticOpts);
+                }
+                break;
+            }
+            case 'boolean': {
+                const expected = clamp01(Number.isFinite(target) ? target : 0.85);
+                if (rawValue === true) componentScore = 1;
+                else if (rawValue === false) componentScore = clamp01(1 - expected);
+                else componentScore = clamp01(0.6 + (expected - 0.5) * 0.3);
+                diff = (rawValue === true) ? 0 : 1;
+                break;
+            }
+            default: {
+                diff = value - target;
+                componentScore = logisticScore(diff, sigma, logisticOpts);
+            }
+        }
+
+        if (!Number.isFinite(componentScore)) {
+            components.push({
+                key: config.key,
+                label: config.label,
+                weight,
+                used: false,
+                reason: 'score-non-finite',
+                value,
+                target,
+                sigma
+            });
+            continue;
+        }
+
+        if (typeof config.bonus === 'function') {
+            const rawBonus = Number(config.bonus(value, target, snapshot, golden)) || 0;
+            if (rawBonus > 0) {
+                const maxBonus = Number.isFinite(config.maxBonus) ? config.maxBonus : 0.15;
+                bonusApplied = Math.min(rawBonus, maxBonus);
+                componentScore += bonusApplied;
+            }
+        }
+
+        const bonusCap = Number.isFinite(config.maxBonus) ? config.maxBonus : 0.2;
+        componentScore = clamp(componentScore, 0, 1 + bonusCap);
+
+        components.push({
+            key: config.key,
+            label: config.label,
+            weight,
+            used: true,
+            value,
+            target,
+            sigma,
+            diff,
+            score: componentScore,
+            bonus: bonusApplied,
+            raw: rawValue,
+            mode: config.mode
+        });
+
+        weightedSum += componentScore * weight;
+        weightTotal += weight;
+        poseWeightUsed += weight;
     }
 
-    return Math.round(final * 100);
+    const weightedBase = null;
+
+    if (!(weightTotal > 0)) {
+        if (window.SCORE_DEBUG === true) {
+            console.warn('[score:fallback:pose]', { debugTag, reason: 'no-metrics', snapshot });
+        }
+        return 50;
+    }
+
+    let normalized = clamp01(weightedSum / weightTotal);
+    const poseScore = Math.round(normalized * 100);
+
+    const debugKey = (debugTag != null)
+        ? String(debugTag)
+        : `anon_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+    const debugSnapshot = {
+        debugTag: debugKey,
+        poseScore,
+        normalized,
+        weightedBase,
+        poseWeightUsed,
+        maxPoseWeight,
+        weightTotal,
+        components: components.map(comp => ({ ...comp }))
+    };
+
+    try {
+        if (window.SCORE_DEBUG === true) {
+            console.groupCollapsed('[score:fallback:pose:detail]', debugSnapshot.debugTag);
+            console.log('[score:fallback:pose:detail]', debugSnapshot);
+            console.table(debugSnapshot.components.map(comp => ({
+                metric: comp.label || comp.key,
+                value: comp.value,
+                target: comp.target,
+                sigma: comp.sigma,
+                diff: comp.diff,
+                score: comp.score,
+                weight: comp.weight,
+                bonus: comp.bonus,
+                used: comp.used,
+                reason: comp.reason || ''
+            })));
+            console.groupEnd();
+        }
+    } catch {}
+
+    try {
+        const store = (window.__POSE_SCORE_DEBUG ||= new Map());
+        store.set(debugKey, debugSnapshot);
+        const max = Number.isFinite(window.__POSE_SCORE_DEBUG_MAX) && window.__POSE_SCORE_DEBUG_MAX > 0
+            ? window.__POSE_SCORE_DEBUG_MAX
+            : 200;
+        while (store.size > max) {
+            const firstKey = store.keys().next().value;
+            if (firstKey === undefined) break;
+            store.delete(firstKey);
+        }
+    } catch {}
+
+    return poseScore;
 }
-
-
+try { window.computePoseScoreFallback = computePoseScoreFallback; } catch {}
 // ---------- Imports (only what this file actually uses) ----------
 import {
     ensureOverlayCss,
@@ -293,7 +692,7 @@ async function poseDetectSerial() {
 window.poseDetectSerial = poseDetectSerial;
 
 
-// ---------- Microclip (3s) → emits one shot:summary ----------
+// ---------- Microclip (3s) ? emits one shot:summary ----------
 (function installMicroclip() {
     if (window.__mcInstalled) return; window.__mcInstalled = true;
 
@@ -307,9 +706,18 @@ window.poseDetectSerial = poseDetectSerial;
     function emitMicroclipSummary(shotId) {
         try {
             const list = window.__shotList || [];
-            const row = list.find(r => r && (r.id === shotId || r.idx === shotId)) || list.at?.(-1) || {};
+            const shotIdNum = Number(shotId);
+            const row = Number.isFinite(shotIdNum)
+                ? (list.find((r) => {
+                    if (!r) return false;
+                    const rid = Number(r?.id ?? r?.shotId ?? r?.idx);
+                    return Number.isFinite(rid) && rid === shotIdNum;
+                }) || null)
+                : (list.at?.(-1) || null);
             const hadRowSnapshot = !!row?.poseSnapshot;
-            const storeSnap = Number.isFinite(shotId) ? (window.poseStore?.get(shotId) || null) : null;
+            const storeSnap = (Number.isFinite(shotIdNum) && window.__poseIsFreshFor?.(shotIdNum))
+                ? (window.poseStore?.get(shotIdNum) || null)
+                : null;
             const snap = row?.poseSnapshot || storeSnap || null;
             if (!hadRowSnapshot && snap) {
                 console.warn('[pose:summary] using cached pose snapshot', { shotId, source: storeSnap ? 'store' : 'row' });
@@ -325,11 +733,12 @@ window.poseDetectSerial = poseDetectSerial;
                 arcHeight: null,
                 entryAngle: null,
                 releaseAngle: null,
-                poseSnapshot: snap || null
+                poseSnapshot: snap || null,
+                weightedScoreSource: null
             };
 
             // Populate pose/weighted score from the richest available source so persistence/UI get real values.
-            const idNum = Number(shotId);
+            const idNum = shotIdNum;
             const seen = new WeakSet();
             const applyScoresFrom = (source) => {
                 if (!source || typeof source !== 'object') return;
@@ -357,6 +766,12 @@ window.poseDetectSerial = poseDetectSerial;
                 ].map(toNumber).find((v) => v != null);
                 if (!Number.isFinite(sum.weightedScore) && weightedCandidate != null) {
                     sum.weightedScore = weightedCandidate;
+                    if (!sum.weightedScoreSource) {
+                        const srcLabel = typeof source?.weightedScoreSource === 'string'
+                            ? source.weightedScoreSource
+                            : 'persisted';
+                        sum.weightedScoreSource = srcLabel;
+                    }
                 }
                 const nested = [
                     source.summary,
@@ -393,6 +808,7 @@ window.poseDetectSerial = poseDetectSerial;
                     const rec = window.shotLog?.find?.((entry) => Number(entry?.id) === idNum);
                     if (rec && Number.isFinite(rec.weightedScore)) {
                         sum.weightedScore = Math.max(0, Math.min(1, rec.weightedScore));
+                        if (!sum.weightedScoreSource) sum.weightedScoreSource = 'shot-log';
                         console.log('[score:fallback:shotLog]', { shotId, weightedScore: sum.weightedScore });
                     }
                 } catch (err) {
@@ -414,6 +830,7 @@ window.poseDetectSerial = poseDetectSerial;
                         const w = window.computeWeightedShotScore(trail);
                         if (Number.isFinite(w)) {
                             sum.weightedScore = Math.max(0, Math.min(1, w));
+                            sum.weightedScoreSource = 'trail';
                             console.log('[score:fallback:trail]', { shotId, weightedScore: sum.weightedScore, trailLen: trail.length });
                         } else {
                             console.warn('[score:fallback:trail]', { shotId, reason: 'non-finite result', weightedScore: w });
@@ -432,13 +849,21 @@ window.poseDetectSerial = poseDetectSerial;
             }
 
             const computedPoseScore = sum.poseSnapshot
-                ? computePoseScoreFallback(sum.poseSnapshot, Number.isFinite(sum.weightedScore) ? sum.weightedScore : null, shotId)
+                ? computePoseScoreFallback(
+                    sum.poseSnapshot,
+                    null,
+                    shotId,
+                    { weightedSource: sum.weightedScoreSource }
+                )
                 : null;
 
             if (Number.isFinite(computedPoseScore)) {
                 sum.poseScore = computedPoseScore;
                 if (!Number.isFinite(sum.weightedScore)) {
-                    sum.weightedScore = computedPoseScore / 100;
+                    if (sum.poseSnapshot) {
+                        sum.weightedScore = computedPoseScore / 100;
+                        sum.weightedScoreSource = sum.weightedScoreSource || 'pose-fallback';
+                    }
                 } else {
                     sum.weightedScore = Math.max(0, Math.min(1, sum.weightedScore));
                 }
@@ -453,6 +878,7 @@ window.poseDetectSerial = poseDetectSerial;
 
             if (!Number.isFinite(sum.weightedScore)) {
                 sum.weightedScore = 0;
+                sum.weightedScoreSource = 'default-zero';
                 console.warn('[score:fallback:default-zero]', { shotId });
             }
             if (!Number.isFinite(sum.poseScore)) {
@@ -490,7 +916,7 @@ console.log('[score:microclip:final]', {
         } catch {}
         }
 
-        // Fall back if compositor isn’t available
+        // Fall back if compositor isn?t available
         const stream = comp?.stream || v?.captureStream?.() || v?.srcObject;
         if (!stream || !stream.getVideoTracks?.().length) {
         window.updateShot?.(shotId, { clip: { status: stream ? 'no-video-track' : 'no-stream' } });
@@ -676,6 +1102,14 @@ function clonePoseSnapshotLocal(snap) {
 
     window.poseStore = api;
     window.__POSE_RELEASES = store;
+
+    function poseSnapshotIsFresh(id, maxAgeMs = 6000) {
+        try {
+            const inf = api.info?.(id);
+            return !!(inf && Number.isFinite(inf.capturedAt) && (Date.now() - inf.capturedAt) <= maxAgeMs);
+        } catch { return false; }
+    }
+    try { window.__poseIsFreshFor = poseSnapshotIsFresh; } catch {}
 
     const reset = () => { try { api.clear(); } catch { }; };
     window.addEventListener('hud:start-session', reset, { passive: true });
@@ -959,7 +1393,7 @@ function armAfterArmDown(opts = {}) {
             // 1) Wrist truly back below shoulder
             const wristBelowShoulder = wr.y > (sh.y - shoulderMarginPx);
 
-            // 2) Not in “release posture” anymore (use your exported helper)
+            // 2) Not in ?release posture? anymore (use your exported helper)
             const notInReleasePose = (typeof window.isPoseInReleasePosition === 'function')
                 ? !window.isPoseInReleasePosition(k)
                 : true; // if unknown, err on the cautious side
@@ -1080,7 +1514,7 @@ export function enableHoopPickOnce() {
     const finish = () => {
         window.__hoopConfirmed = true;
         clearHoopReminders();
-        // Say a clean confirmation and avoid the goofy rectangle if we’re hiding it
+        // Say a clean confirmation and avoid the goofy rectangle if we?re hiding it
         if (typeof window.doachSpeak === 'function') {
             try { window.doachSpeak('Target hoop selected'); } catch { }
         }
@@ -1248,7 +1682,7 @@ function iouRect(a, b) {
 }
 function clamp(v, min, max) { return Math.min(max, Math.max(min, v)); }
 
-// ---- Lightweight painter that won’t embarrass you on resize ----
+// ---- Lightweight painter that won?t embarrass you on resize ----
 function paintHoopCue(ctx, hoop) {
     if (!hoop) return;
     const mode = String(window.HOOP_RENDER_MODE || 'dot');
@@ -1403,7 +1837,7 @@ function startPreDetectWarm(videoEl) {
 
 
 
-// ---------- Pose sampler → release ----------
+// ---------- Pose sampler ? release ----------
 (function installPoseSampler() {
     if (window.__poseSamplerInstalled) return;
     window.__poseSamplerInstalled = true;
@@ -1749,3 +2183,4 @@ document.addEventListener('DOMContentLoaded', () => {
     }, { passive: true });
 
 })();
+

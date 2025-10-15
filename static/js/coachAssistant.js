@@ -1249,7 +1249,7 @@ function formatCoachLine(s) {
         let body = cues.slice(0, 2).join(' ') || 'Pose metrics captured. Focus on repeatable release mechanics.';
 
         const sc = getShotScoreForSummary({ poseSnapshot: snap, ...s, ...lastRow });
-        if (Number.isFinite(sc)) body += ` Score ${sc}/100.`;
+        if (Number.isFinite(sc)) body += ` Score ${Math.round(sc)}.`;
 
         const n = preferShotNumber(s);
         return n > 0 ? `Shot ${n}, ${body}` : body;
@@ -2406,29 +2406,126 @@ window.addEventListener('shot:feedback:request', (e) => {
     }
     function memSave(m) { localStorage.setItem(MEM_KEY, JSON.stringify(m)); return m; }
     function mean(arr) { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null; }
+    function median(arr) {
+        if (!arr.length) return null;
+        const sorted = [...arr].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+    }
+    function stdDev(arr, maybeMean = null) {
+        if (arr.length < 2) return null;
+        const mu = Number.isFinite(maybeMean) ? maybeMean : mean(arr);
+        if (!Number.isFinite(mu)) return null;
+        const varSum = arr.reduce((acc, v) => acc + Math.pow(v - mu, 2), 0);
+        return Math.sqrt(varSum / (arr.length - 1 || 1));
+    }
+    function mad(arr, maybeMedian = null) {
+        if (!arr.length) return null;
+        const med = Number.isFinite(maybeMedian) ? maybeMedian : median(arr);
+        if (!Number.isFinite(med)) return null;
+        return median(arr.map(v => Math.abs(v - med)));
+    }
     function clamp(n, a, b) { return Math.max(a, Math.min(b, n)); }
 
     function computeGolden(made) {
         if (!made.length) return null;
         const take = made.slice(-30); // last N made shots
-        const pick = k => take.map(s => s.poseSnapshot?.[k]).filter(v => Number.isFinite(v));
-        const g = {
-            stanceWidth: mean(pick('stanceWidth')),
-            stanceWidthFeet: mean(pick('stanceWidthFeet')),
-            kneeFlex: mean(pick('kneeFlex')),
-            torsoLeanAngle: mean(pick('torsoLeanAngle')),
-            shoulderToWristAngle: mean(pick('shoulderToWristAngle')),
-            feetAngleDiff: mean(pick('feetAngleDiff')),
-            feetStagger: mean(pick('feetStagger')),
-            releaseAboveShoulder: take.filter(s => s.poseSnapshot?.releaseAboveShoulder).length / take.length >= 0.6,
-            entryAngle: mean(take.map(s => s.entryAngle).filter(Number.isFinite)),
-            arcHeight: mean(take.map(s => s.arcHeight).filter(Number.isFinite)),
-            arcHeightNorm: mean(take.map(s => s.arcHeightNorm).filter(Number.isFinite)),
-            apexRiseFromRelease: mean(take.map(s => s.apexRiseFromRelease).filter(Number.isFinite)),
-            apexRiseFromReleaseNorm: mean(take.map(s => s.apexRiseFromReleaseNorm).filter(Number.isFinite)),
-            count: take.length
+        const poseVal = (shot, key) => shot?.poseSnapshot?.[key];
+        const numericFor = (keys) => {
+            const arr = [];
+            for (const shot of take) {
+                let val = null;
+                for (const key of keys) {
+                    const candidate = poseVal(shot, key);
+                    if (Number.isFinite(candidate)) {
+                        val = candidate;
+                        break;
+                    }
+                }
+                if (Number.isFinite(val)) arr.push(val);
+            }
+            return arr;
         };
-        return g;
+
+        const metricDefs = [
+            { key: 'stanceWidth', aliases: [], defaultSigma: 36, minSigma: 6 },
+            { key: 'stanceWidthFeet', aliases: [], defaultSigma: 2.5, minSigma: 0.6 },
+            { key: 'stanceRatio', aliases: [], defaultSigma: 0.12, minSigma: 0.04 },
+            { key: 'elbowExtDeg', aliases: [], defaultSigma: 6, minSigma: 2 },
+            { key: 'armVerticalityDeg', aliases: [], defaultSigma: 6, minSigma: 2 },
+            { key: 'torsoLeanAngle', aliases: [], defaultSigma: 5, minSigma: 2 },
+            { key: 'kneeFlex', aliases: [], defaultSigma: 6, minSigma: 2 },
+            { key: 'feetAngleDiff', aliases: [], defaultSigma: 5, minSigma: 1.5 },
+            { key: 'footStagger', aliases: ['feetStagger'], defaultSigma: 4, minSigma: 1.2 },
+            { key: 'headToHoopDeg', aliases: [], defaultSigma: 10, minSigma: 3 },
+            { key: 'shoulderToWristAngle', aliases: [], defaultSigma: 5, minSigma: 2 },
+            { key: 'footLiftPx', aliases: [], defaultSigma: 2, minSigma: 0.4 },
+            { key: 'followThroughHoldFrames', aliases: [], defaultSigma: 1.2, minSigma: 0.3 },
+            { key: 'hipRotationDeg', aliases: [], defaultSigma: 8, minSigma: 2 },
+            { key: 'wristIndexDeg', aliases: ['wristToForearmDeg'], defaultSigma: 6, minSigma: 1.5 },
+            { key: 'ballReleaseHeight', aliases: ['releaseHeight'], defaultSigma: 6, minSigma: 1.5 }
+        ];
+
+        const targets = {};
+        const golden = { count: take.length, targets };
+
+        for (const def of metricDefs) {
+            const values = numericFor([def.key, ...(def.aliases || [])]);
+            if (!values.length) continue;
+            const med = median(values);
+            const avg = mean(values);
+            const sd = stdDev(values, avg);
+            const madVal = mad(values, med);
+            const fallbackSigma = def.defaultSigma ?? 1;
+            let sigma = Number.isFinite(sd) ? sd : null;
+            if (!Number.isFinite(sigma) && Number.isFinite(madVal)) sigma = madVal * 1.4826;
+            if (!Number.isFinite(sigma) || sigma <= 0) sigma = fallbackSigma;
+            const minSigma = def.minSigma ?? 0.1;
+            sigma = Math.max(minSigma, sigma);
+            if (def.maxSigma) sigma = Math.min(def.maxSigma, sigma);
+
+            targets[def.key] = {
+                median: med,
+                mean: avg,
+                sigma,
+                mad: Number.isFinite(madVal) ? madVal : null,
+                sampleCount: values.length
+            };
+
+            golden[def.key] = med;
+            for (const alias of def.aliases || []) {
+                golden[alias] = med;
+            }
+        }
+
+        const releaseVals = take
+            .map(s => s.poseSnapshot?.releaseAboveShoulder)
+            .filter(v => v === true || v === false);
+        if (releaseVals.length) {
+            const trueRatio = releaseVals.filter(Boolean).length / releaseVals.length;
+            targets.releaseAboveShoulder = {
+                ratio: trueRatio,
+                sampleCount: releaseVals.length
+            };
+            golden.releaseAboveShoulder = trueRatio >= 0.6;
+        } else {
+            golden.releaseAboveShoulder = golden.releaseAboveShoulder ?? null;
+        }
+
+        const entryAngleVals = take.map(s => s.entryAngle).filter(Number.isFinite);
+        const arcHeightVals = take.map(s => s.arcHeight).filter(Number.isFinite);
+        const arcHeightNormVals = take.map(s => s.arcHeightNorm).filter(Number.isFinite);
+        const apexVals = take.map(s => s.apexRiseFromRelease).filter(Number.isFinite);
+        const apexNormVals = take.map(s => s.apexRiseFromReleaseNorm).filter(Number.isFinite);
+
+        golden.entryAngle = mean(entryAngleVals);
+        golden.entryAngleSigma = stdDev(entryAngleVals, golden.entryAngle);
+        golden.arcHeight = mean(arcHeightVals);
+        golden.arcHeightNorm = mean(arcHeightNormVals);
+        golden.apexRiseFromRelease = mean(apexVals);
+        golden.apexRiseFromReleaseNorm = mean(apexNormVals);
+
+        return golden;
     }
 
     function addShotToMemory(shot) {

@@ -573,8 +573,27 @@
             }
 
             if (live && live.length) {
-                arc.refinedTrailFrozen = cloneTrail(live);
+                // reject any point that jumps too far from prior (teleport fix)
+                const maxJump = 0.15 * Math.max(ui.exportCan.width, ui.exportCan.height); // ~15% of frame
+                const clean = [];
+                for (let i = 0; i < live.length; i++) {
+                    const p = live[i];
+                    if (i === 0 || Math.hypot(p.x - live[i - 1].x, p.y - live[i - 1].y) < maxJump) {
+                        clean.push(p);
+                    }
+                }
+
+                // optional: trim any points that appear *below* rim center by more than one hoop height
+                const hoop = window.getLockedHoopBox?.();
+                if (hoop) {
+                    const rimY = hoop.rimY ?? hoop.y ?? hoop.cy;
+                    const cutoff = rimY + (hoop.h || 40) * 1.2;
+                    while (clean.length && clean[clean.length - 1].y > cutoff) clean.pop();
+                }
+
+                arc.refinedTrailFrozen = cloneTrail(clean);
             }
+
         }
 
 
@@ -1246,6 +1265,15 @@
                         ? { refinedTrailFrozen: shotTrail, refinedTrail: shotTrail, trail: shotTrail }
                         : window.ballArc;
                     summary.made = computeMakeMiss(arcForDecision, hoop);
+
+                    if (summary.made === true || summary.made === false) {
+                        const tail = arc.refinedTrailFrozen || [];
+                        const hoop = getHoopInVideoSpace?.();
+                        const score = (tail.length > 6) ? 1 - Math.abs(tail.at(-1).y - hoop.cy) / (hoop.h || 80) : 0.4;
+                        summary.questionable = score < 0.35; // low geometric certainty
+                    }
+
+
                 }
                 summary.result = summary.made === true ? 'MAKE' : summary.made === false ? 'MISS' : null;
 
@@ -1391,52 +1419,52 @@
             const cap = (window.__videoCanvas ||= document.createElement('canvas'));
             const capCtx = cap.getContext('2d', { willReadFrequently: true });
 
-            function _center(o, W, H){
-            let x=o.x??o.left??o.box?.x??o.bbox?.x, y=o.y??o.top??o.box?.y??o.bbox?.y;
-            let w=o.w??o.width??o.box?.w??o.bbox?.w, h=o.h??o.height??o.box?.h??o.bbox?.h;
-            if (o.right!=null && o.left!=null && o.bottom!=null && o.top!=null){ x=o.left; y=o.top; w=o.right-o.left; h=o.bottom-o.top; }
-            if (Array.isArray(o.bbox) && o.bbox.length===4){
-                const [a,b,c,d]=o.bbox;
-                if (c<=1 && d<=1){ x=a*W; y=b*H; w=c*W; h=d*H; }
-                else if (c>a && d>b){ x=a; y=b; w=c-a; h=d-b; }
-                else { x=a; y=b; w=c; h=d; }
-            }
-            if (w<=1 && h<=1 && x<=1 && y<=1){ x*=W; y*=H; w*=W; h*=H; }
-            const cx=(o.cx??o.centerX??(x+w/2)), cy=(o.cy??o.centerY??(y+h/2));
-            return {cx,cy};
-            }
-
-            async function onFrame(){
-            // start recorder and composite what you already draw
-            if (!started) { recHandle = startCompositeRecorder(ui.exportCan, { fps: 30, timesliceMs: 200 }); started = true; }
-            compositeFrame();
-
-            // copy the RAW VIDEO frame (not the overlay) into the capture canvas
-            const v = ui.video;
-            cap.width  = v.videoWidth  || ui.overlay.width  || 1280;
-            cap.height = v.videoHeight || ui.overlay.height || 720;
-            try { capCtx.drawImage(v, 0, 0, cap.width, cap.height); } catch {}
-
-            // detect ball and push one trail point now
-            try {
-                const raw = await window.sendFrameToDetect?.(cap, 1);
-                const arr = Array.isArray(raw) ? raw : (raw?.objects || raw?.detections || []);
-                const ball = arr.find(o => /(basket|ball)/i.test(String(o.label||o.class||o.name)));
-                if (ball) {
-                const { cx, cy } = _center(ball, cap.width, cap.height);
-                if (Number.isFinite(cx) && Number.isFinite(cy)) {
-                    const t = (window.__ballTrail ||= []);
-                    t.push({ x: cx, y: cy, t: performance.now() });
-                    if (t.length > 180) t.splice(0, t.length - 180);
-                    window.__ballTrailTs = performance.now();
-                    window.BALL_TRACKER_ENABLED = true;
+            function _center(o, W, H) {
+                let x = o.x ?? o.left ?? o.box?.x ?? o.bbox?.x, y = o.y ?? o.top ?? o.box?.y ?? o.bbox?.y;
+                let w = o.w ?? o.width ?? o.box?.w ?? o.bbox?.w, h = o.h ?? o.height ?? o.box?.h ?? o.bbox?.h;
+                if (o.right != null && o.left != null && o.bottom != null && o.top != null) { x = o.left; y = o.top; w = o.right - o.left; h = o.bottom - o.top; }
+                if (Array.isArray(o.bbox) && o.bbox.length === 4) {
+                    const [a, b, c, d] = o.bbox;
+                    if (c <= 1 && d <= 1) { x = a * W; y = b * H; w = c * W; h = d * H; }
+                    else if (c > a && d > b) { x = a; y = b; w = c - a; h = d - b; }
+                    else { x = a; y = b; w = c; h = d; }
                 }
-                }
-            } catch {}
+                if (w <= 1 && h <= 1 && x <= 1 && y <= 1) { x *= W; y *= H; w *= W; h *= H; }
+                const cx = (o.cx ?? o.centerX ?? (x + w / 2)), cy = (o.cy ?? o.centerY ?? (y + h / 2));
+                return { cx, cy };
+            }
+
+            async function onFrame() {
+                // start recorder and composite what you already draw
+                if (!started) { recHandle = startCompositeRecorder(ui.exportCan, { fps: 30, timesliceMs: 200 }); started = true; }
+                compositeFrame();
+
+                // copy the RAW VIDEO frame (not the overlay) into the capture canvas
+                const v = ui.video;
+                cap.width = v.videoWidth || ui.overlay.width || 1280;
+                cap.height = v.videoHeight || ui.overlay.height || 720;
+                try { capCtx.drawImage(v, 0, 0, cap.width, cap.height); } catch { }
+
+                // detect ball and push one trail point now
+                try {
+                    const raw = await window.sendFrameToDetect?.(cap, 1);
+                    const arr = Array.isArray(raw) ? raw : (raw?.objects || raw?.detections || []);
+                    const ball = arr.find(o => /(basket|ball)/i.test(String(o.label || o.class || o.name)));
+                    if (ball) {
+                        const { cx, cy } = _center(ball, cap.width, cap.height);
+                        if (Number.isFinite(cx) && Number.isFinite(cy)) {
+                            const t = (window.__ballTrail ||= []);
+                            t.push({ x: cx, y: cy, t: performance.now() });
+                            if (t.length > 180) t.splice(0, t.length - 180);
+                            window.__ballTrailTs = performance.now();
+                            window.BALL_TRACKER_ENABLED = true;
+                        }
+                    }
+                } catch { }
             }
 
             // clean stale handler then attach the real one for this run
-            try { window.removeEventListener('analyzer:frame-done', window.__onFrameOnce); } catch {}
+            try { window.removeEventListener('analyzer:frame-done', window.__onFrameOnce); } catch { }
             window.__onFrameOnce = onFrame;
             window.addEventListener('analyzer:frame-done', onFrame);
 

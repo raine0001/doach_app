@@ -833,6 +833,75 @@ window.__finalizedShotIds ||= new Set();
 // Record a finalized shot summary (UI only, no server)
 window.recordShotSummary = function recordShotSummary(summary) {
     summary = normalizeShotScore(summary);
+    const originalWeighted = Number.isFinite(summary?.weightedScore) ? summary.weightedScore : null;
+    const debugKey = Number.isFinite(summary?.shotId) ? String(summary.shotId) : null;
+    const debugSnapshot = debugKey && window.__POSE_SCORE_DEBUG?.get?.(debugKey);
+    if (debugSnapshot) summary.__poseDebug = debugSnapshot;
+    delete summary.trailWeightedScore;
+
+    if (!summary?.poseSnapshot && Number.isFinite(summary?.shotId)) {
+        let snapFromStore = null;
+        if (window.__poseIsFreshFor?.(summary.shotId)) {
+            try { snapFromStore = window.poseStore?.get(summary.shotId) || null; } catch { }
+        }
+        if (snapFromStore) summary.poseSnapshot = snapFromStore;
+    }
+
+    try {
+        if (typeof window.computePoseScoreFallback === 'function' && summary?.poseSnapshot) {
+            const baseWeighted = null;
+            const weightedSource = summary?.weightedScoreSource && typeof summary.weightedScoreSource === 'string'
+                ? summary.weightedScoreSource
+                : null;
+            const recomputed = window.computePoseScoreFallback(
+                summary.poseSnapshot,
+                baseWeighted,
+                summary?.shotId ?? summary?.id ?? null,
+                weightedSource ? { weightedSource } : {}
+            );
+            if (Number.isFinite(recomputed)) {
+                summary.poseScore = recomputed;
+                summary.poseScoreSource = summary.poseScoreSource || 'pose-recalc';
+                summary.weightedScore = Math.max(0, Math.min(1, recomputed / 100));
+                summary.weightedScoreSource = 'pose-recalc';
+                const updatedDebug = debugKey && window.__POSE_SCORE_DEBUG?.get?.(debugKey);
+                if (updatedDebug) summary.__poseDebug = updatedDebug;
+                if (window.SCORE_DEBUG === true) {
+                    console.log('[score:recordShotSummary:recomputed]', {
+                        shotId: summary?.shotId ?? summary?.id ?? null,
+                        poseScore: summary.poseScore,
+                        poseScoreSource: summary.poseScoreSource,
+                        weightedScore: summary.weightedScore,
+                        weightedScoreSource: summary.weightedScoreSource,
+                        baseWeighted,
+                        weightedSource
+                    });
+                }
+            }
+        }
+    } catch (err) {
+        console.warn('[score:recordShotSummary] recompute failed', err);
+    }
+
+    if (!summary?.poseSnapshot && window.SCORE_DEBUG === true) {
+        console.warn('[score:recordShotSummary] no snapshot; skip pose-recalc', { shotId: summary?.shotId ?? null });
+    }
+
+    if (!Number.isFinite(summary.poseScore)) {
+        const fallbackScore = deriveShotScore(summary);
+        if (Number.isFinite(fallbackScore)) {
+            summary.poseScore = fallbackScore;
+            summary.poseScoreSource = summary.poseScoreSource || 'fallback-derive';
+        }
+    }
+    if (!Number.isFinite(summary.weightedScore) && Number.isFinite(summary.poseScore)) {
+        summary.weightedScore = Math.max(0, Math.min(1, summary.poseScore / 100));
+        summary.weightedScoreSource = summary.weightedScoreSource || 'fallback-derive';
+    }
+    if (!summary.__poseDebug && debugKey) {
+        const fallbackDebug = window.__POSE_SCORE_DEBUG?.get?.(debugKey);
+        if (fallbackDebug) summary.__poseDebug = fallbackDebug;
+    }
     try {
         const derived = deriveShotScore(summary);
         const shotId = summary?.shotId ?? summary?.id ?? null;
@@ -841,12 +910,15 @@ window.recordShotSummary = function recordShotSummary(summary) {
             shotId,
             idx: idxDbg,
             poseScore: summary?.poseScore ?? null,
+            poseScoreSource: summary?.poseScoreSource ?? null,
             weightedScore: summary?.weightedScore ?? summary?.weightScore ?? null,
-            derived
+            weightedScoreSource: summary?.weightedScoreSource ?? null,
+            derived,
+            poseDebug: summary.__poseDebug || null
         };
         if (summary?.arcmm?.summary?.poseScore != null) dbg.arcmmPose = summary.arcmm.summary.poseScore;
         if (summary?.data?.weightedScore != null) dbg.dataWeighted = summary.data.weightedScore;
-        console.log('[score:recordShotSummary]', dbg, summary);
+        console.log('[score:recordShotSummary]', { ...dbg, poseDebug: summary.__poseDebug || null }, summary);
     } catch (err) {
         console.warn('[score:recordShotSummary] failed to inspect summary', err);
     }
@@ -865,9 +937,16 @@ window.recordShotSummary = function recordShotSummary(summary) {
     if (window.__lastShotKey === key) {
         const idxForKey = Number.isFinite(sid) && sid > 0 ? sid - 1 : -1;
         const existingForKey = idxForKey >= 0 ? list[idxForKey] : null;
-        const hasExistingScore = Number.isFinite(existingForKey?.poseScore) || Number.isFinite(existingForKey?.weightedScore);
-        const incomingScore = Number.isFinite(summary?.poseScore) || Number.isFinite(summary?.weightedScore);
-        if (!incomingScore || hasExistingScore) {
+        const incomingScoreVal = deriveShotScore(summary);
+        const existingScoreVal = deriveShotScore(existingForKey);
+        const addsPoseSnapshot = !!summary?.poseSnapshot && !existingForKey?.poseSnapshot;
+        const addsWeighted = Number.isFinite(summary?.weightedScore) && !Number.isFinite(existingForKey?.weightedScore);
+        const addsPoseScore = Number.isFinite(incomingScoreVal) && (
+            !Number.isFinite(existingScoreVal) ||
+            Math.abs(incomingScoreVal - existingScoreVal) >= 0.5
+        );
+        const hasNewInfo = addsPoseSnapshot || addsWeighted || addsPoseScore;
+        if (!hasNewInfo) {
             return;
         }
     }
@@ -877,61 +956,27 @@ window.recordShotSummary = function recordShotSummary(summary) {
     if (!summary.doach && window.__lastCoachText) summary.doach = window.__lastCoachText;
     if (!summary.via) summary.via = window.__lastReleaseVia || summary.via || '';
 
+    const mergeSummary = (target = {}) => {
+        Object.assign(target, summary);
+        target.pending = false;
+        if (Number.isFinite(summary.poseScore)) target.poseScore = summary.poseScore;
+        if (Number.isFinite(summary.weightedScore)) target.weightedScore = summary.weightedScore;
+        if (summary.weightedScoreSource) target.weightedScoreSource = summary.weightedScoreSource;
+        if (summary.poseScoreSource) target.poseScoreSource = summary.poseScoreSource;
+        return target;
+    };
+
     let idx = sid;
     if (Number.isFinite(idx) && idx > 0) {
         while (list.length < idx) list.push({ pending: true });
-        const existing = list[idx - 1] || {};
-        Object.assign(existing, summary, { pending: false });
-        const newScore = deriveShotScore(existing);
-        if (newScore != null) {
-            existing.poseScore = newScore;
-            summary.poseScore ??= newScore;
-        }
-       if (!Number.isFinite(summary.weightedScore)) {
-           const w = Number(existing.weightedScore);
-           if (Number.isFinite(w)) summary.weightedScore = w;
-           else if (newScore != null) summary.weightedScore = newScore / 100;
-       }
-        if (!Number.isFinite(existing.weightedScore) && Number.isFinite(summary.weightedScore)) {
-            existing.weightedScore = summary.weightedScore;
-        }
-        list[idx - 1] = existing;
+        list[idx - 1] = mergeSummary(list[idx - 1] || {});
     } else {
         const p = list.findIndex(s => s?.pending === true);
         if (p !== -1) {
-            const existing = list[p] || {};
-            Object.assign(existing, summary, { pending: false });
-            const newScore = deriveShotScore(existing);
-            if (newScore != null) {
-                existing.poseScore = newScore;
-                summary.poseScore ??= newScore;
-            }
-           if (!Number.isFinite(summary.weightedScore)) {
-               const w = Number(existing.weightedScore);
-               if (Number.isFinite(w)) summary.weightedScore = w;
-               else if (newScore != null) summary.weightedScore = newScore / 100;
-           }
-            if (!Number.isFinite(existing.weightedScore) && Number.isFinite(summary.weightedScore)) {
-                existing.weightedScore = summary.weightedScore;
-            }
-            list[p] = existing;
+            list[p] = mergeSummary(list[p] || {});
             idx = p + 1;
         } else {
-            const entry = Object.assign({ pending: false }, summary);
-            const newScore = deriveShotScore(entry);
-            if (newScore != null) {
-                entry.poseScore = newScore;
-                summary.poseScore ??= newScore;
-            }
-           if (!Number.isFinite(summary.weightedScore)) {
-               const w = Number(entry.weightedScore);
-               if (Number.isFinite(w)) summary.weightedScore = w;
-               else if (newScore != null) summary.weightedScore = newScore / 100;
-           }
-            if (!Number.isFinite(entry.weightedScore) && Number.isFinite(summary.weightedScore)) {
-                entry.weightedScore = summary.weightedScore;
-            }
-            list.push(entry);
+            list.push(mergeSummary({}));
             idx = list.length;
         }
     }
@@ -962,7 +1007,7 @@ window.recordShotSummary = function recordShotSummary(summary) {
                 shotId: merged?.shotId ?? merged?.id ?? null,
                 poseScore: merged?.poseScore ?? null,
                 weightedScore: merged?.weightedScore ?? null,
-                displayed: scoreCell.textContent
+                    displayed: scoreCell.textContent
             });
         }
 
