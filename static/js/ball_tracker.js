@@ -10,9 +10,9 @@
 
 // ---- Options (overridable at runtime) ----
 const OPT = {
-  MAX_TRAIL_POINTS: Number(window.BALL_MAX_POINTS || 220),
-  GAP_FILL_MAX:     Number(window.BALL_GAP_FILL_MAX || 4),   // fill ≤N missing frames
-  MAX_STEP:         Number(window.BALL_MAX_STEP || 58),      // px/frame clamp
+  MAX_TRAIL_POINTS: Number(window.BALL_MAX_POINTS || 360),
+  GAP_FILL_MAX:     Number(window.BALL_GAP_FILL_MAX || 6),   // fill <= N missing frames
+  MAX_STEP:         Number(window.BALL_MAX_STEP || 68),      // px/frame clamp
   KF_PROCESS_NOISE: Number(window.BALL_KF_Q || 2.0),         // process noise strength
   KF_MEASURE_NOISE: Number(window.BALL_KF_R || 4.0),         // measurement noise
   RING_RADIUS:      Number(window.BALL_RING_RADIUS || 12),   // draw radius (px)

@@ -194,7 +194,7 @@ function classifyShotOutcome(trail, hoopBox) {
   if (!H || tail.length < 3) return { made:false, reason:'Insufficient trail', metrics:{} };
 
   const apexY        = Math.min(...tail.map(p => p.y));
-  const apexAboveRim = apexY < (H.rimY - 6);
+  const apexAboveRim = apexY < (H.rimY - 3);
 
   const laneHalf     = Math.max(TUNABLES.CENTER_LANE_MIN, H.w * 0.32);
   const netTop       = H.rimY;
@@ -1217,7 +1217,7 @@ function densifyTrail(trail) {
   for (let i = 1; i < trail.length; i++) {
     const a = trail[i-1], b = trail[i];
     const gap = Math.max(0, (b.frame ?? i) - (a.frame ?? (i-1)));
-    if (gap > 1 && gap <= 4) {
+    if (gap > 1 && gap <= 6) {
       const steps = gap;
       for (let k=1; k<steps; k++) {
         const t = k/steps;
@@ -1260,7 +1260,7 @@ export function computeWeightedShotScore(trail) {
 
   // 0) apex must clear rim a little
   const apexY        = Math.min(...tail.map(p => p.y));
-  const apexAboveRim = apexY < (H.rimY - 6);
+  const apexAboveRim = apexY < (H.rimY - 3);
 
   // 1) hoop ellipse proximity
   const rx = (H.w/2) * (1 + TUNABLES.ELLIPSE_X);
@@ -1281,6 +1281,8 @@ export function computeWeightedShotScore(trail) {
   const pad   = TUNABLES.NET_PAD;
   const inNet = tail.some(p => p.x >= (nx1 - pad) && p.x <= (nx2 + pad) &&
                                p.y >= (ny1 - pad) && p.y <= (ny2 + pad));
+  const deepCenterLane = tail.some(p => Math.abs(p.x - H.cx) <= Math.max(24, H.w * 0.65) &&
+                                        p.y >= (ny1 - pad) && p.y <= (ny2 + pad + 60));
 
   // 5) thick center stripe (narrow)
   const thickCenter = thickTrailCenterHit(tail, { H, w: H.w * 0.92 });
@@ -1308,10 +1310,13 @@ export function computeWeightedShotScore(trail) {
   if (flips >= 2 && inNet) s = Math.max(s, 0.82);
   // ends clearly below rim & centered → trust make
   if (terminalBelow && terminalCenter) s = Math.max(s, 0.80);
+  if (crossed && inNet) s = Math.max(s, 0.78);
+  if (inHoop && deepCenterLane) s = Math.max(s, 0.74);
 
   // hard gates (keep your existing behavior)
-  if (!apexAboveRim) s = Math.min(s, 0.55);
+  if (!apexAboveRim) s = Math.min(s, 0.65);
   if (strongThrough) s = Math.max(s, 0.80);
+  if (!centerPass && crossed) s = Math.max(s, 0.68);
   if (!centerPass)   s = Math.min(s, 0.60);
   if (!crossed)      s = Math.min(s, 0.60);
 
