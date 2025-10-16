@@ -157,6 +157,32 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
 
   const visibility = getPoseVisibilityScore(scaledKeypoints);
   playerState.visibility = visibility;
+  let rectRaw = null;
+  {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    let count = 0;
+    for (const kp of scaledKeypoints) {
+      if (!kp) continue;
+      const x = Number(kp.x);
+      const y = Number(kp.y);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+      count += 1;
+    }
+    if (count >= 2 && Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+      rectRaw = { x: minX, y: minY, w: maxX - minX, h: maxY - minY };
+      if (rectRaw.w <= 0 || rectRaw.h <= 0) {
+        rectRaw = null;
+      } else {
+        rectRaw.area = rectRaw.w * rectRaw.h;
+        rectRaw.tiny = rectRaw.w < 22 || rectRaw.h < 36 || rectRaw.area < 1600;
+        rectRaw.small = rectRaw.w < 32 || rectRaw.h < 48 || rectRaw.area < 2600;
+      }
+    }
+  }
   const visCoreMin = Number(window.BINDING_CORE_VISIBLE_MIN ?? 2);
   const visAvgMin = Number(window.BINDING_VIS_AVG_MIN ?? 0.22);
   const visScoreMin = Number(window.BINDING_VIS_SCORE_MIN ?? 0.25);
@@ -168,12 +194,11 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
   playerState.lastFrame = frameNum;
   if (poseVisible) {
     try { window.__lastPoseKP = scaledKeypoints; window.__lastPoseTS = performance.now(); } catch (e) {}
-  } else {
-    try { window.__lastPoseKP = null; window.__lastPoseTS = 0; } catch (e) {}
   }
   try { window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaledKeypoints[16] || null; } catch (e) {}
   const historyTs = Date.now();
-  playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints, visibility, ts: historyTs, tMs: historyTs, timestamp: historyTs });
+  try { playerState.lastRectRaw = rectRaw; } catch (e) {}
+  playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints, visibility, rectRaw, ts: historyTs, tMs: historyTs, timestamp: historyTs });
   
   // Pose debug logging
   if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) {

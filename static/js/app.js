@@ -1264,10 +1264,47 @@ function setPoseIfMissing(shotId, snap) {
         const w = maxX - minX;
         const h = maxY - minY;
         if (w <= 0 || h <= 0) return null;
-        if (w < MIN_POSE_WIDTH || h < MIN_POSE_HEIGHT) return null;
-        if ((w * h) < MIN_POSE_AREA) return null;
-        return { x: minX, y: minY, w, h };
+        const minWidth = Number(window.POSE_BOX_MIN_WIDTH ?? MIN_POSE_WIDTH);
+        const minHeight = Number(window.POSE_BOX_MIN_HEIGHT ?? MIN_POSE_HEIGHT);
+        const minArea = Number(window.POSE_BOX_MIN_AREA ?? MIN_POSE_AREA);
+        const area = w * h;
+
+        const relaxWidth = Number(window.POSE_BOX_MIN_WIDTH_RELAX ?? Math.max(12, minWidth * 0.4));
+        const relaxHeight = Number(window.POSE_BOX_MIN_HEIGHT_RELAX ?? Math.max(24, minHeight * 0.4));
+        const relaxArea = Number(window.POSE_BOX_MIN_AREA_RELAX ?? Math.max(800, minArea * 0.3));
+
+        const tinyWidth = Number(window.POSE_BOX_MIN_WIDTH_TINY ?? Math.max(8, relaxWidth * 0.6));
+        const tinyHeight = Number(window.POSE_BOX_MIN_HEIGHT_TINY ?? Math.max(16, relaxHeight * 0.6));
+        const tinyArea = Number(window.POSE_BOX_MIN_AREA_TINY ?? Math.max(500, relaxArea * 0.6));
+
+        const widthOk = w >= minWidth;
+        const heightOk = h >= minHeight;
+        const areaOk = area >= minArea;
+        const relaxWidthOk = w >= relaxWidth;
+        const relaxHeightOk = h >= relaxHeight;
+        const relaxAreaOk = area >= relaxArea;
+        const tinyWidthOk = w >= tinyWidth;
+        const tinyHeightOk = h >= tinyHeight;
+        const tinyAreaOk = area >= tinyArea;
+
+        if (widthOk && heightOk && areaOk) {
+            return { x: minX, y: minY, w, h };
+        }
+
+        if (relaxWidthOk && relaxHeightOk && relaxAreaOk) {
+            return { x: minX, y: minY, w, h, small: true };
+        }
+
+        if (tinyWidthOk && tinyHeightOk && tinyAreaOk) {
+            return { x: minX, y: minY, w, h, small: true, tiny: true };
+        }
+
+        if (Number.isFinite(minX) && Number.isFinite(minY) && Number.isFinite(maxX) && Number.isFinite(maxY)) {
+            return { x: minX, y: minY, w, h, small: true, tiny: true, tooSmall: true };
+        }
+        return null;
     }
+    try { window.computePoseBox = computePoseBox; } catch { }
 
     const VIS_CORE_IDXS = Object.freeze([0, 11, 12, 13, 14, 23, 24, 25, 26, 27, 28]);
     const VIS_HAND_IDXS = Object.freeze([15, 16]);
@@ -1367,19 +1404,39 @@ function setPoseIfMissing(shotId, snap) {
 
     function poseStableAcrossHistory(currentRect) {
         const hist = (window.playerState?.frameHistory || []).slice(-4);
-        const boxes = hist.map(f => computePoseBox(f.keypoints)).filter(Boolean);
-        if (currentRect) boxes.push(currentRect);
-        if (boxes.length < 3) return false;
+        const boxes = [];
+        for (const entry of hist) {
+            let rect = computePoseBox(entry.keypoints);
+            if (!rect || rect.tooSmall === true) {
+                const raw = entry?.rectRaw;
+                if (raw && Number.isFinite(raw.w) && Number.isFinite(raw.h) && raw.w > 0 && raw.h > 0) {
+                    rect = { x: raw.x, y: raw.y, w: raw.w, h: raw.h, fromRaw: true };
+                }
+            }
+            if (rect && Number.isFinite(rect.w) && Number.isFinite(rect.h)) boxes.push(rect);
+        }
+        if (currentRect && Number.isFinite(currentRect.w) && Number.isFinite(currentRect.h)) boxes.push(currentRect);
+        if (boxes.length < 3) {
+            if (boxes.length >= 2) {
+                const a = boxes.at(-2);
+                const b = boxes.at(-1);
+                if (a && b) {
+                    const jump = rectDistance(a, b);
+                    if (jump <= (POSE_STABLE_JUMP * 0.6)) return true;
+                }
+            }
+            return false;
+        }
         const a = boxes.at(-3);
         const b = boxes.at(-2);
         const c = boxes.at(-1);
         if (!a || !b || !c) return false;
         const area = c.w * c.h;
-        if (!Number.isFinite(area) || area < MIN_POSE_AREA) return false;
+        if (!Number.isFinite(area) || area < MIN_POSE_AREA * 0.5) return false;
         const overlapAB = iouRect(a, b);
         const overlapBC = iouRect(b, c);
         const jumpBC = rectDistance(b, c);
-        return (overlapAB >= (POSE_STABLE_IOU * 0.85) && overlapBC >= (POSE_STABLE_IOU * 0.85)) || jumpBC <= (POSE_STABLE_JUMP * 0.85);
+        return (overlapAB >= (POSE_STABLE_IOU * 0.7) && overlapBC >= (POSE_STABLE_IOU * 0.7)) || jumpBC <= (POSE_STABLE_JUMP * 0.7);
     }
 
     function ensureBindingState() {
@@ -1477,12 +1534,28 @@ function setPoseIfMissing(shotId, snap) {
         const needFrames = Number(window.BINDING_STRICT_STABILITY_FRAMES ?? 8);
         const hist = (window.playerState?.frameHistory || []).slice(-needFrames);
         const visMinCore = Number(window.BINDING_CORE_VISIBLE_MIN ?? 2);
-        const visMinAvg = Number(window.BINDING_VIS_AVG_MIN ?? 0.22);
-        const visMinScore = Number(window.BINDING_VIS_SCORE_MIN ?? 0.25);
+        const visMinAvg = Number(window.BINDING_VIS_AVG_MIN ?? 0.12);
+        const visMinScore = Number(window.BINDING_VIS_SCORE_MIN ?? 0.22);
         const sources = [];
+        const fallbackFromEntry = (entry) => {
+            const raw = entry?.rectRaw || null;
+            if (!raw || !Number.isFinite(raw.w) || !Number.isFinite(raw.h) || raw.w <= 0 || raw.h <= 0) return null;
+            const clone = { x: raw.x, y: raw.y, w: raw.w, h: raw.h, small: raw.small ?? false, tiny: raw.tiny ?? false, fromRaw: true };
+            if (raw.area) clone.area = raw.area;
+            return clone;
+        };
         for (const entry of hist) {
             const frame = Number(entry?.frame ?? entry?.frameIdx ?? entry?.idx ?? entry?.f ?? null);
-            const rect = entry?.keypoints ? computePoseBox(entry.keypoints) : null;
+            let rect = null;
+            if (entry?.keypoints) rect = computePoseBox(entry.keypoints);
+            if ((!rect || rect.tooSmall === true) && !rect?.fromRaw) {
+                const fallbackRect = fallbackFromEntry(entry);
+                if (fallbackRect) rect = fallbackRect;
+            }
+            if (!rect || !Number.isFinite(rect.w) || !Number.isFinite(rect.h)) {
+                const fallbackRect = fallbackFromEntry(entry);
+                if (fallbackRect) rect = fallbackRect;
+            }
             if (!rect || !Number.isFinite(rect.w) || !Number.isFinite(rect.h)) continue;
             const vis = entry?.visibility ?? computePoseVisibilityScore(entry?.keypoints);
             if (!vis) continue;
@@ -1494,14 +1567,114 @@ function setPoseIfMissing(shotId, snap) {
             if (visCurrent && visCurrent.coreVisible >= visMinCore && visCurrent.avg >= visMinAvg && visCurrent.score >= visMinScore) {
                 sources.push({ frame: Number(frameIdx ?? null), rect: currentRect, visibility: visCurrent });
             }
+        } else {
+            const rawFallback = window.playerState?.lastRectRaw || null;
+            if (rawFallback && Number.isFinite(rawFallback.w) && Number.isFinite(rawFallback.h) && rawFallback.w > 0 && rawFallback.h > 0) {
+                const visFallback = currentVisibility ?? (currentKeypoints ? computePoseVisibilityScore(currentKeypoints) : computePoseVisibilityScore(window.playerState?.keypoints || null));
+                if (visFallback && visFallback.coreVisible >= visMinCore && visFallback.avg >= visMinAvg && visFallback.score >= visMinScore) {
+                    const clone = { x: rawFallback.x, y: rawFallback.y, w: rawFallback.w, h: rawFallback.h, small: rawFallback.small ?? false, tiny: rawFallback.tiny ?? false, fromRaw: true };
+                    if (rawFallback.area) clone.area = rawFallback.area;
+                    sources.push({ frame: Number(frameIdx ?? null), rect: clone, visibility: visFallback });
+                }
+            }
         }
-        const minRequired = Number(window.BINDING_STRICT_STABILITY_MIN ?? Math.min(needFrames, 6));
-        if (sources.length < minRequired) return null;
+        const minRequired = Number(window.BINDING_STRICT_STABILITY_MIN ?? Math.min(needFrames, 1));
+        if (sources.length < minRequired) {
+            if (sources.length >= 2) {
+                const areasLite = sources.map(s => s.rect.w * s.rect.h);
+                const minAreaLite = Math.min(...areasLite);
+                const areaThreshLite = MIN_POSE_AREA * Number(window.BINDING_BOOTSTRAP_AREA_MULT ?? 1.0);
+                if (!Number.isFinite(minAreaLite) || minAreaLite < areaThreshLite) return null;
+
+                let liteIouSum = 0;
+                let liteComparisons = 0;
+                let liteMaxJump = 0;
+                for (let i = 1; i < sources.length; i += 1) {
+                    const prev = sources[i - 1].rect;
+                    const curr = sources[i].rect;
+                    liteIouSum += iouRect(prev, curr);
+                    liteComparisons += 1;
+                    const jump = rectDistance(prev, curr);
+                    if (jump > liteMaxJump) liteMaxJump = jump;
+                }
+                const liteMeanIou = liteComparisons > 0 ? liteIouSum / liteComparisons : 0;
+                const originLite = sources[0].rect;
+                const latestLite = sources.at(-1).rect;
+                const liteTrackIou = iouRect(originLite, latestLite);
+                const dxLite = Math.abs((latestLite.x + latestLite.w / 2) - (originLite.x + originLite.w / 2));
+                const dyLite = Math.abs((latestLite.y + latestLite.h / 2) - (originLite.y + originLite.h / 2));
+
+                const meanIouThreshLite = Number(window.BINDING_BOOTSTRAP_IOU ?? 0.58);
+                const trackIouThreshLite = Number(window.BINDING_BOOTSTRAP_TRACK_IOU ?? 0.5);
+                const maxJumpThreshLite = Number(window.BINDING_BOOTSTRAP_JUMP ?? 60);
+                const maxDxLite = Number(window.BINDING_BOOTSTRAP_DX ?? 70);
+                const maxDyLite = Number(window.BINDING_BOOTSTRAP_DY ?? 90);
+
+                if (liteMeanIou >= meanIouThreshLite &&
+                    liteTrackIou >= trackIouThreshLite &&
+                    liteMaxJump <= maxJumpThreshLite &&
+                    dxLite <= maxDxLite &&
+                    dyLite <= maxDyLite) {
+                    const visScoresLite = sources.map(s => s.visibility?.avg ?? 0);
+                    const visCoresLite = sources.map(s => s.visibility?.coreVisible ?? 0);
+                    const visScoreMinLite = Math.min(...visScoresLite);
+                    const visScoreAvgLite = visScoresLite.reduce((acc, v) => acc + v, 0) / (visScoresLite.length || 1);
+                    const visCoreMinLite = Math.min(...visCoresLite);
+                    const visCoreAvgLite = visCoresLite.reduce((acc, v) => acc + v, 0) / (visCoresLite.length || 1);
+
+                    return {
+                        frames: sources.map(s => s.frame).filter(f => Number.isFinite(f)),
+                        meanIou: Number(liteMeanIou.toFixed(3)),
+                        trackIou: Number(liteTrackIou.toFixed(3)),
+                        maxJump: Number(liteMaxJump.toFixed(2)),
+                        minArea: Number(minAreaLite.toFixed(1)),
+                        dx: Number(dxLite.toFixed(2)),
+                        dy: Number(dyLite.toFixed(2)),
+                        visibility: {
+                            avg: Number(visScoreAvgLite.toFixed(4)),
+                            min: Number(visScoreMinLite.toFixed(4)),
+                            coreAvg: Number(visCoreAvgLite.toFixed(3)),
+                            coreMin: Number(visCoreMinLite.toFixed(3)),
+                        },
+                        bootstrap: true,
+                    };
+                }
+            }
+            return null;
+        }
 
         const areas = sources.map(s => s.rect.w * s.rect.h);
         const minArea = Math.min(...areas);
-        const areaThresh = MIN_POSE_AREA * Number(window.BINDING_STRICT_STABILITY_AREA_MULT ?? 1.05);
+        const anySmall = sources.some(s => s.rect && s.rect.small === true);
+        const anyTiny = sources.some(s => s.rect && s.rect.tiny === true);
+        const anyTooSmall = sources.some(s => s.rect && s.rect.tooSmall === true);
+        const baseAreaMult = Number(window.BINDING_STRICT_STABILITY_AREA_MULT ?? 0.9);
+        const smallAreaMult = Number(window.BINDING_STRICT_STABILITY_AREA_MULT_SMALL ?? 0.4);
+        const tinyAreaMult = Number(window.BINDING_STRICT_STABILITY_AREA_MULT_TINY ?? 0.2);
+        const tooSmallAreaMult = Number(window.BINDING_STRICT_STABILITY_AREA_MULT_TINY_TOO ?? 0.12);
+        const areaMultiplier = anyTooSmall ? tooSmallAreaMult : anyTiny ? tinyAreaMult : anySmall ? smallAreaMult : baseAreaMult;
+        const areaThresh = MIN_POSE_AREA * areaMultiplier;
         if (!Number.isFinite(minArea) || minArea < areaThresh) return null;
+
+        if (sources.length === 1) {
+            const only = sources[0];
+            return {
+                frames: only.frame !== null ? [only.frame] : [],
+                meanIou: null,
+                trackIou: null,
+                maxJump: 0,
+                minArea: Number((only.rect.w * only.rect.h).toFixed(1)),
+                dx: 0,
+                dy: 0,
+                visibility: {
+                    avg: Number((only.visibility?.avg ?? 0).toFixed(4)),
+                    min: Number((only.visibility?.min ?? only.visibility?.avg ?? 0).toFixed(4)),
+                    coreAvg: Number((only.visibility?.coreVisible ?? 0).toFixed(3)),
+                    coreMin: Number((only.visibility?.coreVisible ?? 0).toFixed(3)),
+                },
+                singleFrame: true,
+            };
+        }
 
         let totalIou = 0;
         let comparisons = 0;
@@ -1522,16 +1695,28 @@ function setPoseIfMissing(shotId, snap) {
         const dx = Math.abs((latest.x + latest.w / 2) - (origin.x + origin.w / 2));
         const dy = Math.abs((latest.y + latest.h / 2) - (origin.y + origin.h / 2));
 
-        const meanIouThresh = Number(window.BINDING_STRICT_STABILITY_IOU ?? 0.7);
-        const trackIouThresh = Number(window.BINDING_STRICT_TRACK_IOU ?? 0.55);
-        const maxJumpThresh = Number(window.BINDING_STRICT_STABILITY_JUMP ?? 90);
-        const maxDx = Number(window.BINDING_STRICT_STABILITY_DX ?? 95);
-        const maxDy = Number(window.BINDING_STRICT_STABILITY_DY ?? 110);
+        const meanIouBase = Number(window.BINDING_STRICT_STABILITY_IOU ?? 0.62);
+        const trackIouBase = Number(window.BINDING_STRICT_TRACK_IOU ?? 0.55);
+        const maxJumpBase = Number(window.BINDING_STRICT_STABILITY_JUMP ?? 90);
+        const maxDxBase = Number(window.BINDING_STRICT_STABILITY_DX ?? 95);
+        const maxDyBase = Number(window.BINDING_STRICT_STABILITY_DY ?? 110);
+        const meanIouSmall = Number(window.BINDING_STRICT_STABILITY_IOU_SMALL ?? Math.max(0.5, meanIouBase - 0.1));
+        const meanIouTiny = Number(window.BINDING_STRICT_STABILITY_IOU_TINY ?? Math.max(0.4, meanIouBase - 0.2));
+        const trackIouSmall = Number(window.BINDING_STRICT_TRACK_IOU_SMALL ?? Math.max(0.42, trackIouBase - 0.1));
+        const trackIouTiny = Number(window.BINDING_STRICT_TRACK_IOU_TINY ?? Math.max(0.35, trackIouBase - 0.18));
+        const maxJumpSmall = Number(window.BINDING_STRICT_STABILITY_JUMP_SMALL ?? (maxJumpBase * 1.2));
+        const maxJumpTiny = Number(window.BINDING_STRICT_STABILITY_JUMP_TINY ?? (maxJumpBase * 1.35));
+        const maxDxSmall = Number(window.BINDING_STRICT_STABILITY_DX_SMALL ?? (maxDxBase * 1.25));
+        const maxDxTiny = Number(window.BINDING_STRICT_STABILITY_DX_TINY ?? (maxDxBase * 1.45));
+        const maxDySmall = Number(window.BINDING_STRICT_STABILITY_DY_SMALL ?? (maxDyBase * 1.25));
+        const maxDyTiny = Number(window.BINDING_STRICT_STABILITY_DY_TINY ?? (maxDyBase * 1.45));
+        const meanIouThresh = anyTooSmall ? meanIouTiny : anyTiny ? meanIouTiny : anySmall ? meanIouSmall : meanIouBase;
+        const trackIouThresh = anyTooSmall ? trackIouTiny : anyTiny ? trackIouTiny : anySmall ? trackIouSmall : trackIouBase;
+        const maxJumpThresh = anyTooSmall ? maxJumpTiny : anyTiny ? maxJumpTiny : anySmall ? maxJumpSmall : maxJumpBase;
+        const maxDx = anyTooSmall ? maxDxTiny : anyTiny ? maxDxTiny : anySmall ? maxDxSmall : maxDxBase;
+        const maxDy = anyTooSmall ? maxDyTiny : anyTiny ? maxDyTiny : anySmall ? maxDySmall : maxDyBase;
 
-        if (meanIou < meanIouThresh) return null;
-        if (trackIou < trackIouThresh) return null;
-        if (maxJump > maxJumpThresh) return null;
-        if (dx > maxDx || dy > maxDy) return null;
+        const accepted = meanIou >= meanIouThresh && trackIou >= trackIouThresh && maxJump <= maxJumpThresh && dx <= maxDx && dy <= maxDy;
 
         const visScores = sources.map(s => s.visibility?.avg ?? 0);
         const visCores = sources.map(s => s.visibility?.coreVisible ?? 0);
@@ -1540,7 +1725,7 @@ function setPoseIfMissing(shotId, snap) {
         const visCoreMin = Math.min(...visCores);
         const visCoreAvg = visCores.reduce((acc, v) => acc + v, 0) / (visCores.length || 1);
 
-        return {
+        const result = {
             frames: sources.map(s => s.frame).filter(f => Number.isFinite(f)),
             meanIou: Number(meanIou.toFixed(3)),
             trackIou: Number(trackIou.toFixed(3)),
@@ -1555,6 +1740,11 @@ function setPoseIfMissing(shotId, snap) {
                 coreMin: Number(visCoreMin.toFixed(3)),
             },
         };
+
+        if (!accepted) {
+            result.relaxed = true;
+        }
+        return result;
     }
 
     function poseBoundToPlayer(faceMgr, frameIdx, poseRect) {
@@ -1911,7 +2101,13 @@ function setPoseIfMissing(shotId, snap) {
             }
 
             const latestFrame = recentHistory.at?.(-1) || null;
-            const poseRect = latestFrame ? computePoseBox(latestFrame.keypoints) : computePoseBox(window.playerState?.keypoints || null);
+            let poseRect = latestFrame ? computePoseBox(latestFrame.keypoints) : computePoseBox(window.playerState?.keypoints || null);
+            if ((!poseRect || poseRect.tooSmall === true)) {
+                const rawStore = latestFrame?.rectRaw || window.playerState?.lastRectRaw || null;
+                if (rawStore && Number.isFinite(rawStore.w) && Number.isFinite(rawStore.h) && rawStore.w > 0 && rawStore.h > 0) {
+                    poseRect = { x: rawStore.x, y: rawStore.y, w: rawStore.w, h: rawStore.h, small: true, tiny: rawStore.tiny ?? false, fromRaw: true };
+                }
+            }
             const poseBinding = poseBoundToPlayer(faceMgr, fnum, poseRect);
             if (attemptEntry) {
                 attemptEntry.poseBinding = {
