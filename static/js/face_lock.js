@@ -9,10 +9,10 @@ const APPEARANCE_SAMPLE_SIZE = 32;
 const APPEARANCE_EXPAND = 1.35;
 const APPEARANCE_BIN_SIZE = 4; // per channel
 const APPEARANCE_VEC_LEN = APPEARANCE_BIN_SIZE * 3;
-const APPEARANCE_MATCH_THRESH = 0.86;
-const APPEARANCE_BIND_HITS = 8;
-const APPEARANCE_DROP_MISSES = 14;
-const APPEARANCE_MAX_AGE_MS = 4500;
+const APPEARANCE_MATCH_THRESH = 0.8;
+const APPEARANCE_BIND_HITS = 6;
+const APPEARANCE_DROP_MISSES = 18;
+const APPEARANCE_MAX_AGE_MS = 6500;
 
 const noop = () => {};
 const clamp = (val, min, max) => Math.min(Math.max(val, min), max);

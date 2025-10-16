@@ -1,0 +1,36 @@
+*** Begin Patch
+*** Update File: static/js/app.js
+@@
+-    window.safeEmitRelease = function safeEmitRelease(frame, via = 'unknown', opts = {}) {
+-        const now = performance.now();
+-        const recordReject = (reason, extra = {}) => {
++    window.safeEmitRelease = function safeEmitRelease(frame, via = 'unknown', opts = {}) {
++        const now = performance.now();
++        const attemptsLog = (window.__releaseAttempts ||= []);
++        const attempt = {
++            frame: Number(frame || 0),
++            via,
++            ts: now,
++        };
++        const finalizeAttempt = (accepted, extra = {}) => {
++            if (attempt.finalized) return;
++            attempt.finalized = true;
++            attempt.accepted = !!accepted;
++            if (extra && typeof extra === 'object') Object.assign(attempt, extra);
++            attemptsLog.push(attempt);
++            if (window.DOACH_RELEASE_TRACE === true) {
++                try { console.log('[release:attempt]', attempt); } catch { }
++            }
++        };
++        const recordReject = (reason, extra = {}) => {
+             try {
+                 window.__releaseReject = {
+                     ts: Date.now(),
+                     reason,
+                     ...extra,
+                 };
+             } catch { }
++            attempt.rejectReason = reason;
++            attempt.rejectDetail = extra;
+         };
+*** End Patch

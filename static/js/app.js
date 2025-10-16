@@ -1144,6 +1144,22 @@ function setPoseIfMissing(shotId, snap) {
     const POSE_STABLE_IOU = 0.28;
     const POSE_STABLE_JUMP = 160;
     const POSE_MEMORY_MS = 1600;
+    function getVideoDimensions() {
+        try {
+            const video = document.getElementById('videoPlayer') || document.querySelector('video');
+            if (video && video.videoWidth && video.videoHeight) {
+                return { width: video.videoWidth, height: video.videoHeight };
+            }
+        } catch {}
+        try {
+            const dims = window.__videoDims || window.__lastVideoDims;
+            if (dims && Number.isFinite(dims.width) && Number.isFinite(dims.height)) {
+                return { width: dims.width, height: dims.height };
+            }
+        } catch {}
+        return { width: 1280, height: 720 };
+    }
+
     const DEFAULT_COURT_ROI = () => {
         if (typeof window.getCourtRoi === 'function') {
             try {
@@ -1153,23 +1169,42 @@ function setPoseIfMissing(shotId, snap) {
                 }
             } catch { }
         }
+        const dims = getVideoDimensions();
+        const fullFrame = { x: 0, y: 0, w: dims.width, h: dims.height };
+        const confW = Number(window.COURT_ROI_W);
+        const confH = Number(window.COURT_ROI_H);
+        const confX = Number(window.COURT_ROI_X);
+        const confY = Number(window.COURT_ROI_Y);
+        if ([confX, confY, confW, confH].every(Number.isFinite)) {
+            return {
+                x: clamp(confX, 0, dims.width),
+                y: clamp(confY, 0, dims.height),
+                w: Math.min(confW, dims.width),
+                h: Math.min(confH, dims.height),
+            };
+        }
+        if (Number.isFinite(confW) && Number.isFinite(confH)) {
+            const w = Math.min(confW, dims.width);
+            const h = Math.min(confH, dims.height);
+            const x = clamp((dims.width - w) / 2, 0, dims.width);
+            const y = clamp(dims.height - h - 40, 0, dims.height);
+            return { x, y, w, h };
+        }
         try {
             const hoop = (typeof window.getLockedHoopBox === 'function')
                 ? window.getLockedHoopBox()
                 : (window.__lockedHoopBox || null);
             if (hoop && Number.isFinite(hoop.cx) && Number.isFinite(hoop.cy)) {
-                const width = Math.max(480, Number(window.COURT_ROI_W ?? 540));
-                const height = Math.max(420, Number(window.COURT_ROI_H ?? 560));
-                const x = Number(window.COURT_ROI_X ?? (hoop.cx - width * 0.55));
-                const y = Number(window.COURT_ROI_Y ?? (hoop.cy - height * 0.35));
-                return { x, y, w: width, h: height };
+                const padX = Math.max(120, dims.width * 0.4);
+                const padY = Math.max(160, dims.height * 0.45);
+                const x = clamp(hoop.cx - padX, 0, dims.width);
+                const y = clamp(hoop.cy - padY * 0.6, 0, dims.height);
+                const w = Math.min(padX * 2, dims.width);
+                const h = Math.min(padY * 2, dims.height);
+                return { x, y, w, h };
             }
         } catch { }
-        const x = Number(window.COURT_ROI_X ?? 120);
-        const y = Number(window.COURT_ROI_Y ?? 80);
-        const w = Number(window.COURT_ROI_W ?? 660);
-        const h = Number(window.COURT_ROI_H ?? 520);
-        return { x, y, w, h };
+        return fullFrame;
     };
 
     function rectFromArray(bbox) {
@@ -1234,6 +1269,66 @@ function setPoseIfMissing(shotId, snap) {
         return { x: minX, y: minY, w, h };
     }
 
+    const VIS_CORE_IDXS = Object.freeze([0, 11, 12, 13, 14, 23, 24, 25, 26, 27, 28]);
+    const VIS_HAND_IDXS = Object.freeze([15, 16]);
+    const VIS_ALL_IDXS = Object.freeze([...new Set([...Array(33).keys(), ...VIS_CORE_IDXS, ...VIS_HAND_IDXS])]);
+
+    function computePoseVisibilityScore(keypoints) {
+        const visThresh = Number(window.BINDING_VIS_THRESH ?? 0.2);
+        const coreThresh = Number(window.BINDING_CORE_VIS_THRESH ?? visThresh);
+        const handThresh = Number(window.BINDING_HAND_VIS_THRESH ?? 0.18);
+        const anyThresh = Number(window.BINDING_ANY_VIS_THRESH ?? 0.05);
+        let total = 0;
+        let visible = 0;
+        let sum = 0;
+        let min = Infinity;
+        let max = -Infinity;
+        let coreVisible = 0;
+        let handVisible = 0;
+        let shoulderVisible = 0;
+        if (!Array.isArray(keypoints) || !keypoints.length) {
+            return { score: 0, avg: 0, visible: 0, total: 0, min: 0, max: 0, coreVisible: 0, handVisible: 0, shoulderVisible: 0, anyStrong: false };
+        }
+        const indices = VIS_ALL_IDXS.length ? VIS_ALL_IDXS : keypoints.map((_, idx) => idx);
+        for (const idx of indices) {
+            const kp = keypoints[idx];
+            if (!kp) continue;
+            const visRaw = kp.visibility ?? kp.score ?? kp.confidence ?? kp.presence;
+            const vis = Number.isFinite(visRaw) ? visRaw : Number(window.BINDING_VIS_DEFAULT ?? 0.6);
+            if (!Number.isFinite(vis)) continue;
+            total += 1;
+            sum += vis;
+            if (vis >= visThresh) visible += 1;
+            if (vis < min) min = vis;
+            if (vis > max) max = vis;
+            if (VIS_CORE_IDXS.includes(idx) && vis >= coreThresh) coreVisible += 1;
+            if (VIS_HAND_IDXS.includes(idx) && vis >= handThresh) handVisible += 1;
+            if ((idx === 11 || idx === 12) && vis >= coreThresh) shoulderVisible += 1;
+        }
+        const avg = total ? (sum / total) : 0;
+        if (!Number.isFinite(min)) min = 0;
+        if (!Number.isFinite(max)) max = 0;
+        const score = total ? (visible / total) : 0;
+        const anyStrong = Array.isArray(keypoints) && keypoints.some((kp, idx) => {
+            if (!kp) return false;
+            const vis = kp.visibility ?? kp.score ?? null;
+            return Number.isFinite(vis) && vis >= anyThresh && (VIS_CORE_IDXS.includes(idx) || VIS_HAND_IDXS.includes(idx));
+        });
+        return {
+            score: Number(score.toFixed(4)),
+            avg: Number(avg.toFixed(4)),
+            visible,
+            total,
+            min: Number(min.toFixed(4)),
+            max: Number(max.toFixed(4)),
+            coreVisible,
+            handVisible,
+            shoulderVisible,
+            anyStrong,
+        };
+    }
+    try { window.computePoseVisibilityScore = computePoseVisibilityScore; } catch { }
+
     function centerOfRect(rect) {
         return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
     }
@@ -1270,21 +1365,103 @@ function setPoseIfMissing(shotId, snap) {
         return false;
     }
 
-    function poseStableAcrossHistory() {
+    function poseStableAcrossHistory(currentRect) {
         const hist = (window.playerState?.frameHistory || []).slice(-4);
-        if (hist.length < 2) return false;
         const boxes = hist.map(f => computePoseBox(f.keypoints)).filter(Boolean);
-        if (boxes.length < 2) return false;
-        const prev = boxes.at(-2);
-        const curr = boxes.at(-1);
-        if (!prev || !curr) return false;
-        const overlap = iouRect(prev, curr);
-        const jump = rectDistance(prev, curr);
-        return overlap >= POSE_STABLE_IOU || jump <= POSE_STABLE_JUMP;
+        if (currentRect) boxes.push(currentRect);
+        if (boxes.length < 3) return false;
+        const a = boxes.at(-3);
+        const b = boxes.at(-2);
+        const c = boxes.at(-1);
+        if (!a || !b || !c) return false;
+        const area = c.w * c.h;
+        if (!Number.isFinite(area) || area < MIN_POSE_AREA) return false;
+        const overlapAB = iouRect(a, b);
+        const overlapBC = iouRect(b, c);
+        const jumpBC = rectDistance(b, c);
+        return (overlapAB >= (POSE_STABLE_IOU * 0.85) && overlapBC >= (POSE_STABLE_IOU * 0.85)) || jumpBC <= (POSE_STABLE_JUMP * 0.85);
     }
 
-    function rememberBoundPose(poseRect) {
-        try { window.__lastBoundPoseBox = { box: poseRect, ts: Date.now() }; } catch {}
+    function ensureBindingState() {
+        try {
+            if (!window.__poseBindingState || typeof window.__poseBindingState !== 'object') {
+                window.__poseBindingState = {
+                    history: [],
+                    lastSupport: null,
+                    lastPrimarySupport: null,
+                    lastPoseTs: 0,
+                    lastFrame: null,
+                    lastReset: null,
+                };
+            } else {
+                if (!Array.isArray(window.__poseBindingState.history)) window.__poseBindingState.history = [];
+                if (!window.__poseBindingState.lastReset) window.__poseBindingState.lastReset = null;
+                if (!window.__poseBindingState.lastPrimarySupport) window.__poseBindingState.lastPrimarySupport = null;
+            }
+            return window.__poseBindingState;
+        } catch {
+            const fallback = { history: [], lastSupport: null, lastPrimarySupport: null, lastPoseTs: 0, lastFrame: null, lastReset: null };
+            window.__poseBindingState = fallback;
+            return fallback;
+        }
+    }
+
+    function clearBindingState(reason = 'manual') {
+        const state = ensureBindingState();
+        state.history.length = 0;
+        state.lastSupport = null;
+        state.lastPrimarySupport = null;
+        state.lastPoseTs = 0;
+        state.lastFrame = null;
+        state.lastReset = { ts: Date.now(), reason };
+        try { window.__lastBoundPoseBox = null; } catch {}
+    }
+
+    function bindingSupportActive(opts = {}) {
+        const state = ensureBindingState();
+        const maxAgeMs = Number(opts?.maxAgeMs ?? window.BINDING_SUPPORT_MS ?? 1800);
+        const allowStability = opts?.allowStability === true;
+        const entry = allowStability ? state.lastSupport : state.lastPrimarySupport;
+        if (!entry) return null;
+        const now = Date.now();
+        if ((now - entry.ts) > maxAgeMs) return null;
+        return entry;
+    }
+
+    function rememberBoundPose(poseRect, mode = 'unknown', frameIdx = null, supportType = null, supportData = null) {
+        const now = Date.now();
+        const boxCopy = poseRect
+            ? { x: poseRect.x, y: poseRect.y, w: poseRect.w, h: poseRect.h }
+            : null;
+        try { window.__lastBoundPoseBox = { box: boxCopy, ts: now }; } catch {}
+
+        const state = ensureBindingState();
+        if (boxCopy) {
+            state.history.push({
+                ts: now,
+                frame: frameIdx,
+                rect: boxCopy,
+                mode,
+                supportType: supportType || null,
+                visibility: supportData?.visibility || null,
+            });
+            const maxEntries = Number(window.BINDING_HISTORY_MAX ?? 36);
+            if (state.history.length > maxEntries) state.history.splice(0, state.history.length - maxEntries);
+        }
+        state.lastPoseTs = now;
+        state.lastFrame = frameIdx ?? state.lastFrame ?? null;
+
+        if (supportType) {
+            const entry = {
+                ts: now,
+                type: supportType,
+                frame: frameIdx ?? null,
+                mode,
+                data: supportData || null,
+            };
+            state.lastSupport = entry;
+            if (supportType !== 'stability') state.lastPrimarySupport = entry;
+        }
     }
 
     function poseMatchesRecentBound(poseRect) {
@@ -1296,49 +1473,336 @@ function setPoseIfMissing(shotId, snap) {
         return overlap >= 0.2 || jump <= POSE_STABLE_JUMP;
     }
 
+    function strongStabilityEvidence(currentRect, frameIdx, currentVisibility = null, currentKeypoints = null) {
+        const needFrames = Number(window.BINDING_STRICT_STABILITY_FRAMES ?? 8);
+        const hist = (window.playerState?.frameHistory || []).slice(-needFrames);
+        const visMinCore = Number(window.BINDING_CORE_VISIBLE_MIN ?? 2);
+        const visMinAvg = Number(window.BINDING_VIS_AVG_MIN ?? 0.22);
+        const visMinScore = Number(window.BINDING_VIS_SCORE_MIN ?? 0.25);
+        const sources = [];
+        for (const entry of hist) {
+            const frame = Number(entry?.frame ?? entry?.frameIdx ?? entry?.idx ?? entry?.f ?? null);
+            const rect = entry?.keypoints ? computePoseBox(entry.keypoints) : null;
+            if (!rect || !Number.isFinite(rect.w) || !Number.isFinite(rect.h)) continue;
+            const vis = entry?.visibility ?? computePoseVisibilityScore(entry?.keypoints);
+            if (!vis) continue;
+            if (vis.coreVisible < visMinCore || vis.avg < visMinAvg || vis.score < visMinScore) continue;
+            sources.push({ frame, rect, visibility: vis });
+        }
+        if (currentRect && Number.isFinite(currentRect.w) && Number.isFinite(currentRect.h)) {
+            const visCurrent = currentVisibility ?? (currentKeypoints ? computePoseVisibilityScore(currentKeypoints) : computePoseVisibilityScore(window.playerState?.keypoints || null));
+            if (visCurrent && visCurrent.coreVisible >= visMinCore && visCurrent.avg >= visMinAvg && visCurrent.score >= visMinScore) {
+                sources.push({ frame: Number(frameIdx ?? null), rect: currentRect, visibility: visCurrent });
+            }
+        }
+        const minRequired = Number(window.BINDING_STRICT_STABILITY_MIN ?? Math.min(needFrames, 6));
+        if (sources.length < minRequired) return null;
+
+        const areas = sources.map(s => s.rect.w * s.rect.h);
+        const minArea = Math.min(...areas);
+        const areaThresh = MIN_POSE_AREA * Number(window.BINDING_STRICT_STABILITY_AREA_MULT ?? 1.05);
+        if (!Number.isFinite(minArea) || minArea < areaThresh) return null;
+
+        let totalIou = 0;
+        let comparisons = 0;
+        let maxJump = 0;
+        for (let i = 1; i < sources.length; i += 1) {
+            const prev = sources[i - 1].rect;
+            const curr = sources[i].rect;
+            totalIou += iouRect(prev, curr);
+            comparisons += 1;
+            const jump = rectDistance(prev, curr);
+            if (jump > maxJump) maxJump = jump;
+        }
+        const meanIou = comparisons > 0 ? totalIou / comparisons : 0;
+
+        const origin = sources[0].rect;
+        const latest = sources.at(-1).rect;
+        const trackIou = iouRect(origin, latest);
+        const dx = Math.abs((latest.x + latest.w / 2) - (origin.x + origin.w / 2));
+        const dy = Math.abs((latest.y + latest.h / 2) - (origin.y + origin.h / 2));
+
+        const meanIouThresh = Number(window.BINDING_STRICT_STABILITY_IOU ?? 0.7);
+        const trackIouThresh = Number(window.BINDING_STRICT_TRACK_IOU ?? 0.55);
+        const maxJumpThresh = Number(window.BINDING_STRICT_STABILITY_JUMP ?? 90);
+        const maxDx = Number(window.BINDING_STRICT_STABILITY_DX ?? 95);
+        const maxDy = Number(window.BINDING_STRICT_STABILITY_DY ?? 110);
+
+        if (meanIou < meanIouThresh) return null;
+        if (trackIou < trackIouThresh) return null;
+        if (maxJump > maxJumpThresh) return null;
+        if (dx > maxDx || dy > maxDy) return null;
+
+        const visScores = sources.map(s => s.visibility?.avg ?? 0);
+        const visCores = sources.map(s => s.visibility?.coreVisible ?? 0);
+        const visScoreMin = Math.min(...visScores);
+        const visScoreAvg = visScores.reduce((acc, v) => acc + v, 0) / (visScores.length || 1);
+        const visCoreMin = Math.min(...visCores);
+        const visCoreAvg = visCores.reduce((acc, v) => acc + v, 0) / (visCores.length || 1);
+
+        return {
+            frames: sources.map(s => s.frame).filter(f => Number.isFinite(f)),
+            meanIou: Number(meanIou.toFixed(3)),
+            trackIou: Number(trackIou.toFixed(3)),
+            maxJump: Number(maxJump.toFixed(2)),
+            minArea: Number(minArea.toFixed(1)),
+            dx: Number(dx.toFixed(2)),
+            dy: Number(dy.toFixed(2)),
+            visibility: {
+                avg: Number(visScoreAvg.toFixed(4)),
+                min: Number(visScoreMin.toFixed(4)),
+                coreAvg: Number(visCoreAvg.toFixed(3)),
+                coreMin: Number(visCoreMin.toFixed(3)),
+            },
+        };
+    }
+
     function poseBoundToPlayer(faceMgr, frameIdx, poseRect) {
         if (!poseRect) return { ok: false, mode: 'pose-missing' };
+        const state = ensureBindingState();
         const roi = DEFAULT_COURT_ROI();
         if (roi) {
             const cx = poseRect.x + poseRect.w / 2;
             const cy = poseRect.y + poseRect.h / 2;
             if (!(cx >= roi.x && cx <= roi.x + roi.w && cy >= roi.y && cy <= roi.y + roi.h)) {
+                clearBindingState('outside-roi');
                 return { ok: false, mode: 'outside-roi' };
             }
         }
         if (faceMgr?.requiresLock?.() && faceMgr.lockSatisfied?.()) {
-            rememberBoundPose(poseRect);
-            return { ok: true, mode: 'face-lock', score: 1 };
+            rememberBoundPose(poseRect, 'face-lock', frameIdx, 'face-lock', { trackId: faceMgr.lock?.trackId ?? null, visibility });
+            return { ok: true, mode: 'face-lock', score: 1, support: 'face-lock', staleBypass, visibility };
         }
         const history = window.playerState?.frameHistory || [];
-        if (!history.length) return { ok: false, mode: 'no-history' };
+        if (!history.length) return { ok: false, mode: 'no-history', staleBypass };
+        const latestFrame = history.at?.(-1) || history[history.length - 1] || null;
+        const latestKeypoints = latestFrame?.keypoints || window.playerState?.keypoints || null;
+        const visibility = latestFrame?.visibility ?? computePoseVisibilityScore(latestKeypoints);
+        const minCoreVisible = Number(window.BINDING_CORE_VISIBLE_MIN ?? 2);
+        const minAvgVisibility = Number(window.BINDING_VIS_AVG_MIN ?? 0.22);
+        const minScoreVisibility = Number(window.BINDING_VIS_SCORE_MIN ?? 0.25);
+        if (!visibility || visibility.coreVisible < minCoreVisible || visibility.avg < minAvgVisibility || visibility.score < minScoreVisibility) {
+            clearBindingState('visibility-low');
+            return { ok: false, mode: 'visibility-low', visibility, staleBypass };
+        }
         const lastPoseUpdate = Number(window.__lastPoseUpdateMs);
-        if (!Number.isFinite(lastPoseUpdate) || (performance.now() - lastPoseUpdate) > POSE_FRESH_MS) {
-            return { ok: false, mode: 'pose-stale' };
+        const nowPerf = performance.now();
+        let poseStale = !Number.isFinite(lastPoseUpdate) || (nowPerf - lastPoseUpdate) > POSE_FRESH_MS;
+        let staleBypass = null;
+        if (poseStale) {
+            const STALE_FRAME_TOL = Number(window.BINDING_STALE_FRAME_TOL ?? 4);
+            const STALE_TIME_TOL = Number(window.BINDING_STALE_TIME_TOL ?? 1400);
+            const latestHistory = history.at?.(-1) || history[history.length - 1] || null;
+            const historyFrame = Number(latestHistory?.frame ?? latestHistory?.frameIdx ?? latestHistory?.idx ?? latestHistory?.f ?? null);
+            if (poseStale && Number.isFinite(historyFrame) && Number.isFinite(frameIdx)) {
+                const frameDiff = Math.abs(historyFrame - frameIdx);
+                if (frameDiff <= STALE_FRAME_TOL) {
+                    poseStale = false;
+                    staleBypass = { type: 'history-frame', frameDiff };
+                }
+            }
+            if (poseStale && latestHistory) {
+                const tsCandidates = [
+                    latestHistory?.tMs,
+                    latestHistory?.ts,
+                    latestHistory?.timestamp,
+                    latestHistory?.timeMs,
+                    latestHistory?.time,
+                    latestHistory?.ms,
+                ];
+                const historyTs = tsCandidates.map(Number).find(Number.isFinite);
+                if (Number.isFinite(historyTs)) {
+                    const nowMs = Date.now();
+                    const delta = Math.abs(nowMs - historyTs);
+                    if (delta <= STALE_TIME_TOL) {
+                        poseStale = false;
+                        staleBypass = { type: 'history-ts', deltaMs: delta };
+                    }
+                }
+            }
+            if (poseStale) {
+                const stateLastTs = Number(state?.lastPoseTs ?? 0);
+                if (stateLastTs) {
+                    const delta = Date.now() - stateLastTs;
+                    if (delta <= STALE_TIME_TOL) {
+                        poseStale = false;
+                        staleBypass = { type: 'state-ts', deltaMs: delta };
+                    }
+                }
+            }
+            if (poseStale && latestHistory?.keypoints) {
+                const histRect = computePoseBox(latestHistory.keypoints);
+                if (histRect && Number.isFinite(histRect.w) && Number.isFinite(histRect.h)) {
+                    const area = histRect.w * histRect.h;
+                    if (area >= MIN_POSE_AREA * 1.1) { // ensure meaningful pose size
+                        poseStale = false;
+                        staleBypass = { type: 'history-area', area: Number(area.toFixed(1)) };
+                    }
+                }
+            }
+        }
+        if (poseStale) {
+            return { ok: false, mode: 'pose-stale', staleBypass };
+        }
+        if (state) {
+            try {
+                state.lastPoseTs = Date.now();
+                state.lastFrame = frameIdx ?? state.lastFrame ?? null;
+                if (staleBypass) state.lastSupport = state.lastSupport || null; // maintain shape
+            } catch { }
         }
         if (poseAlignsWithLock(poseRect)) {
-            rememberBoundPose(poseRect);
-            return { ok: true, mode: 'lock-overlap', score: 1 };
+            rememberBoundPose(poseRect, 'lock-overlap', frameIdx, 'lock', { trackId: window.__playerLock?.trackId ?? null, visibility });
+            return { ok: true, mode: 'lock-overlap', score: 1, support: 'lock', staleBypass, visibility };
         }
-        if (poseAlignsWithDetections(poseRect, frameIdx)) {
-            rememberBoundPose(poseRect);
-            return { ok: true, mode: 'detect-overlap', score: 1 };
+        const detectOverlap = poseAlignsWithDetections(poseRect, frameIdx);
+        if (detectOverlap) {
+            rememberBoundPose(poseRect, 'detect-overlap', frameIdx, 'detection', { visibility });
+            return { ok: true, mode: 'detect-overlap', score: 1, support: 'detection', staleBypass, visibility };
         }
         const appearance = faceMgr?.matchAppearance?.(poseRect);
-        if (appearance?.bound) {
-            rememberBoundPose(poseRect);
-            return { ok: true, mode: 'appearance', score: appearance.score ?? 1 };
+        const strictThresh = Number(window.APPEARANCE_STRICT_THRESH ?? 0.77);
+        const guardThresh = Number(window.APPEARANCE_GUARD_THRESH ?? 0.72);
+        const stabilityThresh = Number(window.APPEARANCE_STABILITY_THRESH ?? (guardThresh - 0.07));
+        const appearanceScore = appearance?.score ?? 0;
+        const appearanceBound = appearance?.bound === true;
+        const softAppearance = !appearanceBound && appearanceScore >= guardThresh;
+        const stabilityAppearance = !appearanceBound && appearanceScore >= stabilityThresh;
+        const strongAppearance = appearanceBound && appearanceScore >= strictThresh;
+        if (strongAppearance) {
+            rememberBoundPose(poseRect, 'appearance', frameIdx, 'appearance', { score: appearanceScore, visibility });
+            return { ok: true, mode: 'appearance', score: appearanceScore, support: 'appearance', staleBypass, visibility };
         }
-        if (poseStableAcrossHistory() || poseMatchesRecentBound(poseRect)) {
-            rememberBoundPose(poseRect);
-            return { ok: true, mode: 'pose-stable', score: appearance?.score ?? 0 };
+        const stable = poseStableAcrossHistory(poseRect);
+        const matchesRecent = poseMatchesRecentBound(poseRect);
+        const primarySupportEntry = bindingSupportActive();
+        const supportActive = !!primarySupportEntry;
+        const stabilityEvidence = strongStabilityEvidence(poseRect, frameIdx, visibility, latestKeypoints);
+        const stabilityFallbackFrames = Number(window.BINDING_STABILITY_FRAMES ?? 8);
+        const stableHistoryReady = Array.isArray(history) && history.length >= stabilityFallbackFrames;
+        const stabilitySupport = stable && (appearanceBound || softAppearance || stabilityAppearance || supportActive || stabilityEvidence);
+        if (stabilitySupport) {
+            const supportType = appearanceBound
+                ? 'appearance'
+                : (softAppearance ? 'appearance-soft'
+                    : (stabilityAppearance ? 'appearance-lite'
+                        : (supportActive ? (primarySupportEntry.type || 'support-history')
+                            : (stabilityEvidence ? 'stability-locked' : 'stability'))));
+            rememberBoundPose(poseRect, 'pose-stable', frameIdx, supportType, { score: appearanceScore, stabilityEvidence, visibility });
+            return {
+                ok: true,
+                mode: 'pose-stable',
+                score: appearanceScore,
+                support: supportType,
+                stable: true,
+                stableHistoryReady,
+                softAppearance,
+                stabilityAppearance,
+                appearanceBound,
+                stabilityEvidence,
+                visibility,
+                staleBypass,
+            };
         }
-        return { ok: false, mode: 'unbound', score: appearance?.score ?? 0 };
+        const continuationSupport = matchesRecent && (appearanceBound || softAppearance || stabilityAppearance || supportActive || stabilityEvidence);
+        if (continuationSupport) {
+            let supportType = null;
+            if (appearanceBound) supportType = 'appearance';
+            else if (softAppearance) supportType = 'appearance-soft';
+            else if (stabilityAppearance) supportType = 'appearance-lite';
+            else if (supportActive) supportType = primarySupportEntry.type || 'support-history';
+            else if (stabilityEvidence) supportType = 'stability-locked';
+            else supportType = 'stability';
+            rememberBoundPose(poseRect, 'pose-continuation', frameIdx, supportType, { score: appearanceScore, stabilityEvidence, visibility });
+            return {
+                ok: true,
+                mode: 'pose-continuation',
+                score: appearanceScore,
+                support: supportType,
+                stable,
+                stableHistoryReady,
+                softAppearance,
+                stabilityAppearance,
+                appearanceBound,
+                stabilityEvidence,
+                visibility,
+                staleBypass,
+            };
+        }
+        return {
+            ok: false,
+            mode: 'unbound',
+            score: appearance?.score ?? 0,
+            support: supportActive
+                ? (primarySupportEntry.type || 'support-history')
+                : (stableHistoryReady ? 'stability-pending' : null),
+            stable,
+            stableHistoryReady,
+            softAppearance,
+            stabilityAppearance,
+            appearanceBound,
+            stabilityEvidence,
+            visibility,
+            staleBypass,
+        };
     }
 
     // The main export: safeEmitRelease(frame, via, opts)
     window.safeEmitRelease = function safeEmitRelease(frame, via = 'unknown', opts = {}) {
         const now = performance.now();
+        const startPerf = now;
+        const fnum = Number(frame || 0);
+        const startTs = Date.now();
+
+        const attemptsStore = (() => {
+            try {
+                if (!Array.isArray(window.__releaseAttempts)) window.__releaseAttempts = [];
+            } catch {
+                window.__releaseAttempts = window.__releaseAttempts || [];
+            }
+            return window.__releaseAttempts;
+        })();
+
+        let attemptEntry = {
+            frame: fnum,
+            via,
+            tsMs: startTs,
+            outcome: null,
+            reject: null,
+            gate: null,
+            poseBinding: null,
+            ball: null,
+            fallbackPoseOnly: false,
+            faceLock: null,
+            release: null,
+            poseVisibility: null,
+            cooldownSnapshot: {
+                latchUntil: Number.isFinite(window.__releaseLatchUntil) ? window.__releaseLatchUntil : null,
+                releaseLockUntil: Number(window.__RELEASE_LOCK_UNTIL ?? 0) || null,
+                lastFireMs: Number(window.__REL_LAST_FIRE_MS ?? 0) || null,
+            },
+            evalLocked: window.__releaseEvaluating === true,
+            lastReject: window.__releaseReject || null,
+            stabilityEvidence: null,
+        };
+
+        const pushAttempt = (released, extra = {}) => {
+            if (!attemptEntry) return released;
+            const entry = {
+                ...attemptEntry,
+                ...extra,
+                outcome: released ? 'released' : 'rejected',
+                durationMs: Number((performance.now() - startPerf).toFixed(2)),
+            };
+            attemptsStore.push(entry);
+            if (attemptsStore.length > 250) attemptsStore.splice(0, attemptsStore.length - 250);
+            if (window.DOACH_RELEASE_TRACE === true) {
+                try { console.log('[release:test]', entry); } catch { }
+            }
+            attemptEntry = null;
+            return released;
+        };
+
         const recordReject = (reason, extra = {}) => {
             try {
                 window.__releaseReject = {
@@ -1347,55 +1811,78 @@ function setPoseIfMissing(shotId, snap) {
                     ...extra,
                 };
             } catch { }
+            if (attemptEntry) {
+                attemptEntry.reject = {
+                    code: reason,
+                    ...extra,
+                };
+            }
+        };
+
+        const rejectAndReturn = (reason, extra = {}) => {
+            recordReject(reason, extra);
+            return pushAttempt(false);
         };
 
         if (window.__releaseEvaluating === true) {
-            recordReject('COOLDOWN_ACTIVE', { reason: 'eval-lock' });
-            return false;
+            return rejectAndReturn('COOLDOWN_ACTIVE', { reason: 'eval-lock' });
         }
         window.__releaseEvaluating = true;
+        if (attemptEntry) {
+            attemptEntry.evalLocked = false;
+            attemptEntry.evalAcquiredMs = Date.now();
+        }
 
         try {
-            const fnum = Number(frame || 0);
 
             if (Number.isFinite(window.__releaseLatchUntil) && now < window.__releaseLatchUntil) {
-                recordReject('COOLDOWN_ACTIVE', { reason: 'time-latch', remainingMs: window.__releaseLatchUntil - now });
-                return false;
+                if (attemptEntry?.cooldownSnapshot) {
+                    attemptEntry.cooldownSnapshot.latchRemainingMs = window.__releaseLatchUntil - now;
+                }
+                return rejectAndReturn('COOLDOWN_ACTIVE', { reason: 'time-latch', remainingMs: window.__releaseLatchUntil - now });
             }
 
             if (Number.isFinite(window.__LAST_FIRED_FRAME) &&
                 Math.abs(fnum - window.__LAST_FIRED_FRAME) <= 2) {
-                recordReject('COOLDOWN_ACTIVE', { reason: 'frame-lock', frame: fnum });
-                return false;
+                return rejectAndReturn('COOLDOWN_ACTIVE', { reason: 'frame-lock', frame: fnum });
             }
 
             const cooldownUntil = Number(window.__RELEASE_LOCK_UNTIL || 0);
             if (cooldownUntil && now < cooldownUntil) {
-                recordReject('COOLDOWN_ACTIVE', { remainingMs: cooldownUntil - now });
-                return false;
+                if (attemptEntry?.cooldownSnapshot) {
+                    attemptEntry.cooldownSnapshot.releaseLockRemainingMs = cooldownUntil - now;
+                }
+                return rejectAndReturn('COOLDOWN_ACTIVE', { remainingMs: cooldownUntil - now });
             }
 
             const hoopBox = (window.getLockedHoopBox?.()) || (typeof getLockedHoopBox === 'function' ? getLockedHoopBox() : null);
             if (!hoopBox) {
-                recordReject('BLOCKED_WRONG_RIM_ROI', { hoopLocked: false });
-                return false;
+                return rejectAndReturn('BLOCKED_WRONG_RIM_ROI', { hoopLocked: false });
             }
 
             const faceMgr = window.FaceLock || window.faceLockManager || null;
-            if (faceMgr?.requiresLock?.()) {
-                const locked = faceMgr.lockSatisfied?.();
-                if (!locked) {
-                    faceMgr.notifyLockNeeded?.('release_block');
-                    recordReject('TRACK_NOT_BOUND', { reason: 'face-lock', via });
-                    return false;
-                }
+            const requiresLock = !!faceMgr?.requiresLock?.();
+            const lockSatisfied = requiresLock ? !!faceMgr.lockSatisfied?.() : true;
+            if (attemptEntry) {
+                attemptEntry.faceLock = {
+                    required: requiresLock,
+                    satisfied: lockSatisfied,
+                    trackId: faceMgr?.lock?.trackId ?? faceMgr?.current?.trackId ?? null,
+                };
+            }
+            if (requiresLock && !lockSatisfied) {
+                faceMgr.notifyLockNeeded?.('release_block');
+                clearBindingState('face-lock-required');
+                return rejectAndReturn('TRACK_NOT_BOUND', { reason: 'face-lock', via });
             }
 
             const since = now - (Number(window.__REL_LAST_FIRE_MS || 0));
             const cooldownNeed = Number(window.REL_COOLDOWN_MS || 1200);
             if (since < cooldownNeed) {
-                recordReject('COOLDOWN_ACTIVE', { remainingMs: cooldownNeed - since });
-                return false;
+                if (attemptEntry?.cooldownSnapshot) {
+                    attemptEntry.cooldownSnapshot.cooldownRemainingMs = cooldownNeed - since;
+                }
+                return rejectAndReturn('COOLDOWN_ACTIVE', { remainingMs: cooldownNeed - since });
             }
 
             const recentHistory = (window.playerState?.frameHistory || []).slice(-8);
@@ -1406,10 +1893,48 @@ function setPoseIfMissing(shotId, snap) {
                     : { released: true, tests: {}, features: {}, score: null, reason: null };
             }
             if (!gateResult) gateResult = { released: true, tests: {}, features: {}, score: null, reason: null };
+            if (attemptEntry) {
+                const gateTests = gateResult?.tests && typeof gateResult.tests === 'object' ? { ...gateResult.tests } : {};
+                const gateFeatures = gateResult?.features && typeof gateResult.features === 'object' ? { ...gateResult.features } : {};
+                attemptEntry.gate = {
+                    released: !!gateResult.released,
+                    reason: gateResult.reason || null,
+                    score: gateResult.score ?? null,
+                    tests: gateTests,
+                    features: gateFeatures,
+                    bypass: !!opts?.bypassGate,
+                };
+            }
 
             if (!gateResult.released) {
-                recordReject(gateResult.reason || 'POSE_BLOCKED', { tests: gateResult.tests || {}, features: gateResult.features || {} });
-                return false;
+                return rejectAndReturn(gateResult.reason || 'POSE_BLOCKED', { tests: gateResult.tests || {}, features: gateResult.features || {} });
+            }
+
+            const latestFrame = recentHistory.at?.(-1) || null;
+            const poseRect = latestFrame ? computePoseBox(latestFrame.keypoints) : computePoseBox(window.playerState?.keypoints || null);
+            const poseBinding = poseBoundToPlayer(faceMgr, fnum, poseRect);
+            if (attemptEntry) {
+                attemptEntry.poseBinding = {
+                    ok: !!poseBinding?.ok,
+                    mode: poseBinding?.mode || null,
+                    score: poseBinding?.score ?? null,
+                    support: poseBinding?.support || null,
+                    stable: poseBinding?.stable ?? null,
+                    stableHistoryReady: poseBinding?.stableHistoryReady ?? null,
+                    softAppearance: poseBinding?.softAppearance ?? null,
+                    stabilityAppearance: poseBinding?.stabilityAppearance ?? null,
+                    appearanceBound: poseBinding?.appearanceBound ?? null,
+                    staleBypass: poseBinding?.staleBypass ?? null,
+                    visibility: poseBinding?.visibility || null,
+                    poseRect,
+                };
+                if (poseBinding?.stabilityEvidence) {
+                    attemptEntry.stabilityEvidence = poseBinding.stabilityEvidence;
+                }
+                attemptEntry.poseVisibility = poseBinding?.visibility || null;
+            }
+            if (!poseBinding?.ok) {
+                return rejectAndReturn('TRACK_NOT_BOUND', { reason: poseBinding?.mode || 'pose-unbound', poseRect, appearanceScore: poseBinding?.score ?? null, visibility: poseBinding?.visibility || null });
             }
 
             const ballCheck = (typeof window.computeBallInHand === 'function')
@@ -1417,25 +1942,27 @@ function setPoseIfMissing(shotId, snap) {
                 : { ok: true, metrics: {}, reasons: [], side: gateResult.tests?.side || null };
 
             const ballReasons = ballCheck?.reasons || [];
+            const strongBinding = !!poseBinding && ['face-lock', 'lock-overlap', 'appearance', 'pose-continuation', 'pose-stable'].includes(poseBinding.mode);
             const fallbackPoseOnly = (window.POSE_FIRST_ONLY === true)
                 && ballReasons.length
-                && ballReasons.every(r => r === 'BALL_NOT_FOUND' || r === 'HAND_KEYPOINTS_MISSING' || r === 'POSE_MISSING')
-                && Number(gateResult.score || 0) >= Number(window.REL_CFG?.scoreThresh ?? 0.75);
+                && ballReasons.every(r => r === 'BALL_NOT_FOUND' || r === 'HAND_KEYPOINTS_MISSING' || r === 'POSE_MISSING' || r === 'HAND_NOT_CLOSED')
+                && Number(gateResult.score || 0) >= Number(window.REL_CFG?.scoreThresh ?? 0.75)
+                && strongBinding;
+            if (attemptEntry) {
+                attemptEntry.ball = {
+                    ok: !!ballCheck?.ok,
+                    reasons: Array.isArray(ballReasons) ? [...ballReasons] : [],
+                    metrics: ballCheck?.metrics && typeof ballCheck.metrics === 'object' ? { ...ballCheck.metrics } : {},
+                    side: ballCheck?.side ?? null,
+                    recent: ballCheck?.metrics?.ballRecent ?? null,
+                };
+                attemptEntry.fallbackPoseOnly = !!fallbackPoseOnly;
+            }
             if (!ballCheck?.ok && !fallbackPoseOnly) {
-                recordReject('NO_ARM_NO_BALLINHAND', { reasons: ballReasons, metrics: ballCheck?.metrics || {}, side: ballCheck?.side || null });
-                return false;
+                return rejectAndReturn('NO_ARM_NO_BALLINHAND', { reasons: ballReasons, metrics: ballCheck?.metrics || {}, side: ballCheck?.side || null });
             }
             if (ballCheck.metrics?.ballRecent === false && !fallbackPoseOnly) {
-                recordReject('NO_ARM_NO_BALLINHAND', { reasons: (ballCheck?.reasons || []).concat(['BALL_STALE']), metrics: ballCheck?.metrics || {}, side: ballCheck?.side || null });
-                return false;
-            }
-
-            const latestFrame = recentHistory.at?.(-1) || null;
-            const poseRect = latestFrame ? computePoseBox(latestFrame.keypoints) : computePoseBox(window.playerState?.keypoints || null);
-            const poseBinding = poseBoundToPlayer(faceMgr, fnum, poseRect);
-            if (!poseBinding?.ok) {
-                recordReject('TRACK_NOT_BOUND', { reason: poseBinding?.mode || 'pose-unbound', poseRect, appearanceScore: poseBinding?.score ?? null });
-                return false;
+                return rejectAndReturn('NO_ARM_NO_BALLINHAND', { reasons: (ballCheck?.reasons || []).concat(['BALL_STALE']), metrics: ballCheck?.metrics || {}, side: ballCheck?.side || null });
             }
 
             window.__releaseReject = null;
@@ -1463,6 +1990,10 @@ function setPoseIfMissing(shotId, snap) {
                 blur_score_wrist: window.__preflightMetrics?.wristBlur ?? null,
                 binding: poseBinding.mode || null,
                 bindingScore: poseBinding.score ?? null,
+                poseVisibility: poseBinding.visibility || null,
+                stabilityEvidence: poseBinding.stabilityEvidence || null,
+                staleBypass: poseBinding.staleBypass || null,
+                usedBallFallback,
                 confirm: { net_flow: null, sparse_ball_bridge: null },
             };
             try { window.__lastReleaseMetrics = releaseMetrics; } catch {}
@@ -1675,7 +2206,25 @@ function setPoseIfMissing(shotId, snap) {
         try { window.__shotTrackingArmed = false; } catch { }
         try { window.armAfterArmDown?.({ sampleMs: 90, minDownFrames: 8 }); } catch { }
 
-        return true;
+        if (attemptEntry) {
+            attemptEntry.release = {
+                shotId,
+                usedBallFallback,
+                binding: poseBinding.mode || null,
+                gateScore: gateResult.score ?? null,
+                poseCaptureOk,
+                poseCaptureSource,
+                poseHistoryFrames: poseHistoryFrames,
+                ballOk: !!(ballCheck?.ok || fallbackPoseOnly),
+            };
+        }
+        return pushAttempt(true, {
+            shotId,
+            poseCaptureOk,
+            poseCaptureSource,
+            poseHistoryFrameCount: poseHistoryFrames.length,
+            usedBallFallback,
+        });
     } finally {
         window.__releaseEvaluating = false;
     }

@@ -302,6 +302,7 @@ function drawPoseMathHUD(ctx, playerState, vw, vh, sx, sy) {
                     : (explicit === true)  ? true
                     : ((window.SHOW_POSE_MATH === true) || (window.DOACH_RELEASE_TRACE === true));
     if (!wantLines && !wantHud) return;
+    if (playerState?.poseVisible === false) return;
 
     // Resolve keypoints (current or last good)
     let kps = (playerState && Array.isArray(playerState.keypoints) && playerState.keypoints.length) ? playerState.keypoints : null;

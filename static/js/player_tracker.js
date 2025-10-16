@@ -64,6 +64,51 @@ export const VIRTUAL_POINTS = {
   RIGHT_HAND: 'rightHand'
 };
 
+const VIS_CORE_POINTS = [LANDMARKS.NOSE, LANDMARKS.LEFT_SHOULDER, LANDMARKS.RIGHT_SHOULDER, LANDMARKS.LEFT_HIP, LANDMARKS.RIGHT_HIP, LANDMARKS.LEFT_KNEE, LANDMARKS.RIGHT_KNEE, LANDMARKS.LEFT_ANKLE, LANDMARKS.RIGHT_ANKLE];
+const VIS_HAND_POINTS = [LANDMARKS.LEFT_WRIST, LANDMARKS.RIGHT_WRIST];
+function fallbackPoseVisibilityScore(keypoints) {
+  if (!Array.isArray(keypoints)) {
+    return { score: 0, avg: 0, visible: 0, total: 0, min: 0, max: 0, coreVisible: 0, handVisible: 0, shoulderVisible: 0, anyStrong: false };
+  }
+  let total = 0;
+  let visible = 0;
+  let coreVisible = 0;
+  let handVisible = 0;
+  let shoulderVisible = 0;
+  let sum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+  let anyStrong = false;
+  const thresh = 0.2;
+  for (let idx = 0; idx < keypoints.length; idx += 1) {
+    const kp = keypoints[idx];
+    if (!kp) continue;
+    const visRaw = kp.visibility ?? kp.score ?? kp.presence;
+    const vis = Number.isFinite(visRaw) ? visRaw : Number(window.BINDING_VIS_DEFAULT ?? 0.6);
+    if (!Number.isFinite(vis)) continue;
+    total += 1;
+    sum += vis;
+    if (vis >= thresh) visible += 1;
+    if (vis < min) min = vis;
+    if (vis > max) max = vis;
+    if (VIS_CORE_POINTS.includes(idx) && vis >= thresh) coreVisible += 1;
+    if (VIS_HAND_POINTS.includes(idx) && vis >= (thresh - 0.05)) handVisible += 1;
+    if ((idx === LANDMARKS.LEFT_SHOULDER || idx === LANDMARKS.RIGHT_SHOULDER) && vis >= thresh) shoulderVisible += 1;
+    if (vis >= 0.05 && (VIS_CORE_POINTS.includes(idx) || VIS_HAND_POINTS.includes(idx))) anyStrong = true;
+  }
+  if (!Number.isFinite(min)) min = 0;
+  if (!Number.isFinite(max)) max = 0;
+  const avg = total ? (sum / total) : 0;
+  const score = total ? (visible / total) : 0;
+  return { score, avg, visible, total, min, max, coreVisible, handVisible, shoulderVisible, anyStrong };
+}
+function getPoseVisibilityScore(keypoints) {
+  if (typeof window.computePoseVisibilityScore === 'function') {
+    try { return window.computePoseVisibilityScore(keypoints); } catch (e) { /* ignore */ }
+  }
+  return fallbackPoseVisibilityScore(keypoints);
+}
+
 export function resetPlayerTracker() {
   playerState.keypoints = [];
   playerState.frameHistory = [];
@@ -71,6 +116,8 @@ export function resetPlayerTracker() {
   playerState.elbowHistory = [];
   playerState.jumpDetected = false;
   playerState.lastFrame = -1;
+  playerState.visibility = null;
+  playerState.poseVisible = false;
 }
 
 export function updatePlayerTracker(landmarks, __frameIdx) {
@@ -108,11 +155,25 @@ export function updatePlayerTracker(landmarks, __frameIdx) {
     try { if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) console.log('[pose:clamp-regress]', { was: __frameIdx, clampTo: frameNum, delta: df }); } catch (e) {}
   }
 
+  const visibility = getPoseVisibilityScore(scaledKeypoints);
+  playerState.visibility = visibility;
+  const visCoreMin = Number(window.BINDING_CORE_VISIBLE_MIN ?? 2);
+  const visAvgMin = Number(window.BINDING_VIS_AVG_MIN ?? 0.22);
+  const visScoreMin = Number(window.BINDING_VIS_SCORE_MIN ?? 0.25);
+  const poseVisible = !!(visibility && visibility.coreVisible >= visCoreMin && visibility.avg >= visAvgMin && visibility.score >= visScoreMin);
+  playerState.poseVisible = poseVisible;
+  try { window.__POSE_VISIBLE = poseVisible; } catch (e) {}
+
   playerState.keypoints = scaledKeypoints;
   playerState.lastFrame = frameNum;
-  try { window.__lastPoseKP = scaledKeypoints; window.__lastPoseTS = performance.now(); } catch (e) {}
+  if (poseVisible) {
+    try { window.__lastPoseKP = scaledKeypoints; window.__lastPoseTS = performance.now(); } catch (e) {}
+  } else {
+    try { window.__lastPoseKP = null; window.__lastPoseTS = 0; } catch (e) {}
+  }
   try { window.__lastPoseUpdateMs = performance.now(); window.__lastPoseWrist = scaledKeypoints[16] || null; } catch (e) {}
-  playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints });
+  const historyTs = Date.now();
+  playerState.frameHistory.push({ frame: frameNum, keypoints: scaledKeypoints, visibility, ts: historyTs, tMs: historyTs, timestamp: historyTs });
   
   // Pose debug logging
   if (window.DOACH_VERBOSE === true && window.POSE_DEBUG === true) {
