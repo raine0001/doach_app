@@ -1136,159 +1136,465 @@ function setPoseIfMissing(shotId, snap) {
 (function installReleaseCore() {
     if (window.safeEmitRelease) return;
 
+    const PERSON_LABEL_RE = /\b(player|person|athlete|human)\b/;
+    const MIN_POSE_WIDTH = 36;
+    const MIN_POSE_HEIGHT = 80;
+    const MIN_POSE_AREA = 3200;
+    const POSE_FRESH_MS = 900;
+    const POSE_STABLE_IOU = 0.28;
+    const POSE_STABLE_JUMP = 160;
+    const POSE_MEMORY_MS = 1600;
+    const DEFAULT_COURT_ROI = () => {
+        if (typeof window.getCourtRoi === 'function') {
+            try {
+                const roi = window.getCourtRoi();
+                if (roi && Number.isFinite(roi.x) && Number.isFinite(roi.y) && Number.isFinite(roi.w) && Number.isFinite(roi.h)) {
+                    return roi;
+                }
+            } catch { }
+        }
+        try {
+            const hoop = (typeof window.getLockedHoopBox === 'function')
+                ? window.getLockedHoopBox()
+                : (window.__lockedHoopBox || null);
+            if (hoop && Number.isFinite(hoop.cx) && Number.isFinite(hoop.cy)) {
+                const width = Math.max(480, Number(window.COURT_ROI_W ?? 540));
+                const height = Math.max(420, Number(window.COURT_ROI_H ?? 560));
+                const x = Number(window.COURT_ROI_X ?? (hoop.cx - width * 0.55));
+                const y = Number(window.COURT_ROI_Y ?? (hoop.cy - height * 0.35));
+                return { x, y, w: width, h: height };
+            }
+        } catch { }
+        const x = Number(window.COURT_ROI_X ?? 120);
+        const y = Number(window.COURT_ROI_Y ?? 80);
+        const w = Number(window.COURT_ROI_W ?? 660);
+        const h = Number(window.COURT_ROI_H ?? 520);
+        return { x, y, w, h };
+    };
+
+    function rectFromArray(bbox) {
+        if (!Array.isArray(bbox) || bbox.length < 4) return null;
+        const [x1, y1, x2, y2] = bbox.map(Number);
+        if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
+        const w = x2 - x1;
+        const h = y2 - y1;
+        if (w <= 0 || h <= 0) return null;
+        return { x: x1, y: y1, w, h };
+    }
+
+    function rectFromDetection(obj) {
+        if (!obj) return null;
+        if (Array.isArray(obj.box)) return rectFromArray(obj.box);
+        if (Array.isArray(obj.bbox)) return rectFromArray(obj.bbox);
+        if (Array.isArray(obj.rect)) return rectFromArray(obj.rect);
+        if (obj.x !== undefined && obj.y !== undefined && obj.w !== undefined && obj.h !== undefined) {
+            const x = Number(obj.x);
+            const y = Number(obj.y);
+            const w = Number(obj.w);
+            const h = Number(obj.h);
+            if ([x, y, w, h].every(Number.isFinite) && w > 0 && h > 0) {
+                return { x, y, w, h };
+            }
+        }
+        if (obj.cx !== undefined && obj.cy !== undefined && obj.w !== undefined && obj.h !== undefined) {
+            const cx = Number(obj.cx);
+            const cy = Number(obj.cy);
+            const w = Number(obj.w);
+            const h = Number(obj.h);
+            if ([cx, cy, w, h].every(Number.isFinite) && w > 0 && h > 0) {
+                return { x: cx - w / 2, y: cy - h / 2, w, h };
+            }
+        }
+        return null;
+    }
+
+    function computePoseBox(keypoints) {
+        if (!Array.isArray(keypoints) || keypoints.length < 5) return null;
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const kp of keypoints) {
+            if (!kp) continue;
+            const vis = kp.visibility ?? kp.score ?? 1;
+            if (vis < 0.15) continue;
+            const x = Number(kp.x);
+            const y = Number(kp.y);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+            minX = Math.min(minX, x);
+            minY = Math.min(minY, y);
+            maxX = Math.max(maxX, x);
+            maxY = Math.max(maxY, y);
+        }
+        if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+            return null;
+        }
+        const w = maxX - minX;
+        const h = maxY - minY;
+        if (w <= 0 || h <= 0) return null;
+        if (w < MIN_POSE_WIDTH || h < MIN_POSE_HEIGHT) return null;
+        if ((w * h) < MIN_POSE_AREA) return null;
+        return { x: minX, y: minY, w, h };
+    }
+
+    function centerOfRect(rect) {
+        return { x: rect.x + rect.w / 2, y: rect.y + rect.h / 2 };
+    }
+
+    function rectDistance(a, b) {
+        const ca = centerOfRect(a);
+        const cb = centerOfRect(b);
+        return Math.hypot(ca.x - cb.x, ca.y - cb.y);
+    }
+
+    function poseAlignsWithLock(poseRect) {
+        const lock = window.__playerLock;
+        if (!lock || !lock.bbox) return false;
+        const lockRect = rectFromArray(lock.bbox);
+        if (!lockRect) return false;
+        return iouRect(poseRect, lockRect) >= 0.22;
+    }
+
+    function poseAlignsWithDetections(poseRect, frameIdx) {
+        const last = window.lastDetectedFrame || {};
+        const objs = Array.isArray(last.objects) ? last.objects : [];
+        if (!objs.length) return false;
+        const frameDelta = Number.isFinite(last.__frameIdx) && Number.isFinite(frameIdx)
+            ? Math.abs(last.__frameIdx - frameIdx)
+            : 0;
+        if (frameDelta > 6) return false;
+        for (const obj of objs) {
+            const label = String(obj?.label || obj?.class || obj?.type || '').toLowerCase();
+            if (!PERSON_LABEL_RE.test(label)) continue;
+            const rect = rectFromDetection(obj);
+            if (!rect) continue;
+            if (iouRect(poseRect, rect) >= 0.18) return true;
+        }
+        return false;
+    }
+
+    function poseStableAcrossHistory() {
+        const hist = (window.playerState?.frameHistory || []).slice(-4);
+        if (hist.length < 2) return false;
+        const boxes = hist.map(f => computePoseBox(f.keypoints)).filter(Boolean);
+        if (boxes.length < 2) return false;
+        const prev = boxes.at(-2);
+        const curr = boxes.at(-1);
+        if (!prev || !curr) return false;
+        const overlap = iouRect(prev, curr);
+        const jump = rectDistance(prev, curr);
+        return overlap >= POSE_STABLE_IOU || jump <= POSE_STABLE_JUMP;
+    }
+
+    function rememberBoundPose(poseRect) {
+        try { window.__lastBoundPoseBox = { box: poseRect, ts: Date.now() }; } catch {}
+    }
+
+    function poseMatchesRecentBound(poseRect) {
+        const memo = window.__lastBoundPoseBox;
+        if (!memo || !memo.box) return false;
+        if ((Date.now() - (memo.ts || 0)) > POSE_MEMORY_MS) return false;
+        const overlap = iouRect(memo.box, poseRect);
+        const jump = rectDistance(memo.box, poseRect);
+        return overlap >= 0.2 || jump <= POSE_STABLE_JUMP;
+    }
+
+    function poseBoundToPlayer(faceMgr, frameIdx, poseRect) {
+        if (!poseRect) return { ok: false, mode: 'pose-missing' };
+        const roi = DEFAULT_COURT_ROI();
+        if (roi) {
+            const cx = poseRect.x + poseRect.w / 2;
+            const cy = poseRect.y + poseRect.h / 2;
+            if (!(cx >= roi.x && cx <= roi.x + roi.w && cy >= roi.y && cy <= roi.y + roi.h)) {
+                return { ok: false, mode: 'outside-roi' };
+            }
+        }
+        if (faceMgr?.requiresLock?.() && faceMgr.lockSatisfied?.()) {
+            rememberBoundPose(poseRect);
+            return { ok: true, mode: 'face-lock', score: 1 };
+        }
+        const history = window.playerState?.frameHistory || [];
+        if (!history.length) return { ok: false, mode: 'no-history' };
+        const lastPoseUpdate = Number(window.__lastPoseUpdateMs);
+        if (!Number.isFinite(lastPoseUpdate) || (performance.now() - lastPoseUpdate) > POSE_FRESH_MS) {
+            return { ok: false, mode: 'pose-stale' };
+        }
+        if (poseAlignsWithLock(poseRect)) {
+            rememberBoundPose(poseRect);
+            return { ok: true, mode: 'lock-overlap', score: 1 };
+        }
+        if (poseAlignsWithDetections(poseRect, frameIdx)) {
+            rememberBoundPose(poseRect);
+            return { ok: true, mode: 'detect-overlap', score: 1 };
+        }
+        const appearance = faceMgr?.matchAppearance?.(poseRect);
+        if (appearance?.bound) {
+            rememberBoundPose(poseRect);
+            return { ok: true, mode: 'appearance', score: appearance.score ?? 1 };
+        }
+        if (poseStableAcrossHistory() || poseMatchesRecentBound(poseRect)) {
+            rememberBoundPose(poseRect);
+            return { ok: true, mode: 'pose-stable', score: appearance?.score ?? 0 };
+        }
+        return { ok: false, mode: 'unbound', score: appearance?.score ?? 0 };
+    }
+
     // The main export: safeEmitRelease(frame, via, opts)
     window.safeEmitRelease = function safeEmitRelease(frame, via = 'unknown', opts = {}) {
-        // short cooldown latch
         const now = performance.now();
-        const __now = performance.now();
-        if (window.__RELEASE_LOCK_UNTIL && __now < window.__RELEASE_LOCK_UNTIL) return false;
-        {
-            const need = Number(window.REL_COOLDOWN_MS || 1200);
-            const ui = Number(window.NEXT_SHOT_UNLOCK_MS ?? 1200);
-            // lock until the longer of UI unlock or cooldown
-            window.__RELEASE_LOCK_UNTIL = __now + Math.max(need, ui);
+        const recordReject = (reason, extra = {}) => {
+            try {
+                window.__releaseReject = {
+                    ts: Date.now(),
+                    reason,
+                    ...extra,
+                };
+            } catch { }
+        };
+
+        if (window.__releaseEvaluating === true) {
+            recordReject('COOLDOWN_ACTIVE', { reason: 'eval-lock' });
+            return false;
         }
+        window.__releaseEvaluating = true;
 
-        // time latch
-        if (Number.isFinite(window.__releaseLatchUntil) && now < window.__releaseLatchUntil) return false;
-        window.__releaseLatchUntil = now + 800;
+        try {
+            const fnum = Number(frame || 0);
 
-        // frame latch
-        const fnum = Number(frame || 0);
-        if (Number.isFinite(window.__LAST_FIRED_FRAME) &&
-            Math.abs(fnum - window.__LAST_FIRED_FRAME) <= 2) return false;
-        window.__LAST_FIRED_FRAME = fnum;
-
-        // Hoop guard
-        const hoopBox = (window.getLockedHoopBox?.()) || (typeof getLockedHoopBox === 'function' ? getLockedHoopBox() : null);
-        if (!hoopBox) { console.warn('[safeEmitRelease] no hoop'); return false; }
-
-        const faceMgr = window.FaceLock || window.faceLockManager || null;
-        if (faceMgr?.requiresLock?.()) {
-            const locked = faceMgr.lockSatisfied?.();
-            if (!locked) {
-                faceMgr.notifyLockNeeded?.('release_block');
+            if (Number.isFinite(window.__releaseLatchUntil) && now < window.__releaseLatchUntil) {
+                recordReject('COOLDOWN_ACTIVE', { reason: 'time-latch', remainingMs: window.__releaseLatchUntil - now });
                 return false;
             }
-        }
 
-        // cooldown vs last fire
-        const since = now - (Number(window.__REL_LAST_FIRE_MS || 0));
-        const need = Number(window.REL_COOLDOWN_MS || 1200);
-        if (since < need) return false;
+            if (Number.isFinite(window.__LAST_FIRED_FRAME) &&
+                Math.abs(fnum - window.__LAST_FIRED_FRAME) <= 2) {
+                recordReject('COOLDOWN_ACTIVE', { reason: 'frame-lock', frame: fnum });
+                return false;
+            }
 
-        // Release gate (unless bypass)
-        if (!opts?.bypassGate) {
-            const hist = (window.playerState?.frameHistory || []).slice(-8);
-            const gate = (typeof window.releaseGate === 'function') ? window.releaseGate(hist) : { released: true, tests: {} };
-            if (!gate.released) return false;
-        }
+            const cooldownUntil = Number(window.__RELEASE_LOCK_UNTIL || 0);
+            if (cooldownUntil && now < cooldownUntil) {
+                recordReject('COOLDOWN_ACTIVE', { remainingMs: cooldownUntil - now });
+                return false;
+            }
 
-        // Capture the release snapshot from recent history (not the idle/reset pose)
-        const poseHistory = window.playerState?.frameHistory || [];
-        const poseHistoryFrames = poseHistory.slice(-12)
-            .map(f => Number.isFinite(f?.frame) ? f.frame : null)
-            .filter(f => f !== null);
-        let poseCaptureSource = 'history';
-        let poseCaptureOk = false;
-        let poseCaptureError = null;
-        let releaseSnapshot = null;
-        let canonicalSnapshot = null;
-        const gatePayload = opts?.gate || null;
+            const hoopBox = (window.getLockedHoopBox?.()) || (typeof getLockedHoopBox === 'function' ? getLockedHoopBox() : null);
+            if (!hoopBox) {
+                recordReject('BLOCKED_WRONG_RIM_ROI', { hoopLocked: false });
+                return false;
+            }
 
-        const persistReleaseMark = async (snapshot, label = via) => {
-            if (!snapshot) return false;
-            try {
-                if (!window.__SESSION_ID) {
-                    try {
-                        const started = await window.doachSession?.start?.();
-                        if (!window.__SESSION_ID && started) window.__SESSION_ID = started;
-                    } catch {
-                        console.warn('[pose:release] unable to start session for release mark', { shotId, label });
-                    }
-                }
-                if (!window.__SESSION_ID) {
-                    console.warn('[pose:release] skipping release_mark persist (no session id)', { shotId, label });
+            const faceMgr = window.FaceLock || window.faceLockManager || null;
+            if (faceMgr?.requiresLock?.()) {
+                const locked = faceMgr.lockSatisfied?.();
+                if (!locked) {
+                    faceMgr.notifyLockNeeded?.('release_block');
+                    recordReject('TRACK_NOT_BOUND', { reason: 'face-lock', via });
                     return false;
                 }
-                await fetch('/api/release_mark', {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ sessionId: window.__SESSION_ID || null, shotId, frame: fnum, tMs: Date.now(), via: label, hoop: hoopBox, poseSnapshot: snapshot, gate: gatePayload }),
-                    credentials: 'include'
-                });
-                return true;
-            } catch (err) {
-                console.warn('[pose:release] persist failed', { shotId, label, error: String(err) });
+            }
+
+            const since = now - (Number(window.__REL_LAST_FIRE_MS || 0));
+            const cooldownNeed = Number(window.REL_COOLDOWN_MS || 1200);
+            if (since < cooldownNeed) {
+                recordReject('COOLDOWN_ACTIVE', { remainingMs: cooldownNeed - since });
                 return false;
             }
-        };
-        const summarizePose = (snap) => {
-            if (!snap || typeof snap !== 'object') return null;
-            const keys = ['stanceWidthFeet', 'stanceWidth', 'stanceRatio', 'elbowExtDeg', 'armVerticalityDeg', 'torsoLeanAngle', 'kneeFlex', 'feetAngleDiff', 'headToHoopDeg', 'followThroughHoldFrames'];
-            const out = {};
-            for (const key of keys) {
-                const val = snap[key];
-                if (typeof val === 'number') out[key] = Number(val.toFixed(1));
-            }
-            return out;
-        };
-        try {
-            const lockedHoop = window.getLockedHoopBox?.() || null;   // OK if null
-            let snap = window.snapshotAtRelease?.(lockedHoop) || null;
 
-            if (!snap) {
-                poseCaptureSource = 'history-miss';
-                const kps = window.playerState?.keypoints || null;
-                snap = window.extractPoseSnapshot?.(kps, lockedHoop) || null;
-                if (snap) poseCaptureSource = 'current-keypoints';
+            const recentHistory = (window.playerState?.frameHistory || []).slice(-8);
+            let gateResult = opts?.gate || null;
+            if (!opts?.bypassGate) {
+                gateResult = (typeof window.releaseGate === 'function')
+                    ? window.releaseGate(recentHistory)
+                    : { released: true, tests: {}, features: {}, score: null, reason: null };
+            }
+            if (!gateResult) gateResult = { released: true, tests: {}, features: {}, score: null, reason: null };
+
+            if (!gateResult.released) {
+                recordReject(gateResult.reason || 'POSE_BLOCKED', { tests: gateResult.tests || {}, features: gateResult.features || {} });
+                return false;
             }
 
-            if (snap) {
-                releaseSnapshot = snap;
-                window.__LAST_POSE_SNAP = snap; // always refresh to per-shot release
-                poseCaptureOk = true;
-            } else if (poseCaptureSource === 'history') {
-                poseCaptureSource = 'empty-history';
+            const ballCheck = (typeof window.computeBallInHand === 'function')
+                ? window.computeBallInHand(window.playerState?.keypoints || null, { history: recentHistory, side: gateResult.tests?.side, balls: opts.ballCandidates, frameIdx: fnum })
+                : { ok: true, metrics: {}, reasons: [], side: gateResult.tests?.side || null };
+
+            const ballReasons = ballCheck?.reasons || [];
+            const fallbackPoseOnly = (window.POSE_FIRST_ONLY === true)
+                && ballReasons.length
+                && ballReasons.every(r => r === 'BALL_NOT_FOUND' || r === 'HAND_KEYPOINTS_MISSING' || r === 'POSE_MISSING')
+                && Number(gateResult.score || 0) >= Number(window.REL_CFG?.scoreThresh ?? 0.75);
+            if (!ballCheck?.ok && !fallbackPoseOnly) {
+                recordReject('NO_ARM_NO_BALLINHAND', { reasons: ballReasons, metrics: ballCheck?.metrics || {}, side: ballCheck?.side || null });
+                return false;
             }
-        } catch (err) {
-            poseCaptureError = err;
-            poseCaptureSource = 'error';
-        }
+            if (ballCheck.metrics?.ballRecent === false && !fallbackPoseOnly) {
+                recordReject('NO_ARM_NO_BALLINHAND', { reasons: (ballCheck?.reasons || []).concat(['BALL_STALE']), metrics: ballCheck?.metrics || {}, side: ballCheck?.side || null });
+                return false;
+            }
 
-        // Create shot record (UI) and assign identity
-        window.__REL_LAST_FIRE_MS = now;
-        const rec = window.createShot?.();
-        const shotId = rec?.id || (Number(window.__SHOT_ID || 0) || 1);
+            const latestFrame = recentHistory.at?.(-1) || null;
+            const poseRect = latestFrame ? computePoseBox(latestFrame.keypoints) : computePoseBox(window.playerState?.keypoints || null);
+            const poseBinding = poseBoundToPlayer(faceMgr, fnum, poseRect);
+            if (!poseBinding?.ok) {
+                recordReject('TRACK_NOT_BOUND', { reason: poseBinding?.mode || 'pose-unbound', poseRect, appearanceScore: poseBinding?.score ?? null });
+                return false;
+            }
 
-        if (releaseSnapshot) {
-            canonicalSnapshot = setPoseIfMissing(shotId, releaseSnapshot) || releaseSnapshot;
-            try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release', overwrite: true }); } catch { }
-            console.log('[shot:update] release snapshot set', { shotId, snapshot: summarizePose(canonicalSnapshot) });
-        }
+            window.__releaseReject = null;
+            window.__REL_LAST_FIRE_MS = now;
+            window.__RELEASE_LOCK_UNTIL = now + Math.max(cooldownNeed, Number(window.NEXT_SHOT_UNLOCK_MS ?? 1200));
+            window.__releaseLatchUntil = now + 800;
+            window.__LAST_FIRED_FRAME = fnum;
 
-        if (window.DOACH_RELEASE_TRACE === true || !poseCaptureOk) {
-            const payload = {
-                shotId,
-                frame: fnum,
-                via,
-                poseCaptureOk,
-                poseCaptureSource,
-                historyFrames: poseHistory.length,
-                historyFrameIds: poseHistoryFrames,
-                snapshot: summarizePose(releaseSnapshot)
+            const usedBallFallback = (!ballCheck.ok && fallbackPoseOnly);
+            const releaseMetrics = {
+                arm_score_at_t0: gateResult.score ?? null,
+                tests: gateResult.tests || {},
+                features: gateResult.features || {},
+                ballInHand: {
+                    ok: ballCheck.ok || usedBallFallback,
+                    metrics: ballCheck.metrics || {},
+                    reasons: ballCheck.reasons || [],
+                    checksPassed: ballCheck.checksPassed ?? null,
+                    side: ballCheck.side || null,
+                    fallbackPoseOnly: usedBallFallback,
+                },
+                gate_reason: gateResult.reason || null,
+                rim_px_width: window.__preflightMetrics?.rimPxWidth ?? null,
+                hand_visibility_rate: window.__preflightMetrics?.handVisibility ?? null,
+                blur_score_wrist: window.__preflightMetrics?.wristBlur ?? null,
+                binding: poseBinding.mode || null,
+                bindingScore: poseBinding.score ?? null,
+                confirm: { net_flow: null, sparse_ball_bridge: null },
             };
-            if (poseCaptureError) payload.poseCaptureError = String(poseCaptureError);
-            const logFn = poseCaptureOk ? console.log : console.warn;
-            try { logFn('[pose:release] capture status', JSON.stringify(payload)); } catch { logFn('[pose:release] capture status', payload); }
-        }
+            try { window.__lastReleaseMetrics = releaseMetrics; } catch {}
 
-        // Backend marker (async, best-effort)
-        persistReleaseMark(canonicalSnapshot).catch(() => { });
+            const gatePayload = {
+                score: gateResult.score ?? null,
+                tests: gateResult.tests || {},
+                reason: gateResult.reason || null,
+                features: gateResult.features || {},
+            };
 
-        // Emit release (with identity)
-        const prox = shotArcProx(hoopBox);
-        const lockTrackId = faceMgr?.lock?.trackId ?? window.__playerLock?.trackId ?? null;
-        window.dispatchEvent(new CustomEvent('shot:release', { detail: { shotId, frame: fnum, via, prox, poseApproved: !!opts.poseApproved, trackId: lockTrackId } }));
+            let releaseMetricsBundle = releaseMetrics;
+
+            // Capture the release snapshot from recent history (not the idle/reset pose)
+            const poseHistory = window.playerState?.frameHistory || [];
+            const poseHistoryFrames = poseHistory.slice(-12)
+                .map(f => Number.isFinite(f?.frame) ? f.frame : null)
+                .filter(f => f !== null);
+            let poseCaptureSource = 'history';
+            let poseCaptureOk = false;
+            let poseCaptureError = null;
+            let releaseSnapshot = null;
+            let canonicalSnapshot = null;
+
+            const persistReleaseMark = async (snapshot, label = via) => {
+                if (!snapshot) return false;
+                try {
+                    if (!window.__SESSION_ID) {
+                        try {
+                            const started = await window.doachSession?.start?.();
+                            if (!window.__SESSION_ID && started) window.__SESSION_ID = started;
+                        } catch {
+                            console.warn('[pose:release] unable to start session for release mark', { shotId, label });
+                        }
+                    }
+                    if (!window.__SESSION_ID) {
+                        console.warn('[pose:release] skipping release_mark persist (no session id)', { shotId, label });
+                        return false;
+                    }
+                    const payload = {
+                        sessionId: window.__SESSION_ID || null,
+                        shotId,
+                        frame: fnum,
+                        tMs: Date.now(),
+                        via: label,
+                        hoop: hoopBox,
+                        poseSnapshot: snapshot,
+                        gate: gatePayload,
+                    };
+                    if (label === via && releaseMetricsBundle) {
+                        payload.releaseMetrics = releaseMetricsBundle;
+                        releaseMetricsBundle = null;
+                    }
+                    await fetch('/api/release_mark', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                        credentials: 'include'
+                    });
+                    return true;
+                } catch (err) {
+                    console.warn('[pose:release] persist failed', { shotId, label, error: String(err) });
+                    return false;
+                }
+            };
+
+            const summarizePose = (snap) => {
+                if (!snap || typeof snap !== 'object') return null;
+                const keys = ['stanceWidthFeet', 'stanceWidth', 'stanceRatio', 'elbowExtDeg', 'armVerticalityDeg', 'torsoLeanAngle', 'kneeFlex', 'feetAngleDiff', 'headToHoopDeg', 'followThroughHoldFrames'];
+                const out = {};
+                for (const key of keys) {
+                    const val = snap[key];
+                    if (typeof val === 'number') out[key] = Number(val.toFixed(1));
+                }
+                return out;
+            };
+            try {
+                const lockedHoop = window.getLockedHoopBox?.() || null;   // OK if null
+                let snap = window.snapshotAtRelease?.(lockedHoop) || null;
+
+                if (!snap) {
+                    poseCaptureSource = 'history-miss';
+                    const kps = window.playerState?.keypoints || null;
+                    snap = window.extractPoseSnapshot?.(kps, lockedHoop) || null;
+                    if (snap) poseCaptureSource = 'current-keypoints';
+                }
+
+                if (snap) {
+                    releaseSnapshot = snap;
+                    window.__LAST_POSE_SNAP = snap; // always refresh to per-shot release
+                    poseCaptureOk = true;
+                } else if (poseCaptureSource === 'history') {
+                    poseCaptureSource = 'empty-history';
+                }
+            } catch (err) {
+                poseCaptureError = err;
+                poseCaptureSource = 'error';
+            }
+
+            // Create shot record (UI) and assign identity
+            const rec = window.createShot?.();
+            const shotId = rec?.id || (Number(window.__SHOT_ID || 0) || 1);
+
+            if (releaseSnapshot) {
+                canonicalSnapshot = setPoseIfMissing(shotId, releaseSnapshot) || releaseSnapshot;
+                try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release', overwrite: true }); } catch { }
+                console.log('[shot:update] release snapshot set', { shotId, snapshot: summarizePose(canonicalSnapshot) });
+            }
+
+            if (window.DOACH_RELEASE_TRACE === true || !poseCaptureOk) {
+                const payload = {
+                    shotId,
+                    frame: fnum,
+                    via,
+                    poseCaptureOk,
+                    poseCaptureSource,
+                    historyFrames: poseHistory.length,
+                    historyFrameIds: poseHistoryFrames,
+                    snapshot: summarizePose(releaseSnapshot)
+                };
+                if (poseCaptureError) payload.poseCaptureError = String(poseCaptureError);
+                const logFn = poseCaptureOk ? console.log : console.warn;
+                try { logFn('[pose:release] capture status', JSON.stringify(payload)); } catch { logFn('[pose:release] capture status', payload); }
+            }
+
+            // Backend marker (async, best-effort)
+            persistReleaseMark(canonicalSnapshot).catch(() => { });
+
+            // Emit release (with identity)
+            const prox = shotArcProx(hoopBox);
+            const lockTrackId = faceMgr?.lock?.trackId ?? window.__playerLock?.trackId ?? null;
+            window.dispatchEvent(new CustomEvent('shot:release', { detail: { shotId, frame: fnum, via, prox, poseApproved: !!opts.poseApproved, trackId: lockTrackId } }));
 
         // Microclip or summary fallback
         if (window.USE_MICROCLIP && window.__CLIPS_AVAILABLE) {
@@ -1370,6 +1676,9 @@ function setPoseIfMissing(shotId, snap) {
         try { window.armAfterArmDown?.({ sampleMs: 90, minDownFrames: 8 }); } catch { }
 
         return true;
+    } finally {
+        window.__releaseEvaluating = false;
+    }
     };
 })();
 

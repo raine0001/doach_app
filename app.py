@@ -751,6 +751,7 @@ def api_release_mark():
         snap  = data.get('poseSnapshot') or None
         hoop  = data.get('hoop') or None
         gate  = data.get('gate') or None
+        rel_metrics = data.get('releaseMetrics') or None
         if not sid:
             return jsonify({'ok': False, 'error': 'sessionId required'}), 400
         if shot is None:
@@ -767,6 +768,7 @@ def api_release_mark():
             'poseSnapshot': snap,
             'hoop': hoop,
             'gate': gate,
+            'releaseMetrics': rel_metrics,
         }
         # Persist to session folder if present; else log in a global file
         if sid:

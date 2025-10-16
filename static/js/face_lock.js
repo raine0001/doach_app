@@ -5,6 +5,14 @@ const ROI_EXPAND = 1.5;
 const ENROLL_TARGET = 8;
 const ENROLL_MIN = 4;
 const MIN_FACE_SIZE = 96;
+const APPEARANCE_SAMPLE_SIZE = 32;
+const APPEARANCE_EXPAND = 1.35;
+const APPEARANCE_BIN_SIZE = 4; // per channel
+const APPEARANCE_VEC_LEN = APPEARANCE_BIN_SIZE * 3;
+const APPEARANCE_MATCH_THRESH = 0.86;
+const APPEARANCE_BIND_HITS = 8;
+const APPEARANCE_DROP_MISSES = 14;
+const APPEARANCE_MAX_AGE_MS = 4500;
 
 const noop = () => {};
 const clamp = (val, min, max) => Math.min(Math.max(val, min), max);
@@ -117,6 +125,9 @@ class FaceLockManager {
     this.embedding = null;
     this.embeddingDims = 512;
     this.consent = false;
+    this._appearance = null;
+    this._appearanceHits = 0;
+    this._appearanceMisses = 0;
     this.worker = null;
     this.workerReady = false;
     this.workerSupported = false;
@@ -136,6 +147,9 @@ class FaceLockManager {
     this._visible = true;
     this._lastSample = null;
     this._lastWarnAt = 0;
+    this._appearanceBox = null;
+    this._appearanceLastScore = 0;
+    this._boundTrackId = null;
     if (typeof window !== 'undefined') {
       window.addEventListener('prefs:changed', (evt) => {
         try { this._onPrefsChanged(evt?.detail?.prefs || null); } catch { }
@@ -580,6 +594,7 @@ class FaceLockManager {
       roi,
       score,
       trackId: poseTrack?.id ?? 'pose',
+      poseBox: this._computePoseBox(),
       matchedAt: now(),
       bounds: { width: boundsW, height: boundsH }
     };
@@ -593,6 +608,10 @@ class FaceLockManager {
         t0: Date.now()
       };
     } catch { }
+    this._boundTrackId = this.lock.trackId;
+    this._appearanceHits = 0;
+    this._appearanceMisses = 0;
+    this._captureAppearance();
     this._emit('face:locked', {
       userId: this.userId,
       trackId: this.lock.trackId,
@@ -627,6 +646,10 @@ class FaceLockManager {
     if (!this.lock) return;
     this.lock = null;
     this._lastMatch = 0;
+    this._boundTrackId = null;
+    this._appearanceHits = 0;
+    this._appearanceMisses = 0;
+    this._appearanceLastScore = 0;
     try { window.__playerLock = null; } catch { }
     this._emit('face:lost', { reason });
   }
@@ -668,6 +691,10 @@ class FaceLockManager {
     if (!this.requiresLock()) return true;
     const active = this.lock && (now() - (this._lastMatch || 0) <= LOCK_TIMEOUT_MS);
     return !!active;
+  }
+
+  getBoundTrackId() {
+    return this._boundTrackId;
   }
 
   notifyLockNeeded(reason = 'lock_required') {
@@ -737,6 +764,139 @@ class FaceLockManager {
       if (this.embedding && this.consent) this._resumeRuntime();
     }
   }
+
+  _computePoseBox() {
+    try {
+      const ps = window.playerState;
+      const kp = ps?.keypoints;
+      if (!Array.isArray(kp) || kp.length < 5) return null;
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const point of kp) {
+        if (!point) continue;
+        const vis = point.visibility ?? point.score ?? 1;
+        if (vis < 0.2) continue;
+        const x = Number(point.x);
+        const y = Number(point.y);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        minX = Math.min(minX, x);
+        minY = Math.min(minY, y);
+        maxX = Math.max(maxX, x);
+        maxY = Math.max(maxY, y);
+      }
+      if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) return null;
+      const w = maxX - minX;
+      const h = maxY - minY;
+      if (w <= 0 || h <= 0) return null;
+      return { x: minX, y: minY, w, h };
+    } catch {
+      return null;
+    }
+  }
+
+  _captureAppearance() {
+    try {
+      const rect = this._computePoseBox();
+      if (!rect) return;
+      const sample = this._sampleAppearance(rect);
+      if (!sample) return;
+      this._appearance = sample;
+      this._appearanceBox = rect;
+      this._appearanceHits = APPEARANCE_BIND_HITS;
+      this._appearanceMisses = 0;
+      this._appearanceLastScore = 1;
+      try {
+        window.__playerAppearanceLock = {
+          ts: Date.now(),
+          bbox: rect,
+          vector: sample.vec,
+          mean: sample.mean
+        };
+      } catch {}
+    } catch {}
+  }
+
+  _sampleAppearance(rect, opts = {}) {
+    const video = this._getVideoElement();
+    if (!video || !video.videoWidth || !video.videoHeight) return null;
+    const expand = Number(opts.expand ?? APPEARANCE_EXPAND);
+    const sampleSize = Number(opts.sampleSize ?? APPEARANCE_SAMPLE_SIZE);
+    if (!this._canvas) this._canvas = document.createElement('canvas');
+    const canvas = this._canvas;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    const bounds = this.lock?.bounds || { width: video.videoWidth, height: video.videoHeight };
+    const width = bounds.width || video.videoWidth;
+    const height = bounds.height || video.videoHeight;
+    const x = clamp(rect.x - rect.w * (expand - 1) * 0.5, 0, width);
+    const y = clamp(rect.y - rect.h * (expand - 1) * 0.35, 0, height);
+    const w = clamp(rect.w * expand, 16, width - x);
+    const h = clamp(rect.h * expand, 16, height - y);
+    if (w <= 0 || h <= 0) return null;
+    if (canvas.width !== sampleSize) canvas.width = sampleSize;
+    if (canvas.height !== sampleSize) canvas.height = sampleSize;
+    try {
+      ctx.drawImage(video, x, y, w, h, 0, 0, sampleSize, sampleSize);
+    } catch {
+      return null;
+    }
+    let data;
+    try {
+      data = ctx.getImageData(0, 0, sampleSize, sampleSize).data;
+    } catch {
+      return null;
+    }
+    const bins = new Float32Array(APPEARANCE_VEC_LEN);
+    let rSum = 0, gSum = 0, bSum = 0;
+    for (let idx = 0; idx < data.length; idx += 4) {
+      const r = data[idx];
+      const g = data[idx + 1];
+      const b = data[idx + 2];
+      rSum += r;
+      gSum += g;
+      bSum += b;
+      bins[Math.floor(r / (256 / APPEARANCE_BIN_SIZE))] += 1;
+      bins[APPEARANCE_BIN_SIZE + Math.floor(g / (256 / APPEARANCE_BIN_SIZE))] += 1;
+      bins[APPEARANCE_BIN_SIZE * 2 + Math.floor(b / (256 / APPEARANCE_BIN_SIZE))] += 1;
+    }
+    const norm = Math.sqrt(bins.reduce((acc, v) => acc + v * v, 0)) || 1;
+    for (let i = 0; i < bins.length; i++) bins[i] /= norm;
+    const count = data.length / 4;
+    const mean = [rSum / count / 255, gSum / count / 255, bSum / count / 255];
+    return { vec: bins, mean, ts: Date.now(), rect: { x, y, w, h } };
+  }
+
+  matchAppearance(poseRect) {
+    if (!poseRect) return { bound: false, score: 0 };
+    const appearance = this._appearance;
+    if (!appearance || !appearance.vec) return { bound: false, score: 0 };
+    if ((Date.now() - appearance.ts) > APPEARANCE_MAX_AGE_MS) {
+      return { bound: false, score: 0 };
+    }
+    const sample = this._sampleAppearance(poseRect);
+    if (!sample || !sample.vec) {
+      this._appearanceMisses = Math.min(APPEARANCE_DROP_MISSES + 1, this._appearanceMisses + 1);
+      return { bound: false, score: 0 };
+    }
+    const vec = sample.vec;
+    const ref = appearance.vec;
+    let dot = 0;
+    for (let i = 0; i < vec.length; i++) dot += vec[i] * ref[i];
+    const score = dot;
+    if (score >= APPEARANCE_MATCH_THRESH) {
+      this._appearanceHits = Math.min(APPEARANCE_BIND_HITS + 3, this._appearanceHits + 1);
+      this._appearanceMisses = 0;
+      this._appearanceBox = poseRect;
+      this._appearanceLastScore = score;
+    } else {
+      this._appearanceMisses = Math.min(APPEARANCE_DROP_MISSES + 2, this._appearanceMisses + 1);
+      if (this._appearanceHits > 0) this._appearanceHits -= 1;
+    }
+    const bound = (this._appearanceHits >= APPEARANCE_BIND_HITS) && (this._appearanceMisses < APPEARANCE_DROP_MISSES);
+    if (!bound && this._appearanceMisses >= APPEARANCE_DROP_MISSES) {
+      this._appearanceHits = 0;
+      this._appearanceLastScore = score;
+    }
+    return { bound, score, hits: this._appearanceHits, misses: this._appearanceMisses };
+  }
 }
 
 export const faceLock = new FaceLockManager();
@@ -749,4 +909,6 @@ if (typeof window !== 'undefined') {
   window.addEventListener('DOMContentLoaded', () => {
     faceLock.init({ silent: true }).catch(noop);
   });
+  window.matchAppearanceLock = (rect) => faceLock.matchAppearance(rect);
+  window.getFaceBoundTrackId = () => faceLock.getBoundTrackId();
 }

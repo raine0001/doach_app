@@ -31,6 +31,293 @@ function isBallLabelLocal(label) {
   return String(label).toLowerCase() === 'basketball';
 }
 
+// ---- Shared helpers (ball-in-hand, optical flow, blur score) -------------
+(function installSharedAnalyzers() {
+  if (typeof window.computeBallInHand === 'function' &&
+      typeof window.opticalFlowPlume === 'function' &&
+      typeof window.blurScoreAt === 'function') {
+    return;
+  }
+
+  const IDX = {
+    L: { wrist: 15, elbow: 13, shoulder: 11, thumb: 19, index: 18, pinky: 17 },
+    R: { wrist: 16, elbow: 14, shoulder: 12, thumb: 22, index: 21, pinky: 20 },
+  };
+
+  function getPoint(pose, idx) {
+    if (!Array.isArray(pose) || pose.length <= idx) return null;
+    const pt = pose[idx];
+    if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
+    return pt;
+  }
+
+  function inferShootingSide(pose, preferred) {
+    if (preferred === 'L' || preferred === 'R') return preferred;
+    const right = [IDX.R.wrist, IDX.R.elbow, IDX.R.shoulder]
+      .map(i => getPoint(pose, i)?.visibility ?? 0)
+      .reduce((a, b) => a + b, 0);
+    const left = [IDX.L.wrist, IDX.L.elbow, IDX.L.shoulder]
+      .map(i => getPoint(pose, i)?.visibility ?? 0)
+      .reduce((a, b) => a + b, 0);
+    return right >= left ? 'R' : 'L';
+  }
+
+  function getHoopCenter() {
+    try {
+      const hoop = (typeof window.getLockedHoopBox === 'function')
+        ? window.getLockedHoopBox()
+        : (window.__lockedHoopBox || null);
+      if (!hoop) return null;
+      const cx = Number.isFinite(hoop.cx) ? hoop.cx
+        : Number.isFinite(hoop.x) && Number.isFinite(hoop.w) ? hoop.x + hoop.w / 2 : null;
+      const cy = Number.isFinite(hoop.cy) ? hoop.cy
+        : Number.isFinite(hoop.y) && Number.isFinite(hoop.h) ? hoop.y + hoop.h / 2 : null;
+      if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+      return { x: cx, y: cy };
+    } catch {
+      return null;
+    }
+  }
+
+  function resolveBallCandidate(candidates) {
+    try {
+      if (Array.isArray(candidates) && candidates.length) {
+        const sorted = candidates
+          .map(c => {
+            if (!c) return null;
+            if (Number.isFinite(c.x) && Number.isFinite(c.y)) {
+              return { x: c.x, y: c.y, source: c.source || 'arg', weight: Number(c.confidence || c.score || 0), frame: Number.isFinite(c.frame) ? Number(c.frame) : null };
+            }
+            if (Array.isArray(c.box) && c.box.length === 4) {
+              const [x1, y1, x2, y2] = c.box;
+              return { x: (x1 + x2) / 2, y: (y1 + y2) / 2, source: c.source || 'arg', weight: Number(c.confidence || c.score || 0), frame: Number.isFinite(c.frame) ? Number(c.frame) : null };
+            }
+            return null;
+          })
+          .filter(Boolean)
+          .sort((a, b) => (b.weight || 0) - (a.weight || 0));
+        if (sorted.length) return sorted[0];
+      }
+      const trail = window.ballState?.trail;
+      if (Array.isArray(trail) && trail.length) {
+        const last = trail.at(-1);
+        if (last && Number.isFinite(last.x) && Number.isFinite(last.y)) {
+          return { x: last.x, y: last.y, source: 'trail', weight: 1, frame: Number.isFinite(last.frame) ? Number(last.frame) : null };
+        }
+      }
+      const objs = window.lastDetectedFrame?.objects;
+      if (Array.isArray(objs) && objs.length) {
+        const ball = objs
+          .filter(o => o && isBallLabelLocal(o.label) && Array.isArray(o.box))
+          .map(o => {
+            const [x1, y1, x2, y2] = o.box;
+            return {
+              x: (x1 + x2) / 2,
+              y: (y1 + y2) / 2,
+              source: 'detect',
+              weight: Number(o.confidence || o.score || 0),
+              frame: Number.isFinite(window.lastDetectedFrame?.__frameIdx) ? Number(window.lastDetectedFrame.__frameIdx) : null
+            };
+          })
+          .sort((a, b) => (b.weight || 0) - (a.weight || 0));
+        if (ball.length) return ball[0];
+      }
+    } catch {}
+    return null;
+  }
+
+  function magnitude(vx, vy) {
+    return Math.hypot(Number(vx) || 0, Number(vy) || 0);
+  }
+
+  function computePalmBasis(pose, idxMap) {
+    const wrist = getPoint(pose, idxMap.wrist);
+    const index = getPoint(pose, idxMap.index);
+    const pinky = getPoint(pose, idxMap.pinky);
+    if (!wrist || !index || !pinky) return null;
+    const vx = index.x - wrist.x;
+    const vy = index.y - wrist.y;
+    const ux = pinky.x - wrist.x;
+    const uy = pinky.y - wrist.y;
+    const norm = Math.hypot(vx, vy) * Math.hypot(ux, uy) + 1e-9;
+    const crossZ = (vx * uy) - (vy * ux);
+    const angle = Math.atan2(uy, ux) * 180 / Math.PI;
+    return { wrist, index, pinky, crossZ, angle, spread: Math.hypot(index.x - pinky.x, index.y - pinky.y) };
+  }
+
+  function computeBallInHand(pose = null, options = {}) {
+    const reasons = [];
+    const metrics = {};
+    const kp = Array.isArray(pose) ? pose : (window.playerState?.keypoints || null);
+    if (!Array.isArray(kp) || kp.length < 23) {
+      reasons.push('POSE_MISSING');
+      return { ok: false, reasons, metrics, side: 'R', checksPassed: 0 };
+    }
+
+    const side = inferShootingSide(kp, options.side);
+    const idxMap = IDX[side] || IDX.R;
+    const wrist = getPoint(kp, idxMap.wrist);
+    const elbow = getPoint(kp, idxMap.elbow);
+    const shoulder = getPoint(kp, idxMap.shoulder);
+    if (!wrist || !elbow || !shoulder) {
+      reasons.push('POSE_HAND_INCOMPLETE');
+      return { ok: false, reasons, metrics, side, checksPassed: 0 };
+    }
+
+    const palm = computePalmBasis(kp, idxMap);
+    const thumb = getPoint(kp, idxMap.thumb);
+    const index = getPoint(kp, idxMap.index);
+    const ball = resolveBallCandidate(options.ballCandidates || options.balls);
+    metrics.ballSource = ball?.source || null;
+    const frameIdx = Number.isFinite(options.frameIdx) ? Number(options.frameIdx) : null;
+    const ballFrame = Number.isFinite(ball?.frame) ? Number(ball.frame) : null;
+    metrics.ballFrame = ballFrame;
+    metrics.ballAgeFrames = (frameIdx != null && ballFrame != null) ? Math.abs(frameIdx - ballFrame) : null;
+    if (metrics.ballAgeFrames != null) {
+      const maxAge = Number((window.REL_CFG?.ballMaxAgeFrames) ?? 12);
+      metrics.ballRecent = metrics.ballAgeFrames <= maxAge;
+    } else {
+      metrics.ballRecent = !!ball;
+    }
+
+    const cfg = window.REL_CFG || {};
+    const distMax = Number(cfg.ballDistMax ?? 120);
+    const closureMax = Number(cfg.handClosureMax ?? 62);
+    const spreadMax = Number(cfg.handSpreadMax ?? 150);
+    const elbowRange = Number(cfg.ballElbowDistMax ?? 160);
+
+    let checksPassed = 0;
+
+    if (ball && wrist) {
+      const d = Math.hypot(ball.x - wrist.x, ball.y - wrist.y);
+      metrics.ballDistance = d;
+      if (d <= distMax) checksPassed++; else reasons.push('BALL_NOT_CLOSE');
+      const elbowDist = Math.hypot(ball.x - elbow.x, ball.y - elbow.y);
+      metrics.ballElbowDistance = elbowDist;
+      if (elbowDist <= elbowRange) checksPassed++; else reasons.push('BALL_OFF_ELBOW_RANGE');
+    } else {
+      reasons.push('BALL_NOT_FOUND');
+    }
+
+    if (thumb && index) {
+      const closure = Math.hypot(thumb.x - index.x, thumb.y - index.y);
+      metrics.handClosurePx = closure;
+      if (closure <= closureMax) checksPassed++; else reasons.push('HAND_NOT_CLOSED');
+    } else {
+      reasons.push('HAND_KEYPOINTS_MISSING');
+    }
+
+    if (palm) {
+      metrics.palmSpreadPx = palm.spread;
+      if (palm.spread <= spreadMax) checksPassed++; else reasons.push('HAND_SPREAD_WIDE');
+    }
+
+    const ok = checksPassed >= 3;
+    if (!ok && !reasons.length) reasons.push('INSUFFICIENT_EVIDENCE');
+    return { ok, reasons, metrics, side, checksPassed };
+  }
+
+  function computeOpticalFlowPlume(options = {}) {
+    const history = Array.isArray(options.history) && options.history.length
+      ? options.history
+      : (window.playerState?.frameHistory || []).slice(-6);
+    if (!Array.isArray(history) || history.length < 3) {
+      return { sigma: 0, forward: 0, samples: 0, ok: false };
+    }
+    const fps = Number(window.__videoFPS) || 30;
+    const side = options.side || inferShootingSide(history.at(-1)?.keypoints || null, null);
+    const idxMap = IDX[side] || IDX.R;
+    const rim = getHoopCenter();
+    const dirVec = (() => {
+      if (!rim) return null;
+      const lastPose = history.at(-1)?.keypoints;
+      const wrist = getPoint(lastPose, idxMap.wrist);
+      if (!wrist) return null;
+      const dx = rim.x - wrist.x;
+      const dy = rim.y - wrist.y;
+      const mag = Math.hypot(dx, dy) || 1;
+      return { x: dx / mag, y: dy / mag };
+    })();
+    const velocities = [];
+    for (let i = 1; i < history.length; i += 1) {
+      const prev = history[i - 1];
+      const curr = history[i];
+      const prevPose = prev?.keypoints;
+      const currPose = curr?.keypoints;
+      const wr0 = getPoint(prevPose, idxMap.wrist);
+      const wr1 = getPoint(currPose, idxMap.wrist);
+      if (!wr0 || !wr1) continue;
+      const frameDelta = Number(curr?.frame ?? curr?.f ?? i) - Number(prev?.frame ?? prev?.f ?? (i - 1));
+      const dt = Number(curr?.t ?? curr?.tMs ?? curr?.ts ?? curr?.time ?? 0) &&
+                 Number(prev?.t ?? prev?.tMs ?? prev?.ts ?? prev?.time ?? 0)
+        ? Math.max(0.001, Math.abs((Number(curr.t ?? curr.tMs ?? curr.ts ?? curr.time) - Number(prev.t ?? prev.tMs ?? prev.ts ?? prev.time)) / 1000))
+        : Math.max(0.001, Math.abs(frameDelta) / fps);
+      const vx = (wr1.x - wr0.x) / dt;
+      const vy = (wr1.y - wr0.y) / dt;
+      const speed = magnitude(vx, vy);
+      let forward = speed;
+      if (dirVec) {
+        forward = -(vx * dirVec.x + vy * dirVec.y);
+      }
+      velocities.push({ speed, forward });
+    }
+    if (!velocities.length) return { sigma: 0, forward: 0, samples: 0, ok: false };
+    const forwardVals = velocities.map(v => v.forward);
+    const mean = forwardVals.reduce((a, b) => a + b, 0) / forwardVals.length;
+    const variance = forwardVals.reduce((sum, v) => sum + ((v - mean) ** 2), 0) / forwardVals.length;
+    const sigma = Math.sqrt(Math.max(0, variance));
+    const forwardMean = mean;
+    const ok = sigma >= Number((window.REL_CFG?.plumeSigmaMin ?? 0.8));
+    return { sigma, forward: forwardMean, samples: forwardVals.length, ok };
+  }
+
+  function blurScoreAt(point, radius = 12, options = {}) {
+    const res = {
+      ok: true,
+      score: null,
+      samples: 0,
+    };
+    try {
+      const history = Array.isArray(options.history) && options.history.length
+        ? options.history
+        : (window.playerState?.frameHistory || []).slice(-5);
+      if (!point || !Number.isFinite(point.x) || !Number.isFinite(point.y) || history.length < 2) {
+        res.ok = false;
+        return res;
+      }
+      const fps = Number(window.__videoFPS) || 30;
+      const speeds = [];
+      for (let i = 1; i < history.length; i += 1) {
+        const prev = history[i - 1];
+        const curr = history[i];
+        const dt = Math.max(0.001, Math.abs(((curr?.frame ?? i) - (prev?.frame ?? (i - 1)))) / fps);
+        const kpPrev = prev?.keypoints || null;
+        const kpCurr = curr?.keypoints || null;
+        if (!kpPrev || !kpCurr) continue;
+        const wr0 = kpPrev[16] || kpPrev[15];
+        const wr1 = kpCurr[16] || kpCurr[15];
+        if (!wr0 || !wr1) continue;
+        speeds.push(Math.hypot(wr1.x - wr0.x, wr1.y - wr0.y) / dt);
+      }
+      if (!speeds.length) {
+        res.ok = false;
+        return res;
+      }
+      const avg = speeds.reduce((a, b) => a + b, 0) / speeds.length;
+      res.score = avg;
+      res.samples = speeds.length;
+      return res;
+    } catch {
+      res.ok = false;
+      return res;
+    }
+  }
+
+  try { window.computeBallInHand = window.computeBallInHand || computeBallInHand; } catch {}
+  try { window.opticalFlowPlume = window.opticalFlowPlume || computeOpticalFlowPlume; } catch {}
+  try { window.blurScoreAt = window.blurScoreAt || blurScoreAt; } catch {}
+})();
+
 
 // ---- Pose metrics (minimal, robust) ----------------------------------------
 (function(){
