@@ -20,6 +20,7 @@ from openai import OpenAI
 from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash, check_password_hash
 from sqlalchemy import UniqueConstraint, Index, String, Integer, Float, Boolean, Date, DateTime, Text, JSON as MyJSON
+from sqlalchemy.exc import IntegrityError
 import traceback
 import re
 import csv
@@ -1064,20 +1065,69 @@ def _db_add_shot(sid, idx, payload):
         with db['Session']() as s:
             from sqlalchemy import select, func, case
             ShotRow = db['ShotRow']
+
+            def _populate_row(target):
+                m_in = payload.get('made')
+                if m_in is not None:
+                    target.made = bool(m_in)
+                target.entry_angle = payload.get('entryAngle')
+                target.release_angle = payload.get('releaseAngle')
+                target.arc_height = payload.get('arcHeight')
+                target.miss_reason = payload.get('missReason')
+                target.data = payload
+                _apply_score(target, score_val)
+
+            def _ensure_session_entry():
+                try:
+                    sess = s.get(db['SessionRow'], sid)
+                    if not sess:
+                        sess = db['SessionRow'](sid=sid, created_at=datetime.utcnow())
+                        s.add(sess)
+                except Exception as e_sess:
+                    _trace('db_add_shot: ensure session error:', e_sess)
+
+            def _flush_session():
+                try:
+                    s.flush()
+                except Exception as e_flush:
+                    _trace('db_add_shot: flush error:', e_flush)
+
+            def _recalc_session_totals():
+                try:
+                    sess = s.get(db['SessionRow'], sid)
+                    if sess:
+                        total, makes = s.execute(
+                            select(
+                                func.count(ShotRow.id),
+                                func.sum(case((ShotRow.made, 1), else_=0)),
+                            ).where(ShotRow.sid == sid)
+                        ).one()
+                        sess.shots_count = int(total or 0)
+                        sess.makes = int(makes or 0)
+                        sess.accuracy = int(round((sess.makes / max(1, sess.shots_count)) * 100))
+                except Exception as e_tot:
+                    _trace('db_add_shot: totals error:', e_tot)
+
+            def _sync_feedback_score():
+                try:
+                    FB = db.get('CoachFeedbackRow')
+                    if FB is not None and score_val is not None:
+                        fb_row = s.execute(
+                            select(FB).where(FB.sid == sid, FB.shot_idx == idx).order_by(FB.id.desc())
+                        ).scalars().first()
+                        if fb_row:
+                            fb_row.score = score_val
+                        else:
+                            s.add(FB(sid=sid, shot_idx=idx, provider='auto-metrics', model='auto', score=score_val, text=None))
+                except Exception as e_fb:
+                    _trace('db_add_shot: feedback score error:', e_fb)
+
             # Upsert by (sid, idx)
             existing = s.execute(select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)).scalar_one_or_none()
             queue_idx = None
             score_val = _resolve_score(payload)
             if existing is not None:
-                m_in = payload.get('made')
-                if m_in is not None:
-                    existing.made = bool(m_in)
-                existing.entry_angle = payload.get('entryAngle')
-                existing.release_angle = payload.get('releaseAngle')
-                existing.arc_height = payload.get('arcHeight')
-                existing.miss_reason = payload.get('missReason')
-                existing.data = payload
-                _apply_score(existing, score_val)
+                _populate_row(existing)
                 row = existing
                 queue_idx = int(existing.idx)
             else:
@@ -1097,59 +1147,40 @@ def _db_add_shot(sid, idx, payload):
                     for attr in ('pose_score', 'weighted_score', 'score'):
                         if hasattr(ShotRow, attr):
                             init_kwargs[attr] = score_val
-                row = ShotRow(
-                    **init_kwargs
-                )
+                row = ShotRow(**init_kwargs)
                 s.add(row)
                 queue_idx = int(idx)
 
-            # Ensure a session row exists, create if missing (idempotent)
-            try:
-                sess = s.get(db['SessionRow'], sid)
-                if not sess:
-                    sess = db['SessionRow'](sid=sid, created_at=datetime.utcnow())
-                    s.add(sess)
-            except Exception as e_sess:
-                _trace('db_add_shot: ensure session error:', e_sess)
+            _ensure_session_entry()
+            _flush_session()
+            _recalc_session_totals()
+            _sync_feedback_score()
 
-            # Ensure the shot row is persisted
+            committed = False
             try:
-                s.flush()
-            except Exception as e_flush:
-                _trace('db_add_shot: flush error:', e_flush)
+                s.commit()
+                committed = True
+            except IntegrityError as exc:
+                s.rollback()
+                err_code = getattr(getattr(exc, 'orig', None), 'args', None)
+                err_code = err_code[0] if err_code else None
+                if err_code == 1062:
+                    existing = s.execute(
+                        select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)
+                    ).scalar_one_or_none()
+                    if existing:
+                        _populate_row(existing)
+                        row = existing
+                        queue_idx = int(existing.idx)
+                        _ensure_session_entry()
+                        _flush_session()
+                        _recalc_session_totals()
+                        _sync_feedback_score()
+                        s.commit()
+                        committed = True
+                if not committed:
+                    raise
 
-            # Update totals if the session row exists; always commit at least the shot row
-            try:
-                sess = s.get(db['SessionRow'], sid)
-                if sess:
-                    total, makes = s.execute(
-                        select(
-                            func.count(ShotRow.id),
-                            func.sum(case((ShotRow.made, 1), else_=0)),
-                        ).where(ShotRow.sid == sid)
-                    ).one()
-                    sess.shots_count = int(total or 0)
-                    sess.makes = int(makes or 0)
-                    sess.accuracy = int(round((sess.makes / max(1, sess.shots_count)) * 100))
-            except Exception as e_tot:
-                _trace('db_add_shot: totals error:', e_tot)
-
-            # Upsert baseline metrics into ai_feedback for easy reporting
-            try:
-                FB = db.get('CoachFeedbackRow')
-                if FB is not None and score_val is not None:
-                    fb_row = s.execute(
-                        select(FB).where(FB.sid == sid, FB.shot_idx == idx).order_by(FB.id.desc())
-                    ).scalars().first()
-                    if fb_row:
-                        fb_row.score = score_val
-                    else:
-                        s.add(FB(sid=sid, shot_idx=idx, provider='auto-metrics', model='auto', score=score_val, text=None))
-            except Exception as e_fb:
-                _trace('db_add_shot: feedback score error:', e_fb)
-
-            # Commit regardless of whether totals were updated
-            s.commit()
             _trace('db:upsert:shot', {'sid': sid, 'idx': idx, 'made': row.made, 'arcHeight': row.arc_height, 'entryAngle': row.entry_angle, 'releaseAngle': row.release_angle})
             if queue_idx is not None:
                 try:
