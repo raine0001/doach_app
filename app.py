@@ -44,6 +44,7 @@ from sqlalchemy import (
     DateTime,
     Text,
     JSON as MyJSON,
+    BigInteger,
 )
 from sqlalchemy.exc import IntegrityError
 import traceback
@@ -1022,8 +1023,8 @@ def _try_init_db():
             created_at = Column(DateTime, default=datetime.utcnow)
             release_frame = Column(Integer)
             end_frame = Column(Integer)
-            release_ms = Column(Integer)
-            end_ms = Column(Integer)
+            release_ms = Column(BigInteger)
+            end_ms = Column(BigInteger)
             made = Column(Boolean)
             entry_angle = Column(Float)
             release_angle = Column(Float)
@@ -1039,8 +1040,8 @@ def _try_init_db():
             sid = Column(String(64), ForeignKey("sessions.sid"), nullable=False)
             shot_idx = Column(Integer, nullable=True)
             created_at = Column(DateTime, default=datetime.utcnow)
-            frame = Column(Integer)
-            t_ms = Column(Integer)
+            frame = Column(BigInteger)
+            t_ms = Column(BigInteger)
             via = Column(String(64))
             metrics = Column(MyJSON)  # poseSnapshot metrics JSON
             hoop = Column(MyJSON)  # hoop box JSON
