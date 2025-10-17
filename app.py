@@ -1327,7 +1327,9 @@ def _db_add_shot(sid, idx, payload):
                 queue_idx = int(idx)
 
             def _commit():
-                _ensure_session_entry()
+                # avoid implicit autoflush while ensuring session rows
+                with s.no_autoflush:
+                    _ensure_session_entry()
                 _flush_session()
                 _recalc_session_totals()
                 _sync_feedback_score()
