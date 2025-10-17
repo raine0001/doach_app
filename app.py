@@ -1326,19 +1326,24 @@ def _db_add_shot(sid, idx, payload):
                 s.add(row)
                 queue_idx = int(idx)
 
-            committed = False
-            try:
+            def _commit():
                 _ensure_session_entry()
                 _flush_session()
                 _recalc_session_totals()
                 _sync_feedback_score()
                 s.commit()
-                committed = True
+
+            try:
+                _commit()
             except IntegrityError as exc:
                 s.rollback()
-                err_code = getattr(getattr(exc, "orig", None), "args", None)
-                err_code = err_code[0] if err_code else None
-                if err_code == 1062:
+                # Postgres duplicate-key
+                err_code = getattr(getattr(exc, "orig", None), "pgcode", None)
+                # MySQL duplicate-key (for completeness)
+                if err_code is None:
+                    args = getattr(getattr(exc, "orig", None), "args", None)
+                    err_code = args[0] if args else None
+                if err_code in {"23505", 1062}:
                     existing = s.execute(
                         select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)
                     ).scalar_one_or_none()
@@ -1347,15 +1352,13 @@ def _db_add_shot(sid, idx, payload):
                         row = existing
                         queue_idx = int(existing.idx)
                         try:
-                            _ensure_session_entry()
-                            _flush_session()
-                            _recalc_session_totals()
-                            _sync_feedback_score()
-                            s.commit()
-                            committed = True
+                            _commit()
                         except IntegrityError:
                             s.rollback()
-                if not committed:
+                            raise
+                    else:
+                        raise
+                else:
                     raise
 
             _trace(
