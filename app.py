@@ -45,8 +45,13 @@ from sqlalchemy import (
     Text,
     JSON as MyJSON,
     BigInteger,
+    Column,
+    ForeignKey,
+    create_engine,
 )
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.types import JSON as MyJSON
+from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 import traceback
 import re
 import csv
@@ -65,24 +70,9 @@ from queue import Queue
 from PIL import Image
 from arcmm_api import arcmm_api
 
-try:
-    from sqlalchemy import (
-        create_engine,
-        Column,
-        Integer,
-        String,
-        DateTime,
-        Float,
-        Boolean,
-        Text,
-        ForeignKey,
-    )
-    from sqlalchemy.types import JSON as MyJSON
-    from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 
-    SQLA_AVAILABLE = True
-except Exception:
-    SQLA_AVAILABLE = False
+# SQLAlchemy models are defined later inside _try_init_db()
+SQLA_AVAILABLE = True
 
 
 def _truthy(val, default=False):
@@ -1055,7 +1045,7 @@ def _try_init_db():
             created_at = Column(DateTime, default=datetime.utcnow)
             provider = Column(String(64))
             model = Column(String(64))
-            latency_ms = Column(Integer)
+            latency_ms = Column(BigInteger)
             text = Column(Text)
             score = Column(Float)
 
