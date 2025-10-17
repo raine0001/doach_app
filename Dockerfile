@@ -1,43 +1,20 @@
-# Use Python 3.11 slim as base
-FROM python:3.11-slim
-# Set working directory
+# Base image includes Python, Node, Chromium, and all Playwright deps
+FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
+
 WORKDIR /app
-# Install system dependencies required for OpenCV and Playwright
-RUN apt-get update && apt-get install -y \
-    libgl1-mesa-glx \
-    libglib2.0-0 \
-    libnss3 \
-    libnspr4 \
-    libatk1.0-0 \
-    libatk-bridge2.0-0 \
-    libcups2 \
-    libdrm2 \
-    libdbus-1-3 \
-    libxcb1 \
-    libxkbcommon0 \
-    libx11-6 \
-    libxcomposite1 \
-    libxdamage1 \
-    libxext6 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libpango-1.0-0 \
-    libcairo2 \
-    libasound2 \
-    && rm -rf /var/lib/apt/lists/*
-# Copy requirements first to leverage Docker cache
+
+# Install Python deps
 COPY requirements.txt .
-# Install Python dependencies
-RUN pip install --no-cache-dir -r requirements.txt
-# Install Playwright browsers
-RUN playwright install chromium
-# Copy application code
+RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Copy the rest of the project
 COPY . .
-# Expose port
-EXPOSE 5001
-# Set environment variables
-ENV FLASK_APP=app.py
-ENV FLASK_ENV=production
-# Run the application
-CMD ["flask", "run", "--host=0.0.0.0", "--port=5001"]
+
+# Render injects $PORT; gunicorn binds to it
+ENV PORT=8080
+ENV ARCMM_AUTO_PROCESS=1
+ENV ARCMM_RUNNER_CMD="node scripts/arcmm_runner.js"
+ENV ARCMM_RUNNER_TIMEOUT=90000
+
+# Default entrypoint
+CMD ["gunicorn", "--bind", "0.0.0.0:${PORT}", "--workers", "3", "--threads", "8", "app:app"]
