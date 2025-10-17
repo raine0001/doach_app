@@ -19,6 +19,6 @@ The server can automatically run the ArcMM frame-by-frame pipeline for every cap
 - Install Playwright browsers once: `npx playwright install chromium`
 - Set environment variables (see `sample.env`) and enable the worker with `ARCMM_AUTO_PROCESS=1`
 - Configure the runner command, e.g. `ARCMM_RUNNER_CMD=node scripts/arcmm_runner.js`
-- Ensure the Flask server is reachable at `ARCMM_BASE_URL` (defaults to `http://127.0.0.1:5000`)
+- Ensure the Flask server is reachable at `ARCMM_BASE_URL` (defaults to `http://127.0.0.1:${PORT}`)
 
 When enabled, each shot is enqueued after upload, rendered headlessly, and the summary plus overlay are written to `sessions/<sid>/processed/`.

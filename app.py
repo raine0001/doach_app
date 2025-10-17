@@ -49,7 +49,7 @@ from sqlalchemy import (
     ForeignKey,
     create_engine,
 )
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.types import JSON as MyJSON
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 import traceback
@@ -1207,56 +1207,29 @@ def _db_add_shot(sid, idx, payload):
             except (TypeError, ValueError):
                 return None
 
-        def _apply_score(row, score_val):
-            if score_val is None:
-                return
-            for attr in ("pose_score", "weighted_score", "score"):
-                if hasattr(row, attr):
-                    try:
-                        setattr(row, attr, score_val)
-                    except Exception:
-                        pass
-
         with db["Session"]() as s:
             from sqlalchemy import select, func, case
 
             ShotRow = db["ShotRow"]
 
-            def _populate_row(target):
-                m_in = payload.get("made")
-                if m_in is not None:
-                    target.made = bool(m_in)
-                target.entry_angle = payload.get("entryAngle")
-                target.release_angle = payload.get("releaseAngle")
-                target.arc_height = payload.get("arcHeight")
-                target.miss_reason = payload.get("missReason")
-                target.data = payload
-                _apply_score(target, score_val)
-
-            def _ensure_session_entry():
+            def _ensure_session_entry(session_obj, session_id):
                 try:
-                    sess = s.get(db["SessionRow"], sid)
+                    sess = session_obj.get(db["SessionRow"], session_id)
                     if not sess:
-                        sess = db["SessionRow"](sid=sid, created_at=datetime.utcnow())
-                        s.add(sess)
+                        sess = db["SessionRow"](sid=session_id, created_at=datetime.utcnow())
+                        session_obj.add(sess)
                 except Exception as e_sess:
                     _trace("db_add_shot: ensure session error:", e_sess)
 
-            def _flush_session():
+            def _recalc_session_totals(session_obj, session_id):
                 try:
-                    s.flush()
-                except Exception as e_flush:
-                    _trace("db_add_shot: flush error:", e_flush)
-
-            def _recalc_session_totals():
-                try:
-                    sess = s.get(db["SessionRow"], sid)
+                    sess = session_obj.get(db["SessionRow"], session_id)
                     if sess:
-                        total, makes = s.execute(
+                        total, makes = session_obj.execute(
                             select(
                                 func.count(ShotRow.id),
                                 func.sum(case((ShotRow.made, 1), else_=0)),
-                            ).where(ShotRow.sid == sid)
+                            ).where(ShotRow.sid == session_id)
                         ).one()
                         sess.shots_count = int(total or 0)
                         sess.makes = int(makes or 0)
@@ -1266,106 +1239,101 @@ def _db_add_shot(sid, idx, payload):
                 except Exception as e_tot:
                     _trace("db_add_shot: totals error:", e_tot)
 
-            def _sync_feedback_score():
+            def _sync_feedback_score(session_obj, session_id, shot_idx, score_val):
                 try:
                     FB = db.get("CoachFeedbackRow")
-                    if FB is not None and score_val is not None:
-                        fb_row = (
-                            s.execute(
-                                select(FB)
-                                .where(FB.sid == sid, FB.shot_idx == idx)
-                                .order_by(FB.id.desc())
-                            )
-                            .scalars()
-                            .first()
+                    if FB is None or score_val is None:
+                        return
+                    fb_row = (
+                        session_obj.execute(
+                            select(FB)
+                            .where(FB.sid == session_id, FB.shot_idx == shot_idx)
+                            .order_by(FB.id.desc())
                         )
-                        if fb_row:
-                            fb_row.score = score_val
-                        else:
-                            s.add(
-                                FB(
-                                    sid=sid,
-                                    shot_idx=idx,
-                                    provider="auto-metrics",
-                                    model="auto",
-                                    score=score_val,
-                                    text=None,
-                                )
+                        .scalars()
+                        .first()
+                    )
+                    if fb_row:
+                        fb_row.score = score_val
+                    else:
+                        session_obj.add(
+                            FB(
+                                sid=session_id,
+                                shot_idx=shot_idx,
+                                provider="auto-metrics",
+                                model="auto",
+                                score=score_val,
+                                text=None,
                             )
+                        )
                 except Exception as e_fb:
                     _trace("db_add_shot: feedback score error:", e_fb)
 
-            # Upsert by (sid, idx)
-            existing = s.execute(
-                select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)
-            ).scalar_one_or_none()
-            queue_idx = None
             score_val = _resolve_score(payload)
-            if existing is not None:
-                _populate_row(existing)
-                row = existing
-                queue_idx = int(existing.idx)
-            else:
-                m_in = payload.get("made")
-                made_val = None if m_in is None else bool(m_in)
-                init_kwargs = dict(
-                    sid=sid,
-                    idx=idx,
-                    made=made_val,
-                    entry_angle=payload.get("entryAngle"),
-                    release_angle=payload.get("releaseAngle"),
-                    arc_height=payload.get("arcHeight"),
-                    miss_reason=payload.get("missReason"),
-                    data=payload,
-                )
-                if score_val is not None:
-                    for attr in ("pose_score", "weighted_score", "score"):
-                        if hasattr(ShotRow, attr):
-                            init_kwargs[attr] = score_val
-                row = ShotRow(**init_kwargs)
-                s.add(row)
-                queue_idx = int(idx)
+            try:
+                idx_int = int(idx)
+            except (TypeError, ValueError):
+                idx_int = idx
 
-            def _commit():
-                # avoid implicit autoflush while ensuring session rows
-                with s.no_autoflush:
-                    _ensure_session_entry()
-                _flush_session()
-                _recalc_session_totals()
-                _sync_feedback_score()
-                s.commit()
+            values = {
+                "sid": sid,
+                "idx": idx_int,
+                "entry_angle": payload.get("entryAngle"),
+                "release_angle": payload.get("releaseAngle"),
+                "arc_height": payload.get("arcHeight"),
+                "miss_reason": payload.get("missReason"),
+                "data": payload,
+            }
+
+            made_val = payload.get("made")
+            if made_val is not None:
+                values["made"] = bool(made_val)
+
+            if score_val is not None:
+                for attr in ("pose_score", "weighted_score", "score"):
+                    if hasattr(ShotRow, attr):
+                        values[attr] = score_val
+
+            stmt = pg_insert(ShotRow).values(**values)
+            update_cols = {
+                col: getattr(stmt.excluded, col)
+                for col in values.keys()
+                if col not in ("sid", "idx")
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["sid", "idx"],
+                set_=update_cols,
+            )
+
+            s.execute(stmt)
+
+            with s.no_autoflush:
+                _ensure_session_entry(s, sid)
 
             try:
-                _commit()
-            except IntegrityError:
-                s.rollback()
-                existing = s.execute(
-                    select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)
-                ).scalar_one_or_none()
-                if existing is None:
-                    raise
+                s.flush()
+            except Exception as e_flush:
+                _trace("db_add_shot: flush error:", e_flush)
 
-                row = existing
-                queue_idx = int(existing.idx)
-                _populate_row(existing)
-
-                try:
-                    _commit()
-                except IntegrityError:
-                    s.rollback()
-                    raise
+            _recalc_session_totals(s, sid)
+            _sync_feedback_score(s, sid, idx_int, score_val)
+            s.commit()
 
             _trace(
                 "db:upsert:shot",
                 {
                     "sid": sid,
-                    "idx": idx,
-                    "made": row.made,
-                    "arcHeight": row.arc_height,
-                    "entryAngle": row.entry_angle,
-                    "releaseAngle": row.release_angle,
+                    "idx": idx_int,
+                    "made": values.get("made", payload.get("made")),
+                    "arcHeight": payload.get("arcHeight"),
+                    "entryAngle": payload.get("entryAngle"),
+                    "releaseAngle": payload.get("releaseAngle"),
                 },
             )
+            try:
+                queue_idx = int(idx)
+            except (TypeError, ValueError):
+                queue_idx = None
             if queue_idx is not None:
                 try:
                     _arcmm_queue_shot(sid, queue_idx)

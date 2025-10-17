@@ -8,7 +8,7 @@ const { chromium } = require('playwright');
 async function main() {
   const args = process.argv.slice(2);
   if (args.length < 3) {
-    console.error('Usage: node scripts/arcmm_runner.js <clipPath> <outputDir> <shotIdx> [--base-url=http://127.0.0.1:5000]');
+    console.error('Usage: node scripts/arcmm_runner.js <clipPath> <outputDir> <shotIdx> [--base-url=http://127.0.0.1:${PORT}]');
     process.exit(1);
   }
 
@@ -41,7 +41,7 @@ async function main() {
     opts['base-url'] ||
     process.env.ARCMM_BASE_URL ||
     process.env.ARCMM_SERVER_URL ||
-    'http://127.0.0.1:5000';
+    'http://127.0.0.1:${PORT}';
 
   const expandedEnvBase = rawEnvBase
     .replace(/\$\{PORT\}/g, process.env.PORT || '5000')
