@@ -1337,26 +1337,26 @@ def _db_add_shot(sid, idx, payload):
                 _commit()
             except IntegrityError as exc:
                 s.rollback()
-                # Postgres duplicate-key
                 err_code = getattr(getattr(exc, "orig", None), "pgcode", None)
-                # MySQL duplicate-key (for completeness)
                 if err_code is None:
                     args = getattr(getattr(exc, "orig", None), "args", None)
                     err_code = args[0] if args else None
+
                 if err_code in {"23505", 1062}:
                     existing = s.execute(
                         select(ShotRow).where(ShotRow.sid == sid, ShotRow.idx == idx)
                     ).scalar_one_or_none()
-                    if existing:
-                        _populate_row(existing)
-                        row = existing
-                        queue_idx = int(existing.idx)
-                        try:
-                            _commit()
-                        except IntegrityError:
-                            s.rollback()
-                            raise
-                    else:
+                    if existing is None:
+                        raise
+
+                    row = existing
+                    queue_idx = int(existing.idx)
+                    _populate_row(existing)
+
+                    try:
+                        _commit()
+                    except IntegrityError:
+                        s.rollback()
                         raise
                 else:
                     raise
