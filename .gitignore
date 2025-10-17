@@ -48,7 +48,6 @@ tools/
 *.zip
 *.webm
 *.mp4
-*.pt
 
 # ── CI (uncomment if you don’t want workflows in the repo)
 # .github/workflows/
