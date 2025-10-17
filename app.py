@@ -1151,13 +1151,12 @@ def _db_add_shot(sid, idx, payload):
                 s.add(row)
                 queue_idx = int(idx)
 
-            _ensure_session_entry()
-            _flush_session()
-            _recalc_session_totals()
-            _sync_feedback_score()
-
             committed = False
             try:
+                _ensure_session_entry()
+                _flush_session()
+                _recalc_session_totals()
+                _sync_feedback_score()
                 s.commit()
                 committed = True
             except IntegrityError as exc:
@@ -1172,12 +1171,15 @@ def _db_add_shot(sid, idx, payload):
                         _populate_row(existing)
                         row = existing
                         queue_idx = int(existing.idx)
-                        _ensure_session_entry()
-                        _flush_session()
-                        _recalc_session_totals()
-                        _sync_feedback_score()
-                        s.commit()
-                        committed = True
+                        try:
+                            _ensure_session_entry()
+                            _flush_session()
+                            _recalc_session_totals()
+                            _sync_feedback_score()
+                            s.commit()
+                            committed = True
+                        except IntegrityError:
+                            s.rollback()
                 if not committed:
                     raise
 
