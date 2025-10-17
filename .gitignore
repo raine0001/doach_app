@@ -36,7 +36,6 @@ frames/
 datasets/
 labels/
 runs/
-weights/
 logs/
 videos/
 data/

@@ -37,7 +37,17 @@ async function main() {
     return [key, rest.join('=') || 'true'];
   }));
 
-  const baseUrl = (opts['base-url'] || process.env.ARCMM_BASE_URL || process.env.ARCMM_SERVER_URL || 'http://127.0.0.1:5000').replace(/\/$/, '');
+  const rawEnvBase =
+    opts['base-url'] ||
+    process.env.ARCMM_BASE_URL ||
+    process.env.ARCMM_SERVER_URL ||
+    'http://127.0.0.1:5000';
+
+  const expandedEnvBase = rawEnvBase
+    .replace(/\$\{PORT\}/g, process.env.PORT || '5000')
+    .replace(/\$PORT/g, process.env.PORT || '5000');
+
+  const baseUrl = expandedEnvBase.replace(/\/$/, '');
   const pagePath = process.env.ARCMM_RUNNER_PAGE || '/static/arc_mm/arc_mm.html';
   const timeoutMs = Number(process.env.ARCMM_RUNNER_TIMEOUT || opts['timeout-ms'] || 120000);
   const headlessEnv = (process.env.ARCMM_HEADLESS || '').toLowerCase();
