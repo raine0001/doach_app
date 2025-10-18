@@ -3002,6 +3002,7 @@ def admin_session_debug(sid):
                     override = (
                         data.get("adminOverride") if isinstance(data, dict) else None
                     )
+                    arcmm_payload = data.get("arcmm") if isinstance(data, dict) else None
                     out["shotsDB"].append(
                         {
                             "idx": r.idx,
@@ -3015,6 +3016,7 @@ def admin_session_debug(sid):
                             else None,
                             "adminOverride": override,
                             "poseScore": getattr(r, "pose_score", None),
+                            "arcmm": arcmm_payload,
                         }
                     )
                 # pose snapshots
@@ -3096,6 +3098,9 @@ def admin_session_debug(sid):
                                 if isinstance(data, dict)
                                 else None
                             )
+                            arcmm_payload = (
+                                data.get("arcmm") if isinstance(data, dict) else None
+                            )
                             out["shotsDB"].append(
                                 {
                                     "idx": r.idx,
@@ -3109,6 +3114,7 @@ def admin_session_debug(sid):
                                     else None,
                                     "adminOverride": override,
                                     "poseScore": getattr(r, "pose_score", None),
+                                    "arcmm": arcmm_payload,
                                 }
                             )
     except Exception:
