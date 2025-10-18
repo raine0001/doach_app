@@ -1,9 +1,53 @@
 #!/usr/bin/env node
 
 const fs = require('fs');
-const fsp = require('fs/promises');
 const path = require('path');
 const { chromium } = require('playwright');
+
+const fsPromises = fs.promises;
+async function ensureDir(dirPath) {
+  if (fsPromises && typeof fsPromises.mkdir === 'function') {
+    try {
+      await fsPromises.mkdir(dirPath, { recursive: true });
+      return;
+    } catch (err) {
+      if (err && err.code === 'EEXIST') return;
+      if (err && err.code !== 'ERR_INVALID_OPT_VALUE') throw err;
+      // fall through to manual recursion when recursive option unsupported
+    }
+  }
+  return new Promise((resolve, reject) => {
+    fs.stat(dirPath, (err, stats) => {
+      if (!err && stats.isDirectory()) return resolve();
+      if (err && err.code !== 'ENOENT') return reject(err);
+      const parent = path.dirname(dirPath);
+      if (!parent || parent === dirPath) {
+        fs.mkdir(dirPath, (mkErr) => {
+          if (mkErr && mkErr.code !== 'EEXIST') reject(mkErr);
+          else resolve();
+        });
+        return;
+      }
+      ensureDir(parent)
+        .then(() => {
+          fs.mkdir(dirPath, (mkErr) => {
+            if (mkErr && mkErr.code !== 'EEXIST') reject(mkErr);
+            else resolve();
+          });
+        })
+        .catch(reject);
+    });
+  });
+}
+
+async function writeFile(filePath, data, options) {
+  if (fsPromises && typeof fsPromises.writeFile === 'function') {
+    return fsPromises.writeFile(filePath, data, options);
+  }
+  return new Promise((resolve, reject) => {
+    fs.writeFile(filePath, data, options, (err) => (err ? reject(err) : resolve()));
+  });
+}
 
 async function main() {
   const args = process.argv.slice(2);
@@ -30,7 +74,7 @@ async function main() {
     process.exit(1);
   }
 
-  await fsp.mkdir(outputDir, { recursive: true });
+  await ensureDir(outputDir);
 
   const opts = Object.fromEntries(extraArgs.map(arg => {
     const [key, ...rest] = arg.replace(/^-+/, '').split('=');
@@ -183,12 +227,12 @@ async function main() {
     const overlayPath = path.join(outputDir, overlayName);
 
     if (result.summary) {
-      await fsp.writeFile(summaryPath, JSON.stringify(result.summary, null, 2), 'utf-8');
+      await writeFile(summaryPath, JSON.stringify(result.summary, null, 2), 'utf-8');
     }
 
     if (result.overlay && Array.isArray(result.overlay.bytes) && result.overlay.bytes.length) {
       const bytes = Buffer.from(result.overlay.bytes);
-      await fsp.writeFile(overlayPath, bytes);
+      await writeFile(overlayPath, bytes);
     }
 
     console.log(JSON.stringify({
