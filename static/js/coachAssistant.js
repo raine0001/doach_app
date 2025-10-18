@@ -3401,7 +3401,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
 
         // Wake words (loose match)
         const DOACH = (window.DOACH ||= {});
-        DOACH.WAKE_WORDS ||= ['hey doach', 'my coach', 'coach', 'douch'];
+        DOACH.WAKE_WORDS ||= ['hey doach', 'hey coach', 'my coach', 'coach', 'douch'];
 
         const prefs = (window.doachGetPrefs?.() || {});
 

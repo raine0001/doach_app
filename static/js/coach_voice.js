@@ -719,7 +719,8 @@ export function listenForEndSession(wakePhrase = 'hey doach, end the session', o
                 const i = e.resultIndex;
                 const raw = (e.results[i][0].transcript || '').toLowerCase();
                 const t = raw.replace(/\s+/g, ' ').trim();
-                const hasWake = t.includes('hey doach');
+                const wakePhrases = ['hey doach', 'hey coach'];
+                const hasWake = wakePhrases.some((phrase) => t.includes(phrase));
                 const awaiting = (() => { try { return window.__AWAITING_NEW_SESSION_CONFIRM === true; } catch { return false; } })();
                 const isAffirmative = matchesPhrase(t, affirmativePhrases);
                 const wantsStart = matchesPhrase(t, startSessionPhrases);
