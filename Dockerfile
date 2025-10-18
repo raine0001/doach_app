@@ -3,6 +3,13 @@ FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
 WORKDIR /app
 
+# Install Node.js 18 (for ArcMM runner) and clean up apt cache
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl ca-certificates gnupg \
+    && curl -fsSL https://deb.nodesource.com/setup_18.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install Python deps
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
