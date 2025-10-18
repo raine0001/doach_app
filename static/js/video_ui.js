@@ -1316,6 +1316,8 @@ function requestNewSessionPrompt(options = {}) {
         } finally {
             __newSessionQuestionAsked = true;
             setAwaitingNewSessionConfirm(true);
+            try { window.__startCoachVoiceRecognition?.(); } catch { }
+            try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'new-session-prompt' } })); } catch { }
         }
     }, delayMs);
 }

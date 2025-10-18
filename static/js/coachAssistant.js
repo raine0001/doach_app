@@ -2559,13 +2559,92 @@ window.addEventListener('shot:feedback:request', (e) => {
     // Receives native transcripts (from the iOS wrapper)
     window.handleVoiceTranscript = async (text) => {
         const lower = (text || '').toLowerCase();
+        const containsPhrase = (phrases) => {
+            try {
+                return phrases.some((phrase) => {
+                    if (!phrase) return false;
+                    const target = phrase.toLowerCase();
+                    if (target.includes(' ')) {
+                        return lower.includes(target);
+                    }
+                    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    return new RegExp(`\\b${escaped}\\b`).test(lower);
+                });
+            } catch { return false; }
+        };
+        const affirmativePhrases = [
+            'yes',
+            'yeah',
+            'yep',
+            'yup',
+            'sure',
+            'absolutely',
+            'of course',
+            'affirmative',
+            'definitely',
+            'for sure',
+            'sounds good',
+            'yes please',
+            'please do',
+            "let's go",
+            'lets go',
+            'let us go',
+            "let's do it",
+            'lets do it',
+            'do it',
+            'go ahead',
+            'go for it',
+            'make it happen',
+            'run it back',
+            'another one',
+            'one more',
+            'hit me',
+            'start it',
+        ];
+        const startPhrases = [
+            'start session',
+            'start the session',
+            'start a new session',
+            'new session',
+            'start another session',
+            'another session',
+            'start another one',
+            'another one',
+            'start a new one',
+            'start the next session',
+            'next session',
+            'begin session',
+            'begin the session',
+            'begin a new session',
+            'begin another session',
+            'begin another one',
+            'restart session',
+            'restart the session',
+            'start over',
+            'start again',
+            'restart',
+            'run it back',
+            'kick it off',
+            'let us start',
+            "let's start",
+            'start recording',
+            'start another set',
+            'start another drill',
+            'start the next one',
+            'one more session',
+            'start fresh',
+            'fresh session',
+            'new one',
+        ];
+        const affirmative = containsPhrase(affirmativePhrases);
+        const wantsStart = containsPhrase(startPhrases);
         // Reuse your wake-word/capture logic, or just route to your Q&A:
         try {
             if (/\b(end (the )?session|i'?m done|finish session)\b/.test(lower)) {
                 window.dispatchEvent(new CustomEvent('hud:end-session'));
                 return;
             }
-            if (/\b(start (a )?new session|new session|begin session|start session)\b/.test(lower)) {
+            if (wantsStart) {
                 if (typeof window.beginLiveSession === 'function') {
                     window.beginLiveSession({ via: 'voice-transcript' });
                 } else {
@@ -2584,9 +2663,10 @@ window.addEventListener('shot:feedback:request', (e) => {
                     return style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
                 } catch { return false; }
             })();
-            const affirmative = /\b(yes|yeah|yep|sure|let('?|’)s go|let us go|go ahead|absolutely|yup)\b/;
-            const wantsStart = lower.includes('start session') || lower.includes('start a new session') || lower.includes('new session');
-            if ((awaiting || startOverlayVisible) && (affirmative.test(lower) || wantsStart)) {
+            const affirmativeLegacy = /\b(yes|yeah|yep|sure|let('?|’)s go|let us go|go ahead|absolutely|yup)\b/;
+            const wantsAnother = lower.includes('another session') || lower.includes('another one') || lower.includes('one more');
+            const isAffirmative = affirmative || affirmativeLegacy.test(lower);
+            if ((awaiting || startOverlayVisible) && (isAffirmative || wantsStart || wantsAnother)) {
                 if (typeof window.beginLiveSession === 'function') {
                     window.beginLiveSession({ via: 'voice-affirm' });
                 } else {

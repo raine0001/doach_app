@@ -593,6 +593,89 @@ export function listenForEndSession(wakePhrase = 'hey doach, end the session', o
     try {
         const SR = (window.SpeechRecognition || window.webkitSpeechRecognition);
         if (!SR) return () => { };
+
+        const matchesPhrase = (value, phrases) => {
+            try {
+                const haystack = (value || '').toLowerCase();
+                return phrases.some((phrase) => {
+                    if (!phrase) return false;
+                    const target = phrase.toLowerCase();
+                    if (target.includes(' ')) {
+                        return haystack.includes(target);
+                    }
+                    const escaped = target.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    return new RegExp(`\\b${escaped}\\b`).test(haystack);
+                });
+            } catch { return false; }
+        };
+        const affirmativePhrases = [
+            'yes',
+            'yeah',
+            'yep',
+            'yup',
+            'sure',
+            'absolutely',
+            'of course',
+            'affirmative',
+            'definitely',
+            'for sure',
+            'sounds good',
+            'yes please',
+            'please do',
+            "let's go",
+            'lets go',
+            'let us go',
+            "let's do it",
+            'lets do it',
+            'do it',
+            'go ahead',
+            'go for it',
+            'make it happen',
+            'run it back',
+            'another one',
+            'one more',
+            'hit me',
+            'start it',
+            'yessir',
+            'bet',
+        ];
+        const startSessionPhrases = [
+            'start session',
+            'start the session',
+            'start a new session',
+            'new session',
+            'start another session',
+            'another session',
+            'start another one',
+            'another one',
+            'start a new one',
+            'start the next session',
+            'next session',
+            'begin session',
+            'begin the session',
+            'begin a new session',
+            'begin another session',
+            'begin another one',
+            'restart session',
+            'restart the session',
+            'start over',
+            'start again',
+            'restart',
+            'run it back',
+            'kick it off',
+            'let us start',
+            "let's start",
+            'start recording',
+            'start another set',
+            'start another drill',
+            'start the next one',
+            'one more session',
+            'one more',
+            'new one',
+            'start fresh',
+            'fresh session',
+        ];
+
         const rec = new SR(); rec.continuous = true; rec.lang = 'en-US';
         let started = false;
         let stopped = false;
@@ -638,11 +721,11 @@ export function listenForEndSession(wakePhrase = 'hey doach, end the session', o
                 const t = raw.replace(/\s+/g, ' ').trim();
                 const hasWake = t.includes('hey doach');
                 const awaiting = (() => { try { return window.__AWAITING_NEW_SESSION_CONFIRM === true; } catch { return false; } })();
-                const speakYes = /\b(yes|yeah|yep|sure|let('?|’)?s go|go ahead|absolutely|yup)\b/;
-                const wantsStart = (t.includes('start') && t.includes('session')) || t.includes('new session');
+                const isAffirmative = matchesPhrase(t, affirmativePhrases);
+                const wantsStart = matchesPhrase(t, startSessionPhrases);
                 const startOverlayVisible = isStartSessionOverlayVisible();
 
-                if ((awaiting || startOverlayVisible) && (speakYes.test(t) || wantsStart)) {
+                if ((awaiting || startOverlayVisible) && (isAffirmative || wantsStart)) {
                     if (typeof window.beginLiveSession === 'function') {
                         window.beginLiveSession({ via: 'voice-affirm' });
                     } else {
@@ -656,7 +739,7 @@ export function listenForEndSession(wakePhrase = 'hey doach, end the session', o
                     return;
                 }
 
-                if (hasWake && wantsStart) {
+                if (hasWake && (wantsStart || isAffirmative)) {
                     if (typeof window.beginLiveSession === 'function') {
                         window.beginLiveSession({ via: 'voice-command' });
                     } else {
