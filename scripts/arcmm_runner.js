@@ -135,7 +135,7 @@ async function main() {
   await page.addInitScript(() => {
     window.addEventListener('arcmm:result', async (event) => {
       try {
-        const detail = event?.detail || {};
+        const detail = (event && event.detail) || {};
         const overlay = detail.overlay || {};
         let bytes = null;
         if (overlay.blob && typeof overlay.blob.arrayBuffer === 'function') {
@@ -198,7 +198,8 @@ async function main() {
       overlayPath: (result.overlay && Array.isArray(result.overlay.bytes) && result.overlay.bytes.length) ? overlayPath : null,
     }));
   } catch (err) {
-    console.error(`[arcmm-runner] failed: ${err?.message || err}`);
+    const msg = err && err.message ? err.message : err;
+    console.error(`[arcmm-runner] failed: ${msg}`);
     process.exitCode = 1;
   } finally {
     clearTimeout(timeoutHandle);
@@ -207,6 +208,7 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(`[arcmm-runner] unexpected error: ${err?.message || err}`);
+  const msg = err && err.message ? err.message : err;
+  console.error(`[arcmm-runner] unexpected error: ${msg}`);
   process.exit(1);
 });
