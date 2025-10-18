@@ -3402,6 +3402,20 @@ Draft to refine (optional): '${draftLine}'` : ''}
         // Wake words (loose match)
         const DOACH = (window.DOACH ||= {});
         DOACH.WAKE_WORDS ||= ['hey doach', 'hey coach', 'my coach', 'coach', 'douch'];
+        const START_SESSION_PHRASES = [
+            'start session',
+            'start a session',
+            'start new session',
+            'start a new session',
+            'start live session',
+            'start live',
+            'start another session',
+            'start another one',
+            'begin session',
+            'begin a session',
+            'begin a new session',
+            'begin live session'
+        ];
 
         const prefs = (window.doachGetPrefs?.() || {});
 
@@ -3601,6 +3615,19 @@ Draft to refine (optional): '${draftLine}'` : ''}
                 // strip wake words if included together
                 const wakeRe = new RegExp(DOACH.WAKE_WORDS.map(w => norm(w)).join('|'), 'g');
                 const q = lower.replace(wakeRe, '').trim();
+
+                const wantsStart = START_SESSION_PHRASES.some((phrase) => q.includes(norm(phrase)));
+                if (wantsStart) {
+                    captureMode = false;
+                    showDot(false);
+                    doachSpeak?.("Starting session.");
+                    if (typeof window.beginLiveSession === 'function') {
+                        window.beginLiveSession({ via: 'voice-command' });
+                    } else {
+                        window.dispatchEvent(new CustomEvent('hud:start-session'));
+                    }
+                    return;
+                }
 
                 let reply = answerLocal(q);
 
