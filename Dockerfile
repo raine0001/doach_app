@@ -28,5 +28,5 @@ ENV ARCMM_RUNNER_CMD="node scripts/arcmm_runner.js"
 ENV ARCMM_RUNNER_TIMEOUT=90000
 
 # Default entrypoint
-CMD ["bash", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 3 --threads 8 app:app"]
+CMD ["bash", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 1 --threads 8 app:app"]
 
