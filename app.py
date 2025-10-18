@@ -361,12 +361,15 @@ ARCMM_RUNNER_CMD = os.getenv("ARCMM_RUNNER_CMD", "").strip()
 ARCMM_MAX_ATTEMPTS = int(os.getenv("ARCMM_MAX_ATTEMPTS", "6"))
 ARCMM_RETRY_DELAY = float(os.getenv("ARCMM_RETRY_DELAY", "1.5"))
 ARCMM_RUNNER_TIMEOUT = float(os.getenv("ARCMM_RUNNER_TIMEOUT", "120"))
+ARCMM_WORKER_COUNT = max(1, int(os.getenv("ARCMM_WORKERS", "1")))
 ARCMM_PROCESSED_DIRNAME = "processed"
 
 _ARCMM_QUEUE: "Queue[dict]" = Queue()
 _ARCMM_JOB_KEYS: set[str] = set()
 _ARCMM_LOCK = threading.Lock()
-_ARCMM_WORKER_THREAD: threading.Thread | None = None
+_ARCMM_WORKER_THREADS: list[threading.Thread] = []
+_ARCMM_SESSION_LOCKS: dict[str, threading.Lock] = {}
+_ARCMM_SESSION_LOCKS_LOCK = threading.Lock()
 
 
 def _arcmm_processed_dir(sid: str) -> Path:
@@ -392,6 +395,16 @@ def _arcmm_clip_candidates(sid: str, idx: int) -> Path | None:
             if p.is_file():
                 return p
     return None
+
+
+def _arcmm_acquire_session_lock(sid: str) -> threading.Lock:
+    with _ARCMM_SESSION_LOCKS_LOCK:
+        lock = _ARCMM_SESSION_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.Lock()
+            _ARCMM_SESSION_LOCKS[sid] = lock
+    lock.acquire()
+    return lock
 
 
 def _arcmm_update_shot_status(
@@ -527,13 +540,14 @@ def _run_arcmm_runner(sid: str, idx: int, clip_path: Path) -> dict:
     return {"summary": summary, "clip_url": clip_url, "message": message}
 
 
-def _arcmm_worker_loop() -> None:
+def _arcmm_worker_loop(worker_id: int) -> None:
     while True:
         job = _ARCMM_QUEUE.get()
         sid = job["sid"]
         idx = int(job["idx"])
         attempt = int(job.get("attempt", 0))
         key = f"{sid}:{idx}"
+        session_lock = _arcmm_acquire_session_lock(sid)
         requeued = False
         try:
             clip = _arcmm_clip_candidates(sid, idx)
@@ -582,6 +596,7 @@ def _arcmm_worker_loop() -> None:
             except Exception:
                 pass
         finally:
+            session_lock.release()
             if not requeued:
                 with _ARCMM_LOCK:
                     _ARCMM_JOB_KEYS.discard(key)
@@ -589,15 +604,24 @@ def _arcmm_worker_loop() -> None:
 
 
 def _ensure_arcmm_worker_started() -> None:
-    global _ARCMM_WORKER_THREAD
+    global _ARCMM_WORKER_THREADS
     if not ARCMM_AUTO_PROCESS:
         return
-    if _ARCMM_WORKER_THREAD and _ARCMM_WORKER_THREAD.is_alive():
+    alive_threads: list[threading.Thread] = []
+    for t in _ARCMM_WORKER_THREADS:
+        if t.is_alive():
+            alive_threads.append(t)
+    _ARCMM_WORKER_THREADS = alive_threads
+    if len(_ARCMM_WORKER_THREADS) >= ARCMM_WORKER_COUNT:
         return
-    _ARCMM_WORKER_THREAD = threading.Thread(
-        target=_arcmm_worker_loop, name="arcmm-worker", daemon=True
-    )
-    _ARCMM_WORKER_THREAD.start()
+    # Start additional workers to reach desired count
+    for i in range(len(_ARCMM_WORKER_THREADS), ARCMM_WORKER_COUNT):
+        worker_name = f"arcmm-worker-{i+1}"
+        t = threading.Thread(
+            target=_arcmm_worker_loop, args=(i + 1,), name=worker_name, daemon=True
+        )
+        _ARCMM_WORKER_THREADS.append(t)
+        t.start()
 
 
 def _arcmm_queue_shot(sid: str, idx: int) -> None:
