@@ -3,13 +3,13 @@ FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
 WORKDIR /app
 
-# Install Node.js for the ArcMM runner
-RUN apt-get update && apt-get install -y nodejs npm \
-    && rm -rf /var/lib/apt/lists/*
-
 # Install Python deps
 COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
+
+# Install JS deps needed for the ArcMM runner (Playwright)
+COPY package.json package-lock.json ./
+RUN npm install --include=dev --omit=optional --loglevel warn
 
 # Copy the rest of the project
 COPY . .

@@ -7,8 +7,7 @@
     "test:live": "npx playwright test -c tests/playwright.config.ts tests/e2e/live_cam.spec.ts --headed",
     "test:e2e": "npx playwright test -c tests/playwright.config.ts",
     "test:e2e:preroll": "npx playwright test -c tests/playwright.config.ts tests/e2e/preroll_backend.spec.ts",
-    "test:3shots": "node -e \"process.env.DOACH_TEST_CLIP=process.env.DOACH_TEST_CLIP||'C:/Users/dave/Desktop/Doach/content/3shot_trim.mp4';process.env.DOACH_CYCLES=process.env.DOACH_CYCLES||'3';require('child_process').spawn('npx',['playwright','test','-c','tests/playwright.config.ts','tests/e2e/shot_flow.spec.ts'],{stdio:'inherit',shell:true}).on('exit',c=>process.exit(c));\""
-    ,
+    "test:3shots": "node -e \"process.env.DOACH_TEST_CLIP=process.env.DOACH_TEST_CLIP||'C:/Users/dave/Desktop/Doach/content/3shot_trim.mp4';process.env.DOACH_CYCLES=process.env.DOACH_CYCLES||'3';require('child_process').spawn('npx',['playwright','test','-c','tests/playwright.config.ts','tests/e2e/shot_flow.spec.ts'],{stdio:'inherit',shell:true}).on('exit',c=>process.exit(c));\"",
     "inspect:3shots": "node -e \"process.env.INSPECT='1';process.env.DOACH_TEST_CLIP=process.env.DOACH_TEST_CLIP||'C:/Users/dave/Desktop/Doach/content/3shot_trim.webm';require('child_process').spawn('npx',['playwright','test','-c','tests/playwright.config.ts','tests/e2e/three_shots.spec.ts','--headed'],{stdio:'inherit',shell:true}).on('exit',c=>process.exit(c));\""
   },
   "dependencies": {
@@ -17,7 +16,8 @@
   "description": "Cross-platform app for basketball shot analysis and coaching.",
   "main": "index.js",
   "devDependencies": {
-    "@playwright/test": "^1.55.0"
+    "@playwright/test": "1.47.0",
+    "playwright": "1.47.0"
   },
   "keywords": [],
   "author": "",
