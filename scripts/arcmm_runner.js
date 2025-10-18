@@ -75,11 +75,29 @@ async function main() {
   const page = await context.newPage();
 
   page.on('pageerror', (err) => {
-    console.error(`[arcmm-runner] page error: ${err?.message || err}`);
+    let message = '';
+    if (err) {
+      if (err.stack) message = err.stack;
+      else if (err.message) message = err.message;
+      else message = String(err);
+    } else {
+      message = '(unknown error)';
+    }
+    console.error(`[arcmm-runner] page error: ${message}`);
   });
   page.on('console', (msg) => {
     const text = msg.text();
     console.error(`[arcmm][console] ${text}`);
+  });
+  page.on('requestfailed', (request) => {
+    try {
+      const failure = request.failure();
+      console.error(
+        `[arcmm-runner] request failed ${request.method()} ${request.url()} :: ${failure ? failure.errorText : 'unknown reason'}`
+      );
+    } catch (err) {
+      console.error('[arcmm-runner] requestfailed handler error', err);
+    }
   });
 
   let resolveResult;
@@ -147,7 +165,13 @@ async function main() {
   });
 
   try {
-    await page.goto(`${baseUrl}${pagePath}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    console.error(`[arcmm-runner] opening ${baseUrl}${pagePath} (clip=${clipUrl})`);
+    const response = await page.goto(`${baseUrl}${pagePath}`, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+    if (!response) {
+      console.error('[arcmm-runner] page.goto returned no response (possible navigation failure)');
+    } else if (!response.ok()) {
+      console.error(`[arcmm-runner] non-OK response: ${response.status()} ${response.statusText()} from ${response.url()}`);
+    }
     await page.waitForFunction(() => {
       return !!(window.arcmmRunner && window.arcmmRunner.ready);
     }, { timeout: timeoutMs });
