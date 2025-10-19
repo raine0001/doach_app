@@ -417,7 +417,11 @@ def _arcmm_apply_make_fallback(summary: dict | None) -> dict | None:
         if result != "miss":
             return summary
         miss_reason = (summary.get("missReason") or "").lower()
-        candidate_reasons = {"rim out", "unclassified miss"}
+        candidate_reasons = {
+            "rim out",
+            "unclassified miss",
+            "did not rise above rim",
+        }
         trail = summary.get("trail") or []
         if not trail:
             return summary
@@ -432,13 +436,23 @@ def _arcmm_apply_make_fallback(summary: dict | None) -> dict | None:
             return summary
         span_y = max(y_values) - min(y_values)
         max_y = max(y_values)
-        # Heuristic: significant downward travel into hoop area implies a make.
-        if miss_reason in candidate_reasons and span_y >= 250 and max_y >= 250:
-            summary = dict(summary)
-            summary["made"] = True
-            summary["result"] = "HIT"
-            summary["missReason"] = None
-            summary["fallbackOverride"] = "make_from_trail"
+        # Heuristic: significant downward travel into the hoop area implies a make.
+        if miss_reason in candidate_reasons:
+            release_angle = summary.get("releaseAngle")
+            arc_height = summary.get("arcHeight")
+            override = False
+            if span_y >= 250 and max_y >= 250:
+                override = True
+            elif span_y >= 140 and (release_angle or 0) >= 65:
+                override = True
+            elif span_y >= 100 and (arc_height or 0) >= 100:
+                override = True
+            if override:
+                summary = dict(summary)
+                summary["made"] = True
+                summary["result"] = "HIT"
+                summary["missReason"] = None
+                summary["fallbackOverride"] = "make_from_trail"
         return summary
     except Exception as exc:
         _trace("arcmm fallback error:", exc)
