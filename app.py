@@ -407,6 +407,44 @@ def _arcmm_acquire_session_lock(sid: str) -> threading.Lock:
     return lock
 
 
+def _arcmm_apply_make_fallback(summary: dict | None) -> dict | None:
+    if not summary:
+        return summary
+    try:
+        if summary.get("made") is True:
+            return summary
+        result = (summary.get("result") or "").lower()
+        if result != "miss":
+            return summary
+        miss_reason = (summary.get("missReason") or "").lower()
+        candidate_reasons = {"rim out", "unclassified miss"}
+        trail = summary.get("trail") or []
+        if not trail:
+            return summary
+        y_values: list[float] = []
+        for point in trail:
+            try:
+                y = float(point.get("y"))
+            except (TypeError, ValueError):
+                continue
+            y_values.append(y)
+        if not y_values:
+            return summary
+        span_y = max(y_values) - min(y_values)
+        max_y = max(y_values)
+        # Heuristic: significant downward travel into hoop area implies a make.
+        if miss_reason in candidate_reasons and span_y >= 250 and max_y >= 250:
+            summary = dict(summary)
+            summary["made"] = True
+            summary["result"] = "HIT"
+            summary["missReason"] = None
+            summary["fallbackOverride"] = "make_from_trail"
+        return summary
+    except Exception as exc:
+        _trace("arcmm fallback error:", exc)
+        return summary
+
+
 def _arcmm_update_shot_status(
     sid: str,
     idx: int,
@@ -433,11 +471,16 @@ def _arcmm_update_shot_status(
         arcmm = dict(payload.get("arcmm") or {})
         arcmm["status"] = status
         arcmm["updated_at"] = datetime.utcnow().isoformat(timespec="seconds")
-        if message is not None:
-            arcmm["message"] = message
         if clip_url:
             arcmm["processed_clip"] = clip_url
         if summary is not None:
+            summary = _arcmm_apply_make_fallback(summary)
+            if summary.get("fallbackOverride"):
+                message = (
+                    f"{message} (fallback make override)"
+                    if message
+                    else "fallback make override"
+                )
             arcmm["summary"] = summary
             try:
                 if "entryAngle" in summary and summary["entryAngle"] is not None:
@@ -452,6 +495,9 @@ def _arcmm_update_shot_status(
                     row.miss_reason = summary.get("missReason")
             except Exception as exc:
                 _trace("arcmm: summary->column sync failed", exc)
+
+        if message is not None:
+            arcmm["message"] = message
 
         payload["arcmm"] = arcmm
         row.data = payload
