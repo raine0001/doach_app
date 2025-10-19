@@ -417,11 +417,7 @@ def _arcmm_apply_make_fallback(summary: dict | None) -> dict | None:
         if result != "miss":
             return summary
         miss_reason = (summary.get("missReason") or "").lower()
-        candidate_reasons = {
-            "rim out",
-            "unclassified miss",
-            "did not rise above rim",
-        }
+        candidate_reasons = {"rim out"}
         trail = summary.get("trail") or []
         if not trail:
             return summary
@@ -436,23 +432,56 @@ def _arcmm_apply_make_fallback(summary: dict | None) -> dict | None:
             return summary
         span_y = max(y_values) - min(y_values)
         max_y = max(y_values)
-        # Heuristic: significant downward travel into the hoop area implies a make.
+        # Heuristic: significant downward travel through the hoop cylinder implies a make.
         if miss_reason in candidate_reasons:
-            release_angle = summary.get("releaseAngle")
-            arc_height = summary.get("arcHeight")
+            release_angle = summary.get("releaseAngle") or 0.0
+            arc_height = summary.get("arcHeight") or 0.0
+            hoop = summary.get("hoop") or {}
+            try:
+                hoop_x = float(hoop.get("x"))
+                hoop_y = float(hoop.get("y"))
+            except (TypeError, ValueError):
+                hoop_x = hoop_y = None
+            tail = trail[-5:] if len(trail) >= 5 else trail
+            within_cylinder = True
+            passes_through = True
+            if hoop_x is not None and hoop_y is not None:
+                within_cylinder = all(
+                    abs(float(pt.get("x", hoop_x)) - hoop_x) <= 110
+                    and abs(float(pt.get("y", hoop_y)) - hoop_y) <= 110
+                    for pt in tail
+                )
+                passes_through = any(
+                    float(pt.get("y", hoop_y)) >= hoop_y - 15 for pt in tail
+                )
+            else:
+                passes_through = max_y >= 420
+
             override = False
-            if span_y >= 250 and max_y >= 250:
+            if span_y >= 350 and passes_through and within_cylinder:
                 override = True
-            elif span_y >= 140 and (release_angle or 0) >= 65:
+            elif (
+                span_y >= 260
+                and passes_through
+                and within_cylinder
+                and release_angle >= 65
+            ):
                 override = True
-            elif span_y >= 100 and (arc_height or 0) >= 100:
+            elif (
+                span_y >= 220
+                and passes_through
+                and within_cylinder
+                and arc_height >= 120
+            ):
                 override = True
+
             if override:
                 summary = dict(summary)
                 summary["made"] = True
                 summary["result"] = "HIT"
-                summary["missReason"] = None
                 summary["fallbackOverride"] = "make_from_trail"
+                summary["fallbackOriginalReason"] = miss_reason
+                summary["missReason"] = None
         return summary
     except Exception as exc:
         _trace("arcmm fallback error:", exc)
@@ -771,7 +800,20 @@ def api_session_add_shot(sid):
     data = request.get_json(force=True) or {}
     sess = _read_session(sid)
     if not sess:
-        return jsonify({"error": "session not found"}), 404
+        try:
+            sess = {
+                "id": sid,
+                "startedAt": int(time.time() * 1000),
+                "endedAt": None,
+                "device": request.headers.get("User-Agent", "unknown"),
+                "video": None,
+                "shots": [],
+                "totals": {"attempts": 0, "made": 0, "accuracy": 0},
+            }
+            _write_session(sid, sess)
+        except Exception as exc:
+            _trace("api:sid/shot:create-missing-session", exc)
+            return jsonify({"error": "session not ready"}), 404
     shots = list(sess.get("shots", []))
     client_idx = data.get("idx") if isinstance(data.get("idx"), int) else None
     replace = bool(data.get("replace"))

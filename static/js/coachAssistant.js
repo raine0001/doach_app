@@ -3602,7 +3602,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
                 captureMode = true;
                 showDot(true);
                 clearTimeout(captureTimer);
-                captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 5000);
+                captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 7000);
                 doachSpeak?.("Yes?");
                 return;
             }
@@ -3610,7 +3610,7 @@ Draft to refine (optional): '${draftLine}'` : ''}
             // Step 2: capture the follow-up question
             if (captureMode) {
                 clearTimeout(captureTimer);
-                captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 1500);
+                captureTimer = setTimeout(() => { captureMode = false; showDot(true); }, 3500);
 
                 // strip wake words if included together
                 const wakeRe = new RegExp(DOACH.WAKE_WORDS.map(w => norm(w)).join('|'), 'g');
