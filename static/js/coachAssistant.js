@@ -98,11 +98,19 @@ try {
 
 // Default saved TTS preference to server voice if none is set (helps desktop first-run)
 try {
-    if (!localStorage.getItem('doach_tts')) {
-        const v = (window.DOACH && window.DOACH.voice) || 'alloy';
-        localStorage.setItem('doach_tts', JSON.stringify({ provider: 'server', voice: v }));
+    const rawPref = localStorage.getItem('doach_tts');
+    const parsed = rawPref ? JSON.parse(rawPref) : {};
+    const voice = parsed.voice || (window.DOACH && window.DOACH.voice) || 'alloy';
+    if (!parsed.provider || parsed.provider !== 'server') {
+        localStorage.setItem('doach_tts', JSON.stringify({ provider: 'server', voice }));
     }
-} catch { }
+} catch {
+    try {
+        const fallbackVoice = (window.DOACH && window.DOACH.voice) || 'alloy';
+        localStorage.setItem('doach_tts', JSON.stringify({ provider: 'server', voice: fallbackVoice }));
+    } catch { }
+}
+try { localStorage.setItem('tts_engine', 'openai'); } catch { }
 
 
 // Also show a metrics overlay shortly after every shot:release (independent of coaching voice)
@@ -3757,4 +3765,3 @@ Draft to refine (optional): '${draftLine}'` : ''}
     })();
 
 })();
-

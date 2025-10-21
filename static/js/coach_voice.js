@@ -5,6 +5,11 @@ let __preferredWebVoice = null;
 let __coachSpeechTail = Promise.resolve(false);
 let __coachSpeechActive = false;
 
+function webTtsAllowed() {
+    try { return window.DOACH_ALLOW_WEB_TTS === true; }
+    catch { return false; }
+}
+
 function setCoachSpeechActive(active) {
     if (__coachSpeechActive === active) return;
     __coachSpeechActive = active;
@@ -435,6 +440,12 @@ function getPreferredVoice() {
     try {
         const prefs = JSON.parse(localStorage.getItem('doach_tts') || '{}');
         if (prefs.voice) return prefs.voice;
+        if (prefs.provider && prefs.provider !== 'server' && !webTtsAllowed()) {
+            const voice = prefs.voice || (window.DOACH && window.DOACH.voice) || 'alloy';
+            const next = { provider: 'server', voice };
+            localStorage.setItem('doach_tts', JSON.stringify(next));
+            return next.voice;
+        }
     } catch { }
     try {
         const stored = localStorage.getItem('doach_voice');
@@ -445,12 +456,23 @@ function getPreferredVoice() {
 
 function getTtsEngine() {
     try {
+        if (window.DOACH_FORCE_WEB_TTS === true && webTtsAllowed()) {
+            window.TTS_ENGINE = 'webspeech';
+            return 'webspeech';
+        }
         let engine = window.TTS_ENGINE || localStorage.getItem('tts_engine') || 'openai';
         if (!engine) engine = 'openai';
         if (engine === 'web') engine = 'webspeech';
+        if (!webTtsAllowed()) {
+            engine = 'openai';
+            try { localStorage.setItem('tts_engine', 'openai'); } catch { }
+        }
         // iOS does not support Web Speech playback reliably; force server TTS
         if (IS_IOS && engine !== 'openai') engine = 'openai';
         window.TTS_ENGINE = engine;
+        if (engine === 'openai') {
+            try { localStorage.setItem('tts_engine', 'openai'); } catch { }
+        }
         return engine;
     } catch {
         return 'openai';
@@ -518,6 +540,7 @@ async function speakViaOpenAI(text, opts = {}) {
 }
 
 async function speakViaWebSpeech(text) {
+    if (!webTtsAllowed()) return false;
     if (!text) return false;
     if (IS_IOS) return false;
     if (!('speechSynthesis' in window)) return false;
@@ -882,6 +905,7 @@ function coachSpeak(text) {
     }
 
     // Fallback browser TTS
+    if (!webTtsAllowed()) return;
     try {
         const u = new SpeechSynthesisUtterance(text);
         u.rate = 1.0; u.pitch = 1.0;
@@ -892,5 +916,4 @@ function coachSpeak(text) {
 try { window.doachSpeak = doachSpeak; } catch { }
 try { window.coachSpeak = doachSpeak; } catch { }
 try { window.primeCoachAudio = primeCoachAudio; } catch { }
-
 
