@@ -1,132 +1,720 @@
 <!DOCTYPE html>
 
+
+
+
+
+
+
 <html>
+
+
+
 <head>
+
+
+
 <meta charset="utf-8"/>
+
+
+
 <meta content="width=device-width, initial-scale=1" name="viewport"/>
+
+
+
 <title>Doach Admin</title>
+
+
+
 <style>
+
+
+
     :root { color-scheme: dark; }
+
+
+
     body { margin:0; font:14px/1.4 system-ui, -apple-system, Segoe UI, Arial; background:#0b0f14; color:#e6edf3; min-height:100vh; display:flex; flex-direction:column; }
+
+
+
     header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; background:#0f1621; border-bottom:1px solid #1f2a36; flex-shrink:0; }
+
+
+
     h1 { font-size:18px; margin:0; }
+
+
+
     main { display:grid; grid-template-columns:380px 1fr; gap:14px; padding:14px; flex:1 1 auto; box-sizing:border-box; min-height:0; height:calc(100vh - 96px); }
+
+
+
     section { background:#0f1621; border:1px solid #1f2a36; border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:0; max-height:100%; }
+
+
+
     section > h2 { font-size:14px; margin:0; padding:10px 12px; background:#111a25; border-bottom:1px solid #1f2a36; flex-shrink:0; }
+
+
+
     .list { padding:8px; overflow:auto; flex:1 1 auto; }
+
+
+
     .row { display:flex; align-items:center; gap:8px; padding:8px; border-bottom:1px solid #16202b; cursor:pointer; transition:background 0.2s ease, border-left 0.2s ease; }
+
+
+
     .row:hover { background:#0d131c; }
+
+
+
     .row.active { background:#122819; border-left:4px solid #2dd683; }
+
+
+
     .row.active:hover { background:#163121; }
+
+
+
     .row-live { border-left:4px solid #f97316; }
+
+
+
+    .row-support-open { border-left:4px solid #ef4444; }
+
+
+
+    .row-support-pending { border-left:4px solid #f97316; }
+
+
+
     .row.selected { outline:1px solid #2563eb; }
+
+
+
     .session-main { flex:1; display:flex; flex-direction:column; gap:2px; }
+
+
+
     .session-meta { text-align:right; font-size:12px; }
+
+
+
     .info-line { font-size:12px; }
+
+
+
     .pill-live { display:inline-block; margin-left:6px; font-size:11px; padding:2px 6px; border-radius:999px; border:1px solid #f97316; background:#431407; color:#fb923c; text-transform:uppercase; letter-spacing:0.05em; }
+
+
+
     .muted { opacity:.8; }
+
+
+
     .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:12px; }
+
+
+
     .ok { background:#11331f; color:#34d399; border:1px solid #1e7a42; }
+
+
+
     .bad { background:#2a1111; color:#f87171; border:1px solid #7a1e1e; }
+
+
+
     .pending { background:#1c1b24; color:#d1d5db; border:1px solid #54535c; }
+
+
+
     .btn { background:#1a2533; color:#dbe5ee; border:1px solid #283241; padding:6px 10px; border-radius:8px; cursor:pointer; }
+
+
+
     .btn:hover { background:#223144; }
+
+
+
     .toolbar { display:flex; gap:8px; align-items:center; }
+
+
+
     .debug-header { display:flex; flex-wrap:wrap; align-items:flex-start; justify-content:space-between; gap:12px; margin-bottom:12px; }
+
+
+
     .debug-actions { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+
+
+
     #dbg-json { background:#0b0f12; color:#cfe8ff; border:1px solid #2a6; border-radius:8px; padding:12px; margin:0; flex:0 1 auto; min-height:120px; max-height:35vh; overflow:auto; font:12px/1.4 monospace; }
+
+
+
     .shots-wrap { margin:0 0 10px; display:flex; flex-direction:column; gap:8px; flex:1 0 auto; min-height:480px; max-height:65vh; }
+
+
+
     .shots-header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; }
+
+
+
     .shots-header h3 { margin:0; font-size:14px; }
+
+
+
     .shots-meta { font-size:12px; color:#94a3b8; }
+
+
+
     #shotsTableWrap,
+
+
+
     .shots-table-wrap { flex:1 1 auto; min-height:0; overflow:auto; border:1px solid #1f2a36; border-radius:8px; background:#0b0f12; }
+
+
+
     #shotsTableWrap.shots-empty,
+
+
+
     .shots-table-wrap.shots-empty { display:flex; align-items:center; justify-content:center; padding:10px; border-style:dashed; color:#94a3b8; font-style:italic; }
+
+
+
     .shots-table { width:100%; border-collapse:collapse; font-size:12px; }
+
+
+
     .shots-table th, .shots-table td { padding:6px 8px; border-bottom:1px solid #1f2a36; text-align:left; vertical-align:top; }
+
+
+
     .shots-table tbody tr:hover { background:#101a29; }
+
+
+
     .clip-link { color:#7dd3fc; text-decoration:none; }
+
+
+
     .clip-link:hover { text-decoration:underline; }
+
+
+
     .clip-link-disabled { color:#94a3b8; pointer-events:none; text-decoration:none; }
+
+
+
     .arcmm-cell { min-width:210px; }
+
+
+
     .arcmm-status { display:flex; flex-direction:column; gap:4px; }
+
+
+
     .arcmm-line { font-size:12px; line-height:1.35; }
+
+
+
     .arcmm-pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:600; font-size:11px; border:1px solid transparent; text-transform:uppercase; letter-spacing:0.05em; }
+
+
+
     .arcmm-pill.ok { background:#11331f; color:#34d399; border-color:#1e7a42; }
+
+
+
     .arcmm-pill.pending { background:#1c1b24; color:#d1d5db; border-color:#54535c; }
+
+
+
     .arcmm-pill.bad { background:#2a1111; color:#f87171; border-color:#7a1e1e; }
+
+
+
     .arcmm-pill.muted { background:#10131a; color:#94a3b8; border-color:#2c3440; }
+
+
+
     .arcmm-metrics { color:#cbd5f5; }
+
+
+
     .arcmm-message { color:#fbbf24; }
+
+
+
     .arcmm-message::before { content:"WARN: "; font-weight:600; }
+
+
+
     .arcmm-overlay-link { color:#7dd3fc; text-decoration:none; }
+
+
+
     .arcmm-overlay-link:hover { text-decoration:underline; }
+
+
+
     .arcmm-updated { color:#64748b; font-style:italic; }
+
+
+
     .shots-empty { padding:10px; font-style:italic; color:#94a3b8; border:1px dashed #2a3a4a; border-radius:8px; }
+
+
+
     .shots-pill { display:inline-block; padding:2px 8px; border-radius:999px; font-weight:600; font-size:11px; border:1px solid transparent; text-transform:uppercase; letter-spacing:0.04em; }
+
+
+
     .shots-pill.make { border-color:#1e7a42; background:#11331f; color:#34d399; }
+
+
+
     .shots-pill.miss { border-color:#7a1e1e; background:#2a1111; color:#f87171; }
+
+
+
     .shots-pill.pending { border-color:#54535c; background:#1c1b24; color:#d1d5db; }
+
+
+
     .shots-pill.manual { border-color:#f59e0b; background:#422006; color:#facc15; }
-    #sessionPane { display:flex; flex-direction:column; min-height:0; max-height:100%; }
-    #sessionPane .list { max-height:100%; overflow-y:auto; }
-    #sessionsList { max-height:100%; overflow-y:auto; }
-    #viewer { flex:1 1 auto; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; padding:10px; min-height:0; gap:16px; }
-    iframe { width:100%; height:100%; border:none; border-radius:10px; background:#0b0f14; min-height:0; }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; flex-shrink:0; }
-    pre { background:#0b0f14; border:1px solid #1f2a36; border-radius:8px; padding:8px; overflow:auto; max-height:320px; }
-    input[type="text"] { background:#0b0f14; color:#e6edf3; border:1px solid #1f2a36; padding:6px 8px; border-radius:8px; width:200px; }
-    .shots-table td.actions-cell { white-space:nowrap; }
-    .shot-action-btn { background:#1f2933; color:#e2e8f0; border:1px solid #374151; padding:4px 10px; border-radius:6px; font-size:11px; cursor:pointer; }
-    .shot-action-btn:hover { background:#273449; }
-    .shot-action-btn:disabled { opacity:.6; cursor:default; }
-    .override-note { margin-top:6px; font-size:11px; color:#facc15; }
-    @media (max-width: 1040px) {
-      main { grid-template-columns:1fr; }
-      #viewer { min-height:320px; }
+
+
+
+    .support-flag { display:inline-block; width:9px; height:9px; border-radius:50%; margin-left:6px; position:relative; top:-1px; }
+
+
+
+    .support-flag-ticket { background:#ef4444; box-shadow:0 0 0 0 rgba(239,68,68,0.6); animation:pulseTicket 1.5s infinite; }
+
+
+
+    .support-flag-pending { background:#f97316; }
+
+
+
+    @keyframes pulseTicket {
+
+
+
+      0% { box-shadow:0 0 0 0 rgba(239,68,68,0.6); }
+
+
+
+      70% { box-shadow:0 0 0 8px rgba(239,68,68,0); }
+
+
+
+      100% { box-shadow:0 0 0 0 rgba(239,68,68,0); }
+
+
+
     }
+
+
+
+    #sessionPane { display:flex; flex-direction:column; min-height:0; max-height:100%; }
+
+
+
+    #sessionPane .list { max-height:100%; overflow-y:auto; }
+
+
+
+    #sessionsList { max-height:100%; overflow-y:auto; }
+
+
+
+    #viewer { flex:1 1 auto; display:flex; flex-direction:column; align-items:stretch; justify-content:flex-start; padding:10px; min-height:0; gap:16px; }
+
+
+
+    iframe { width:100%; height:100%; border:none; border-radius:10px; background:#0b0f14; min-height:0; }
+
+
+
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:8px; padding:10px; flex-shrink:0; }
+
+
+
+    pre { background:#0b0f14; border:1px solid #1f2a36; border-radius:8px; padding:8px; overflow:auto; max-height:320px; }
+
+
+
+    input[type="text"] { background:#0b0f14; color:#e6edf3; border:1px solid #1f2a36; padding:6px 8px; border-radius:8px; width:200px; }
+
+
+
+    .shots-table td.actions-cell { white-space:nowrap; }
+
+
+
+    .shot-action-btn { background:#1f2933; color:#e2e8f0; border:1px solid #374151; padding:4px 10px; border-radius:6px; font-size:11px; cursor:pointer; }
+
+
+
+    .shot-action-btn:hover { background:#273449; }
+
+
+
+    .shot-action-btn:disabled { opacity:.6; cursor:default; }
+
+
+
+    .override-note { margin-top:6px; font-size:11px; color:#facc15; }
+
+
+
+    .support-pane { border:1px solid #1f2a36; border-radius:10px; background:#090d13; padding:12px; display:flex; flex-direction:column; gap:10px; }
+
+
+
+    .support-header { display:flex; flex-wrap:wrap; gap:8px; align-items:center; justify-content:space-between; }
+
+
+
+    .support-header h3 { margin:0; font-size:14px; }
+
+
+
+    .support-status { font-size:12px; color:#94a3b8; }
+
+
+
+    .support-tags { display:flex; gap:6px; flex-wrap:wrap; }
+
+
+
+    .support-tag { font-size:11px; text-transform:uppercase; letter-spacing:0.04em; padding:2px 8px; border-radius:999px; border:1px solid rgba(255,255,255,0.18); background:#111a25; color:#e2e8f0; }
+
+
+
+    .support-thread-box { flex:1 1 auto; min-height:160px; max-height:320px; overflow-y:auto; border:1px solid #1f2a36; border-radius:8px; background:#05080d; padding:10px; display:flex; flex-direction:column; gap:10px; }
+
+
+
+    .support-msg { background:#0f172a; border-radius:10px; padding:10px; font-size:13px; line-height:1.45; border:1px solid rgba(148,163,184,0.25); }
+
+
+
+    .support-msg.user { background:#1e293b; }
+
+
+
+    .support-msg.doach { background:#082f49; border-color:rgba(56,189,248,0.35); }
+
+
+
+    .support-msg.admin { background:#2b1b07; border-color:rgba(251,191,36,0.35); }
+
+
+
+    .support-msg .meta { display:block; margin-top:6px; font-size:11px; color:#94a3b8; }
+
+
+
+    .support-empty { color:#94a3b8; font-style:italic; }
+
+
+
+    .support-actions textarea { width:100%; min-height:80px; border-radius:8px; border:1px solid #1f2a36; background:#070a11; color:#e6edf3; padding:8px; resize:vertical; }
+
+
+
+    .support-actions textarea:disabled { opacity:.6; }
+
+
+
+    .support-actions-row { display:flex; gap:8px; justify-content:flex-end; }
+
+
+
+    .support-actions-row .btn { background:#1f2736; }
+
+
+
+    .support-actions-row .btn.primary { background:#2563eb; border-color:#2563eb; color:#fff; }
+
+
+
+    .support-actions-row .btn.primary:hover { background:#1d4ed8; }
+
+
+
+    @media (max-width: 1040px) {
+
+
+
+      main { grid-template-columns:1fr; }
+
+
+
+      #viewer { min-height:320px; }
+
+
+
+    }
+
+
+
   </style>
+
+
+
 </head>
+
+
+
 <body>
+
+
+
 <header>
+
+
+
 <h1>Doach Admin</h1>
+
+
+
 <div class="toolbar">
+
+
+
 <input id="filterTxt" placeholder="Filter sessions..." type="text"/>
+
+
+
 <button class="btn" id="btnRefresh">Refresh</button>
-</div>
-</header>
-<main>
-<section id="sessionPane">
-<h2>Sessions</h2>
-<div class="list" id="sessionsList"></div>
-</section>
-<section>
-<h2>Details</h2>
-      <div id="viewer">
-        <div class="shots-wrap">
-<div class="shots-header">
-<h3>Shots</h3>
-          <span class="shots-meta" id="shotsMeta">0 of 0 made</span>
-</div>
-<div class="shots-table-wrap shots-empty" id="shotsTableWrap">Select a session to view shots.</div>
-</div>
-<div class="debug-header">
-<div>
-<h2 style="margin:0;">Doach Live Debug</h2>
-<div class="muted" id="dbg-session-label" style="font-size:12px;">No session selected.</div>
-</div>
-<div class="debug-actions">
-<button disabled="" id="dbg-open-observe">Observe</button>
-<button disabled="" id="dbg-open-json">Open JSON</button>
-<button disabled="" id="adm-dbg-download">Download</button>
-<button disabled="" id="dbg-copy">Copy</button>
-</div>
-</div>
-<pre id="dbg-json">(select a session to load debug details)</pre>
+
+
 
 </div>
+
+
+
+</header>
+
+
+
+<main>
+
+
+
+<section id="sessionPane">
+
+
+
+<h2>Sessions</h2>
+
+
+
+<div class="list" id="sessionsList"></div>
+
+
+
+</section>
+
+
+
+<section>
+
+
+
+<h2>Details</h2>
+
+
+
+      <div id="viewer">
+
+
+
+        <div class="shots-wrap">
+
+
+
+<div class="shots-header">
+
+
+
+<h3>Shots</h3>
+
+
+
+          <span class="shots-meta" id="shotsMeta">0 of 0 made</span>
+
+
+
+</div>
+
+
+
+<div class="shots-table-wrap shots-empty" id="shotsTableWrap">Select a session to view shots.</div>
+
+
+
+</div>
+
+
+
+<div class="debug-header">
+
+
+
+<div>
+
+
+
+<h2 style="margin:0;">Doach Live Debug</h2>
+
+
+
+<div class="muted" id="dbg-session-label" style="font-size:12px;">No session selected.</div>
+
+
+
+</div>
+
+
+
+<div class="debug-actions">
+
+
+
+<button disabled="" id="dbg-open-observe">Observe</button>
+
+
+
+<button disabled="" id="dbg-open-json">Open JSON</button>
+
+
+
+<button disabled="" id="adm-dbg-download">Download</button>
+
+
+
+<button disabled="" id="dbg-copy">Copy</button>
+
+
+
+</div>
+
+
+
+</div>
+
+
+
+<pre id="dbg-json">(select a session to load debug details)</pre>
+
+
+
+
+
+
+
+<div class="support-pane" id="supportPane">
+
+
+
+  <div class="support-header">
+
+
+
+    <h3>Support Thread</h3>
+
+
+
+    <span class="support-status" id="supportStatusLabel">Select a session to view support history.</span>
+
+
+
+    <div class="support-tags" id="supportTicketTags"></div>
+
+
+
+  </div>
+
+
+
+  <div class="support-thread-box" id="supportThreadBox">
+
+
+
+    <div class="support-empty">No session selected.</div>
+
+
+
+  </div>
+
+
+
+  <div class="support-actions">
+
+
+
+    <textarea id="supportReplyInput" placeholder="Reply as admin…" disabled></textarea>
+
+
+
+    <div class="support-actions-row">
+
+
+
+      <button class="btn" id="supportRefreshBtn" type="button">Refresh Support</button>
+
+
+
+      <button class="btn" id="supportResolveBtn" type="button" disabled>Mark Resolved</button>
+
+
+
+      <button class="btn primary" id="supportReplySend" type="button" disabled>Send Reply</button>
+
+
+
+    </div>
+
+
+
+  </div>
+
+
+
+</div>
+
+
+
+
+
+
+
+</div>
+
+
+
 <script src="/static/js/admin_dashboard.js"></script>
+
+
+
 <script src="/static/js/d_admin_opg.js"></script>
+
+
+
 </section></main></body>
+
+
+
 </html>
+
+
+

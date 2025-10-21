@@ -30,10 +30,20 @@ window.generatePoseCoaching = window.generatePoseCoaching || function (pose) {
 
 // internal processor the handler will call once ready
 window.__onShotSummaryInternal = function (s) {
+    try {
+        window.reportClientEvent?.('shot-summary', {
+            sid: s?.shotId ?? null,
+            text: s?.text || null,
+            ts: Date.now(),
+        });
+    } catch {}
     const pose = s.pose || (window.__lastPoseSnapshot?.metrics) || {};
     const gate = s.gate || window.__lastPoseSnapshot?.gate || null;
     const advice = window.generatePoseCoaching(pose, { shotIdx: s.idx, gate });
     const line = advice.line && advice.line.trim() ? advice.line : 'Eyes on the rim. Hold your finish.';
+    try {
+        window.reportClientEvent?.('tts:shot', { shotId: s?.shotId ?? null, line });
+    } catch {}
     try { (window.doachSpeak || window.coachSpeak)?.(line); } catch { }
     try { window.recordShotFeedback?.({ idx: s.idx, text: line, pose }); } catch { }
     window.__lastCoachText = line;
@@ -2347,17 +2357,24 @@ window.addEventListener('shot:feedback:request', (e) => {
                 }));
             } catch { }
             try {
+                window.reportClientEvent?.('tts:session-summary', { text: out, ts: Date.now() });
+            } catch {}
+            try {
                 const speakJob = (window.doachSpeak || window.coachSpeak)?.(out);
                 try { window.__SESSION_REVIEW_PROMISE = speakJob || null; } catch { }
                 try { window.__SESSION_REVIEW_SPOKEN = true; } catch { }
                 if (speakJob && typeof speakJob.then === 'function') {
                     speakJob.finally(() => {
                         try { window.__SESSION_REVIEW_DONE = true; } catch { }
-                    }).catch(() => { });
+                        window.reportClientEvent?.('tts:session-summary-finished', { text: out });
+                    }).catch((err) => {
+                        window.reportClientEvent?.('tts:session-summary-error', { message: err?.message || String(err) });
+                    });
                 } else {
                     try { window.__SESSION_REVIEW_DONE = true; } catch { }
                 }
-            } catch {
+            } catch (err) {
+                window.reportClientEvent?.('tts:session-summary-error', { message: err?.message || String(err) });
                 try { window.__SESSION_REVIEW_SPOKEN = true; } catch { }
                 try { window.__SESSION_REVIEW_DONE = true; } catch { }
             }

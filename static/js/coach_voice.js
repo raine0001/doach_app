@@ -223,7 +223,7 @@ const IS_IOS = (() => {
         return false;
     }
 })();
-const SERVER_TTS_TIMEOUT_MS = 5000;
+const SERVER_TTS_TIMEOUT_MS = 12000;
 const SILENT_PRIME_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAESsAACJWAAACABAAZGF0YQAAAAA=';
 
 // === iOS wake + re-unlock hooks ===
@@ -611,10 +611,37 @@ async function doachSpeakOnce(text, opts = {}) {
     return false;
 }
 
+function logDoachSpeakEvent(event, payload) {
+    try {
+        if (window.reportClientEvent) {
+            window.reportClientEvent(`tts:${event}`, payload);
+        } else {
+            console.debug(`[tts:${event}]`, payload);
+        }
+    } catch {}
+}
+
 export function doachSpeak(text, opts = {}) {
-    if (!text) return Promise.resolve(false);
-    try { if (window.__coachMuted) return Promise.resolve(false); } catch { }
-    return queueCoachSpeech(() => doachSpeakOnce(text, opts));
+    if (!text) {
+        logDoachSpeakEvent('skip-empty', {});
+        return Promise.resolve(false);
+    }
+    try {
+        if (window.__coachMuted) {
+            logDoachSpeakEvent('skip-muted', { text });
+            return Promise.resolve(false);
+        }
+    } catch { }
+    logDoachSpeakEvent('queue', { text, engine: opts.engine || getTtsEngine(), label: opts.label });
+    return queueCoachSpeech(() => doachSpeakOnce(text, opts)
+        .then((result) => {
+            logDoachSpeakEvent(result ? 'success' : 'fallback', { text, engine: getTtsEngine(), label: opts.label });
+            return result;
+        })
+        .catch((err) => {
+            logDoachSpeakEvent('error', { text, message: err?.message || String(err) });
+            return false;
+        }));
 }
 
 let __coachAudioPrimed = false;
@@ -916,4 +943,3 @@ function coachSpeak(text) {
 try { window.doachSpeak = doachSpeak; } catch { }
 try { window.coachSpeak = doachSpeak; } catch { }
 try { window.primeCoachAudio = primeCoachAudio; } catch { }
-

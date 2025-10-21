@@ -1,1689 +1,3390 @@
 <!DOCTYPE html>
+
 <html lang="en">
+
 <head>
+
   <meta charset="UTF-8" />
+
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
   <title>My Sessions</title>
+
   <link rel="stylesheet" href="/static/style.css" />
+
   <style>
+
     @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap');
+
     :root {
+
       color-scheme: dark;
+
       --page-bg: #050506;
+
       --surface-bg: #101217;
+
       --surface-alt: #151923;
+
       --surface-soft: #1b1f2c;
+
       --border-color: #262a36;
+
       --border-subtle: #1f232e;
+
       --accent: #facc15;
+
       --accent-strong: #fde047;
+
       --accent-soft: rgba(250, 204, 21, 0.18);
+
       --text-primary: #f9fafc;
+
       --text-muted: #9ca3ba;
+
       --text-soft: #6c7387;
+
       --radius-lg: 18px;
+
       --radius-md: 12px;
+
       --gap-xs: clamp(6px, 1vw, 10px);
+
       --gap-sm: clamp(10px, 1.4vw, 14px);
+
       --gap-md: clamp(14px, 2vw, 20px);
+
       --gap-lg: clamp(18px, 2.6vw, 28px);
+
     }
+
     * { box-sizing: border-box; }
+
     body{
+
       font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+
       margin:0;
+
       background:var(--page-bg);
+
       color:var(--text-primary);
+
       min-height:100vh;
+
     }
+
     header{
+
       position:sticky;
+
       top:0;
+
       z-index:5;
+
       display:flex;
+
       flex-wrap:wrap;
+
       align-items:flex-start;
+
       justify-content:space-between;
+
       gap:var(--gap-sm);
+
       padding:clamp(16px,4vw,28px);
+
       background:linear-gradient(180deg,#08080b 0%,#050506 100%);
+
       border-bottom:1px solid var(--border-color);
+
     }
+
     h1{
+
       margin:0;
+
       font-size:clamp(28px,3.6vw,36px);
+
       font-weight:700;
+
       letter-spacing:.02em;
+
       font-family:'Bebas Neue','Inter',sans-serif;
+
       text-transform:capitalize;
+
     }
+
     header>h1{flex:1 0 220px;}
+
     main.dashboard{
+
       display:flex;
+
       flex-direction:column;
+
       gap:var(--gap-lg);
+
       padding:clamp(20px,4vw,36px);
+
       margin:0 auto;
+
       width:min(1120px,100%);
+
     }
+
+
 
     .toolbar{
+
       display:flex;
+
       flex-wrap:wrap;
+
       gap:var(--gap-sm);
+
       align-items:center;
+
       justify-content:flex-end;
+
       flex:1 0 auto;
+
     }
+
     input,select,button{
+
       font:14px/1.3 'Inter',system-ui,sans-serif;
+
       color:var(--text-primary);
+
     }
+
     input[type='text'],select{
+
       background:var(--surface-alt);
+
       border:1px solid var(--border-color);
+
       padding:8px 14px;
+
       border-radius:999px;
+
       min-width:150px;
+
       flex:1 1 150px;
+
       color:var(--text-muted);
+
       transition:border .2s ease, color .2s ease;
+
     }
+
     input[type='text']:focus,select:focus{
+
       outline:none;
+
       border-color:var(--accent);
+
       color:var(--text-primary);
+
     }
+
     .btn{
+
       background:var(--accent);
+
       color:#111013;
+
       border:1px solid transparent;
+
       padding:9px 16px;
+
       border-radius:999px;
+
       cursor:pointer;
+
       font-weight:600;
+
       transition:transform .15s ease,box-shadow .15s ease,filter .15s ease;
+
     }
+
     .btn-inline{padding:6px 14px;font-size:13px;}
+
     .btn-sm{padding:6px 12px;font-size:12px;}
+
     .btn:hover{transform:translateY(-1px);box-shadow:0 12px 24px -18px var(--accent-strong);filter:brightness(1.03);}
+
     .btn:disabled{opacity:.45;cursor:default;transform:none;box-shadow:none;}
+
     .btn-tonal{
+
       background:var(--surface-alt);
+
       color:var(--text-primary);
+
       border:1px solid var(--border-color);
+
       box-shadow:none;
+
     }
+
     .btn-tonal:hover{transform:none;filter:none;background:var(--surface-soft);}
 
+
+
     .overview-grid{
+
       display:grid;
+
       grid-template-columns:repeat(auto-fit,minmax(260px,1fr));
+
       gap:var(--gap-lg);
+
     }
+
     .card{
+
       background:var(--surface-bg);
+
       border-radius:var(--radius-lg);
+
       border:1px solid var(--border-subtle);
+
       padding:clamp(20px,2.2vw,26px);
+
       display:flex;
+
       flex-direction:column;
+
       gap:var(--gap-sm);
+
       box-shadow:0 30px 50px -40px rgba(0,0,0,.8);
+
     }
+
     .card--scoreboard{
+
       position:relative;
+
       overflow:hidden;
+
       background:linear-gradient(180deg,#12151f 0%,#0b0d12 100%);
+
       border:1px solid rgba(250,204,21,.25);
+
       box-shadow:0 32px 48px -38px rgba(250,204,21,.28);
+
       grid-column:1 / -1;
+
     }
+
     .card--scoreboard::after{
+
       content:'';
+
       position:absolute;
+
       inset:0;
+
       pointer-events:none;
+
       border-radius:inherit;
+
       background:radial-gradient(circle at top left, rgba(250,204,21,.16), transparent 55%);
+
       opacity:.75;
+
     }
+
     .card--scoreboard>*{position:relative;}
+
     .card.tight{padding:clamp(16px,2vw,22px);}
+
     .card-title{
+
       font-size:15px;
+
       font-weight:600;
+
       letter-spacing:.05em;
+
       text-transform:uppercase;
+
       color:var(--text-muted);
+
       display:flex;
+
       justify-content:space-between;
+
       align-items:center;
+
       gap:var(--gap-sm);
+
       margin:0;
+
     }
+
     .card-subtext{font-size:12px;color:var(--text-muted);line-height:1.5;}
+
     .tag{
+
       display:inline-flex;
+
       align-items:center;
+
       padding:4px 10px;
+
       border-radius:999px;
+
       background:rgba(250,204,21,.12);
+
       border:1px solid rgba(250,204,21,.35);
+
       font-size:11px;
+
       font-weight:600;
+
       text-transform:uppercase;
+
       letter-spacing:.06em;
+
       color:var(--accent-strong);
+
     }
+
+
 
     .score-total{
+
       font-size:clamp(54px,5.6vw,72px);
+
       font-weight:700;
+
       line-height:1;
+
       letter-spacing:.02em;
+
       font-family:'Bebas Neue','Inter',sans-serif;
+
     }
+
     .score-sub{
+
       font-size:11px;
+
       letter-spacing:.12em;
+
       text-transform:uppercase;
+
       color:var(--text-soft);
+
     }
+
     .progress-track{
+
       width:100%;
+
       height:12px;
+
       background:rgba(17,20,30,.85);
+
       border-radius:999px;
+
       overflow:hidden;
+
       border:1px solid var(--border-subtle);
+
     }
+
     .progress-bar{
+
       height:100%;
+
       width:0;
+
       background:linear-gradient(90deg,#facc15 0%,#f59e0b 55%,#facc15 100%);
+
       transition:width .45s ease;
+
       box-shadow:0 0 16px rgba(250,204,21,.45);
+
     }
+
     .score-note{
+
       font-size:12px;
+
       font-weight:500;
+
       letter-spacing:.015em;
+
       color:#53d16f;
+
     }
+
     .score-note.positive{color:#22c55e;}
+
     .score-note.caution{color:var(--accent-strong);}
+
     .score-note.hint{color:var(--accent-strong);}
 
+
+
     .stat-grid{
+
       display:grid;
+
       grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+
       gap:var(--gap-sm);
+
     }
+
     .stat-item{
+
       background:var(--surface-alt);
+
       border:1px solid var(--border-color);
+
       border-radius:var(--radius-md);
+
       padding:16px;
+
       display:flex;
+
       flex-direction:column;
+
       gap:6px;
+
     }
+
     .stat-item span{
+
       font-size:11px;
+
       letter-spacing:.08em;
+
       text-transform:uppercase;
+
       color:var(--text-soft);
+
     }
+
     .stat-item strong{font-size:22px;font-weight:600;}
+
     .player-status{font-size:13px;color:var(--text-muted);letter-spacing:.02em;}
 
+
+
     .metrics-row{
+
       display:grid;
+
       grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
+
       gap:var(--gap-sm);
+
       align-items:stretch;
+
     }
+
+    .metrics-row.metrics-row--three{
+
+      max-width:720px;
+
+      margin:0 auto;
+
+      grid-template-columns:repeat(auto-fit,minmax(200px,1fr));
+
+    }
+
     .metric-card{
+
       background:var(--surface-bg);
+
       border-radius:var(--radius-md);
+
       border:1px solid var(--border-color);
+
       padding:clamp(18px,2vw,24px);
+
       display:flex;
+
       flex-direction:column;
+
       gap:var(--gap-sm);
+
       box-shadow:0 20px 40px -32px rgba(0,0,0,.75);
+
     }
+
     .metric-card h3{
+
       margin:0;
+
       font-size:13px;
+
       letter-spacing:.08em;
+
       text-transform:uppercase;
+
       color:var(--text-soft);
+
     }
+
     .metric-card strong{font-size:24px;font-weight:600;}
+
     .metric-card .btn-inline{margin-top:auto;align-self:flex-start;}
+
     .metric-card[data-highlight='true']{
+
       border-color:rgba(250,204,21,.55);
+
       box-shadow:0 28px 46px -36px rgba(250,204,21,.35);
+
       background:linear-gradient(180deg,rgba(250,204,21,.08) 0%,rgba(15,18,28,.92) 55%,rgba(15,18,28,.96) 100%);
+
     }
+
+
 
     .quick-stats{
+
       display:grid;
+
       grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+
       gap:var(--gap-sm);
+
       background:var(--surface-bg);
+
       border:1px solid var(--border-subtle);
+
       border-radius:var(--radius-lg);
+
       padding:clamp(18px,2.4vw,26px);
+
       box-shadow:0 26px 48px -40px rgba(0,0,0,.7);
+
     }
+
     .quick-card{
+
       background:linear-gradient(180deg,#151923 0%,#10131c 100%);
+
       border:1px solid rgba(255,255,255,0.04);
+
       border-radius:var(--radius-md);
+
       padding:clamp(18px,2vw,22px);
+
       display:flex;
+
       flex-direction:column;
+
       gap:var(--gap-xs);
+
       align-items:center;
+
       text-align:center;
+
     }
+
     .quick-icon{font-size:22px;color:var(--accent-strong);margin-bottom:6px;}
+
     .quick-card span{font-size:12px;color:var(--text-muted);}
+
     .quick-card strong{
+
       font-size:28px;
+
       font-weight:600;
+
       letter-spacing:.02em;
+
       font-family:'Bebas Neue','Inter',sans-serif;
+
     }
+
+
 
     .assessment-row{
+
       display:grid;
+
       grid-template-columns:repeat(auto-fit,minmax(280px,1fr));
+
       gap:var(--gap-lg);
+
       align-items:stretch;
+
     }
+
     .assessment-card p{margin:0;line-height:1.6;}
+
     .support-card{display:flex;flex-direction:column;gap:var(--gap-md);justify-content:space-between;}
 
+
+
     .recommendation-section{display:flex;flex-direction:column;gap:var(--gap-md);}
+
     .recommend-card{
+
       background:var(--surface-bg);
+
       border:1px solid var(--border-color);
+
       border-radius:var(--radius-lg);
+
       padding:clamp(22px,2.4vw,28px);
+
       display:flex;
+
       flex-direction:column;
+
       gap:var(--gap-sm);
+
       box-shadow:0 28px 48px -38px rgba(0,0,0,.78);
+
     }
+
     .recommend-card strong{
+
       font-size:20px;
+
       letter-spacing:.05em;
+
       font-family:'Bebas Neue','Inter',sans-serif;
+
     }
+
+
 
     .recent-section{display:flex;flex-direction:column;gap:var(--gap-md);}
+
     .recent-header{
+
       font-size:24px;
+
       font-weight:600;
+
       letter-spacing:.05em;
+
       font-family:'Bebas Neue','Inter',sans-serif;
+
       text-transform:uppercase;
+
     }
+
     .recent-layout{display:grid;grid-template-columns:minmax(0,1fr);gap:var(--gap-lg);}
 
+
+
     .panel{
+
       background:var(--surface-bg);
+
       border:1px solid var(--border-color);
+
       border-radius:var(--radius-lg);
+
       overflow:hidden;
+
       display:flex;
+
       flex-direction:column;
+
       min-height:0;
+
       box-shadow:0 22px 40px -34px rgba(0,0,0,.7);
+
     }
+
     .panel>h2{
+
       font-size:14px;
+
       margin:0;
+
       padding:14px 18px;
+
       background:var(--surface-alt);
+
       border-bottom:1px solid var(--border-color);
+
       text-transform:uppercase;
+
       letter-spacing:.08em;
+
       color:var(--text-soft);
+
     }
+
     .panel-body{
+
       flex:1;
+
       display:flex;
+
       flex-direction:column;
+
       min-height:0;
+
       overflow:auto;
+
     }
+
     .sessions-panel .panel-body{padding:0;}
+
     .detail-panel .panel-body{padding:clamp(16px,2.2vw,24px);gap:var(--gap-md);}
+
     .detail-body{display:flex;flex-direction:column;gap:var(--gap-md);min-height:0;}
+
     .detail-body.loading{opacity:0.6;}
 
+
+
     table{
+
       border-collapse:collapse;
+
       width:100%;
+
       min-width:660px;
+
       background:var(--surface-bg);
+
     }
+
     thead th{
+
       background:var(--surface-alt);
+
       color:var(--text-muted);
+
       position:sticky;
+
       top:0;
+
       z-index:1;
+
       text-transform:uppercase;
+
       letter-spacing:.05em;
+
       font-size:11px;
+
     }
+
     th,td{
+
       border-bottom:1px solid #1f2330;
+
       padding:12px 14px;
+
       font-size:13px;
+
     }
+
     tbody tr:hover{background:rgba(250,204,21,.06);}
+
     tbody tr.row-active{background:rgba(250,204,21,.12);}
+
     tbody tr.row-active td{color:var(--text-primary);}
+
     .muted{opacity:.8;font-size:12px;color:var(--text-muted);}
+
     .empty{padding:20px;color:var(--text-muted);font-size:13px;text-align:center;}
+
+
 
     .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;}
 
+
+
     .detail-header{display:flex;flex-wrap:wrap;justify-content:space-between;gap:var(--gap-sm);align-items:flex-start;}
+
     .detail-header small{font-size:12px;color:var(--text-muted);}
+
     .shot-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:var(--gap-md);}
+
     .shot-card{padding:0;background:var(--surface-alt);border:1px solid var(--border-color);border-radius:var(--radius-md);overflow:hidden;}
+
     .shot-card .shot-content{display:flex;flex-direction:column;gap:var(--gap-sm);padding:18px;}
+
     .shot-title{font-weight:600;font-size:16px;}
+
     .shot-meta{display:flex;flex-wrap:wrap;gap:var(--gap-sm);font-size:12px;color:var(--text-muted);}
+
     .status{display:inline-flex;align-items:center;justify-content:center;padding:5px 12px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase;border:1px solid transparent;}
+
     .status-make{background:rgba(34,197,94,0.18);color:#4ade80;border-color:rgba(34,197,94,0.35);}
+
     .status-miss{background:rgba(248,113,113,0.18);color:#f87171;border-color:rgba(248,113,113,0.35);}
+
     .status-pending{background:rgba(59,130,246,0.18);color:#93c5fd;border-color:rgba(59,130,246,0.35);}
+
     .shot-metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:var(--gap-sm);}
+
     .metric{background:var(--surface-soft);border:1px solid var(--border-color);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:4px;}
+
     .metric span{font-size:11px;color:var(--text-soft);text-transform:uppercase;letter-spacing:.04em;}
+
     .metric strong{font-size:17px;}
+
     .coach-note{background:var(--surface-soft);border:1px solid var(--border-color);border-radius:12px;padding:14px 16px;font-size:13px;line-height:1.5;}
+
     .coach-note strong{display:block;margin-bottom:4px;color:var(--accent-strong);}
+
     .coach-note p{margin:0;}
+
     .analysis-status{font-size:12px;color:var(--text-muted);padding:9px 14px;border-radius:10px;background:var(--surface-soft);border:1px dashed #323748;}
+
     video.shot-video{width:100%;border-radius:0;background:#000;}
+
     .video-placeholder{border:1px solid #262a36;border-radius:var(--radius-md);padding:26px;text-align:center;color:var(--text-muted);font-size:13px;background:var(--surface-soft);}
 
+
+
     @media (min-width:1080px){
+
       .overview-grid{grid-template-columns:minmax(360px,1.35fr) repeat(2,minmax(240px,1fr));}
+
       .card--scoreboard{grid-column:auto;}
+
       .metrics-row{grid-template-columns:repeat(4,minmax(0,1fr));gap:var(--gap-md);}
+
       .quick-stats{grid-template-columns:repeat(3,minmax(0,1fr));}
+
     }
+
     @media (min-width:980px){
+
       .recent-layout{grid-template-columns:minmax(280px,320px) minmax(0,1fr);}
+
     }
+
     @media (max-width:920px){
+
       main.dashboard{padding:clamp(18px,5vw,28px);}
+
       header{flex-direction:column;align-items:flex-start;}
+
       header h1{width:100%;}
+
       .toolbar{width:100%;justify-content:flex-start;}
+
     }
+
     @media (max-width:640px){
+
       input[type='text'],select{min-width:120px;}
+
       .quick-stats{grid-template-columns:1fr;}
+
       .score-total{font-size:40px;}
+
       header{padding:20px;}
+
     }
+
     @media print{
+
       header,.overview-grid,.metrics-row,.quick-stats,.assessment-row,.recommendation-section,.recommend-card .btn,.support-card .btn,.toolbar{display:none!important;}
+
       body{background:#fff;color:#000;}
+
       main.dashboard{padding:0;gap:12px;}
+
       .panel,.card{border:0;background:#fff;color:#000;box-shadow:none;}
+
       .panel>h2{background:#fff;color:#000;border-bottom:0;}
+
       .detail-panel video{display:none;}
+
       .metric,.coach-note,.analysis-status{border-color:#ccc;background:#fff;}
+
     }
+
   </style>
+
   <script>
+
     (() => {
+
       'use strict';
 
+
+
       const SCORE_TIERS = [
+
         { name: 'Rookie', min: 0, motto: 'Dial in the fundamentals.' },
+
         { name: 'Pro', min: 2000, motto: 'Consistency is showing up.' },
+
         { name: 'All-Star', min: 5000, motto: 'Great rhythm - keep pushing.' },
+
         { name: 'Elite', min: 9000, motto: 'Elite grind. Sharpen details.' },
+
         { name: 'Legend', min: 14000, motto: 'Legend status. Set new goals.' },
+
       ];
 
+
+
       const TRAINING_LIBRARY = {
+
         consistency: {
+
           session: 'Consistency Lab',
+
           drill: 'Rhythm Builder',
+
           status: 'Active',
+
           message: 'Lock in repeatable mechanics and steady tempo.',
+
           recommendation: 'Last sessions dipped below average. Rebuild tempo with Rhythm Builder and quick-release reps.'
+
         },
+
         arc: {
+
           session: 'Arc Mastery',
+
           drill: 'High Arc Ladder',
+
           status: 'Queued',
+
           message: 'Focus on clearing the rim with more lift.',
+
           recommendation: 'Arc height is trending low. High Arc Ladder will help you raise your apex and drop-in angle.'
+
         },
+
         entry: {
+
           session: 'Entry Angle Lab',
+
           drill: '45° Finder',
+
           status: 'Queued',
+
           message: 'Dial in a 44-48° entry window on every make.',
+
           recommendation: 'Entry angle is flattening. Use the 45° Finder drill to get back on top of the rim.'
+
         },
+
         release: {
+
           session: 'Release Control',
+
           drill: 'Snap & Hold',
+
           status: 'In Progress',
+
           message: 'Finish tall and hold your follow-through to stabilize release.',
+
           recommendation: 'Release angle slipped this week. Snap & Hold reinforces strong finishes and arc.'
+
         },
+
         momentum: {
+
           session: 'Momentum Builder',
+
           drill: 'Catch & Shoot',
+
           status: 'Active',
+
           message: 'Convert makes into streaks and keep momentum high.',
+
           recommendation: 'Momentum is climbing. Stay aggressive with Catch & Shoot rhythm reps to extend your streak.'
+
         }
+
       };
 
+
+
       const intFmt = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+
       let __SESSIONS = [];
+
       let __SORT = { key: 'startedAt', dir: 'desc' };
+
       let __CURRENT_SESSION_ID = null;
+
       const SESSION_DETAIL_CACHE = new Map();
+
       let SESSION_SUMMARY_CACHE = new Map();
+
       let DASHBOARD_STATS = null;
+
       const INITIAL_SESSION_ID = (() => {
+
         try { return new URLSearchParams(location.search || '').get('sid'); } catch { return null; }
+
       })();
+
       let __INITIAL_SESSION = INITIAL_SESSION_ID;
+
       let DOM = {};
+
       function fmtNumber(value, decimals = 0) {
+
         if (!Number.isFinite(value)) return '-';
+
         if (decimals <= 0) return intFmt.format(Math.round(value));
+
         return Number(value).toLocaleString(undefined, {
+
           minimumFractionDigits: decimals,
+
           maximumFractionDigits: decimals
+
         });
+
       }
+
+
 
       function fmtPct(value, decimals = 1) {
+
         if (!Number.isFinite(value)) return '-';
+
         if (decimals <= 0) return `${intFmt.format(Math.round(value))}%`;
+
         return `${Number(value).toLocaleString(undefined, {
+
           minimumFractionDigits: decimals,
+
           maximumFractionDigits: decimals
+
         })}%`;
+
       }
+
+
 
       function fmtDate(ts) {
+
         try { return ts ? new Date(ts).toLocaleString() : '-'; } catch { return '-'; }
+
       }
+
+
 
       function fmtDateISO(ts) {
+
         try { return ts ? new Date(ts).toISOString() : ''; } catch { return ''; }
+
       }
+
+
 
       function formatDuration(minutes) {
+
         if (!Number.isFinite(minutes)) return '-';
+
         const total = Math.max(0, Math.round(minutes));
+
         const hours = Math.floor(total / 60);
+
         const mins = total % 60;
+
         if (hours && mins) return `${hours}h ${mins}m`;
+
         if (hours) return `${hours}h`;
+
         return `${mins}m`;
+
       }
+
+
 
       function average(values) {
+
         const data = values.filter(Number.isFinite);
+
         if (!data.length) return NaN;
+
         return data.reduce((acc, n) => acc + n, 0) / data.length;
+
       }
+
+
 
       function setText(el, text) {
+
         if (!el) return;
+
         el.textContent = text;
+
       }
+
+
 
       function sortList(list) {
+
         const dir = __SORT.dir === 'desc' ? -1 : 1;
+
         const key = __SORT.key;
+
         return list.slice().sort((a, b) => {
+
           const getValue = (item) => {
+
             if (key === 'startedAt') return Number(item.startedAt || 0);
+
             if (key === 'accuracy') return Number(item.totals?.accuracy || SESSION_SUMMARY_CACHE.get(item.id)?.accuracy || 0);
+
             if (key === 'attempts') return Number(item.totals?.attempts || SESSION_SUMMARY_CACHE.get(item.id)?.attempts || 0);
+
             return Number(item.startedAt || 0);
+
           };
+
           const A = getValue(a);
+
           const B = getValue(b);
+
           if (A === B) return 0;
+
           return A > B ? dir : -dir;
+
         });
+
       }
+
+
 
       async function fetchSessionDetail(sid) {
+
         if (SESSION_DETAIL_CACHE.has(sid)) return SESSION_DETAIL_CACHE.get(sid);
+
         const res = await fetch(`/api/sessions/${encodeURIComponent(sid)}`);
+
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
         const data = await res.json();
+
         SESSION_DETAIL_CACHE.set(sid, data);
+
         return data;
+
       }
+
+
 
       function resolveShotScore(shot) {
+
         try {
+
           const direct = Number(shot?.weightedScore);
+
           if (Number.isFinite(direct)) return Math.round(direct);
+
           const summaryScore = Number(shot?.summary?.weightedScore);
+
           if (Number.isFinite(summaryScore)) return Math.round(summaryScore);
+
           const arcmmScore = Number(shot?.arcmm?.summary?.weightedScore);
+
           if (Number.isFinite(arcmmScore)) return Math.round(arcmmScore);
+
           const dataScore = Number(shot?.data?.weightedScore);
+
           if (Number.isFinite(dataScore)) return Math.round(dataScore);
+
           if (shot?.poseSnapshot && typeof window.computeWeightedShotScore === 'function') {
+
             const value = window.computeWeightedShotScore(shot.poseSnapshot);
+
             if (Number.isFinite(value)) return Math.round(value);
+
           }
+
         } catch { }
+
         return null;
+
       }
+
+
 
       function resolveShotMetric(shot, key) {
+
         const sources = [
+
           shot?.[key],
+
           shot?.summary?.[key],
+
           shot?.data?.[key],
+
           shot?.arcmm?.summary?.[key],
+
         ];
+
         for (const raw of sources) {
+
           const num = Number(raw);
+
           if (Number.isFinite(num)) return num;
+
         }
+
         return null;
+
       }
+
+
 
       function resolveMade(shot) {
+
         if (shot?.made === true) return true;
+
         if (shot?.made === false) return false;
+
         const summaryMade = shot?.summary?.made;
+
         if (typeof summaryMade === 'boolean') return summaryMade;
+
         const arcmmMade = shot?.arcmm?.summary?.made;
+
         if (typeof arcmmMade === 'boolean') return arcmmMade;
+
         const result = String(shot?.arcmm?.summary?.result || shot?.result || '').toUpperCase();
+
         if (result === 'MAKE' || result === 'MADE') return true;
+
         if (result === 'MISS') return false;
+
         return null;
+
       }
+
       function resolveCoachNote(shot) {
+
         const candidates = [
+
           shot?.coach_summary,
+
           shot?.coachSummary,
+
           shot?.coach,
+
           shot?.coachNotes,
+
           shot?.notes,
+
           shot?.doach,
+
           shot?.summary?.coach,
+
           shot?.summary?.coach_summary,
+
           shot?.arcmm?.summary?.coach,
+
           shot?.arcmm?.summary?.notes,
+
           shot?.feedback?.text,
+
         ];
+
         for (const value of candidates) {
+
           if (typeof value === 'string' && value.trim()) return value.trim();
+
         }
+
         const data = shot?.data;
+
         if (data && typeof data === 'object') {
+
           for (const key of ['coach_summary', 'coachSummary', 'coach', 'notes']) {
+
             const text = data[key];
+
             if (typeof text === 'string' && text.trim()) return text.trim();
+
           }
+
         }
+
         return null;
+
       }
+
+
 
       function resolveMissReason(shot) {
+
         const candidates = [
+
           shot?.missReason,
+
           shot?.arcmm?.summary?.missReason,
+
           shot?.summary?.missReason,
+
           shot?.arcmm?.summary?.resultReason,
+
         ];
+
         for (const value of candidates) {
+
           if (typeof value === 'string' && value.trim()) return value.trim();
+
         }
+
         return null;
+
       }
+
+
 
       function resolveTimestamp(shot) {
+
         const numericCandidates = [shot?.t, shot?.timestamp, shot?.arcmm?.summary?.timestamp];
+
         for (const val of numericCandidates) {
+
           const num = Number(val);
+
           if (Number.isFinite(num)) {
+
             try { return new Date(num).toLocaleString(); } catch { return ''; }
+
           }
+
         }
+
         const isoCandidates = [shot?.arcmm?.summary?.ts, shot?.ts];
+
         for (const iso of isoCandidates) {
+
           if (typeof iso === 'string' && iso) {
+
             try { return new Date(iso).toLocaleString(); } catch { }
+
           }
+
         }
+
         return '';
+
       }
+
+
 
       function normalizeClipUrl(sessionId, value) {
+
         if (typeof value !== 'string') return null;
+
         const trimmed = value.trim();
+
         if (!trimmed) return null;
+
         if (/^https?:\/\//i.test(trimmed) || trimmed.startsWith('/')) return trimmed;
+
         return `/sessions/${sessionId}/${trimmed.replace(/^\/+/,'')}`;
+
       }
+
+
 
       function resolveClipUrl(sessionId, shotNumber, shot) {
+
         const candidates = [
+
           shot?.arcmm?.processed_clip,
+
           shot?.arcmm?.summary?.processed_clip,
+
           shot?.clip?.processed,
+
           shot?.clip?.url,
+
           shot?.clip?.path,
+
           shot?.clipUrl,
+
           shot?.videoUrl,
+
           shot?.video,
+
           shot?.url,
+
         ];
+
         for (const raw of candidates) {
+
           const normalized = normalizeClipUrl(sessionId, raw);
+
           if (normalized) return normalized;
+
         }
+
         const fallbacks = [
+
           `processed/shot-${shotNumber}.results.webm`,
+
           `processed/shot_${shotNumber}.results.webm`,
+
           `clips/shot-${shotNumber}.webm`,
+
           `clips/shot-${shotNumber}.mp4`,
+
           `clips/shot_${shotNumber}.webm`,
+
           `clips/shot_${shotNumber}.mp4`,
+
           `shot-${shotNumber}.webm`,
+
           `shot-${shotNumber}.mp4`,
+
           `shot_${shotNumber}.webm`,
+
           `shot_${shotNumber}.mp4`,
+
         ];
+
         for (const raw of fallbacks) {
+
           const normalized = normalizeClipUrl(sessionId, raw);
+
           if (normalized) return normalized;
+
         }
+
         return null;
+
       }
+
+
 
       function buildShotViews(session) {
+
         const shots = Array.isArray(session?.shots) ? session.shots.slice() : [];
+
         shots.sort((a, b) => {
+
           const ai = Number.isFinite(Number(a?.idx)) ? Number(a.idx) : Number(a?.shotId ?? 0);
+
           const bi = Number.isFinite(Number(b?.idx)) ? Number(b.idx) : Number(b?.shotId ?? 0);
+
           return ai - bi;
+
         });
+
         return shots.map((shot, index) => {
+
           const number = Number.isFinite(Number(shot?.idx)) ? Number(shot.idx) + 1 : index + 1;
+
           const made = resolveMade(shot);
+
           return {
+
             number,
+
             made,
+
             statusLabel: made === true ? 'Make' : made === false ? 'Miss' : 'Pending',
+
             statusClass: made === true ? 'status-make' : made === false ? 'status-miss' : 'status-pending',
+
             clipUrl: resolveClipUrl(session.id, number, shot),
+
             entry: resolveShotMetric(shot, 'entryAngle'),
+
             release: resolveShotMetric(shot, 'releaseAngle'),
+
             arc: resolveShotMetric(shot, 'arcHeight'),
+
             score: resolveShotScore(shot),
+
             coachNote: resolveCoachNote(shot),
+
             missReason: resolveMissReason(shot),
+
             analysisStatus: shot?.arcmm?.status || '',
+
             analysisMessage: shot?.arcmm?.message || '',
+
             timestamp: resolveTimestamp(shot),
+
             raw: shot,
+
           };
+
         });
+
       }
+
       function summarizeSessions(details) {
+
         if (!Array.isArray(details) || !details.length) {
+
           return {
+
             totalPoints: 0,
+
             totalShots: 0,
+
             totalMakes: 0,
+
             totalSessions: 0,
+
             avgScore: NaN,
+
             accuracy: NaN,
+
             scoreSamples: 0,
+
             sessionsThisWeek: 0,
+
             shotsThisWeek: 0,
+
             totalTrainingMinutes: 0,
+
             sessionSummaries: [],
+
             trend: { lastAcc: NaN, prevAcc: NaN, deltaAcc: NaN, deltaScore: NaN },
+
             arc: { entry: NaN, release: NaN, arc: NaN },
+
             lastSession: null,
+
             focusKey: 'consistency',
+
             updatedAt: null,
+
           };
+
         }
+
         const now = Date.now();
+
         const weekAgo = now - 7 * 24 * 60 * 60 * 1000;
+
         let totalPoints = 0;
+
         let totalShots = 0;
+
         let totalMakes = 0;
+
         let scoreSamples = 0;
+
         let sumEntry = 0, sumRelease = 0, sumArc = 0;
+
         let entrySamples = 0, releaseSamples = 0, arcSamples = 0;
 
+
+
         const sessionSummaries = details.map(detail => {
+
           const shotViews = buildShotViews(detail);
+
           let sessionPoints = 0;
+
           let sessionScoreSamples = 0;
+
           let sessionMakes = 0;
+
           let entrySum = 0, entryCount = 0;
+
           let releaseSum = 0, releaseCount = 0;
+
           let arcSum = 0, arcCount = 0;
+
           shotViews.forEach(view => {
+
             if (Number.isFinite(view.score)) { sessionPoints += view.score; sessionScoreSamples++; }
+
             if (Number.isFinite(view.entry)) { entrySum += view.entry; entryCount++; }
+
             if (Number.isFinite(view.release)) { releaseSum += view.release; releaseCount++; }
+
             if (Number.isFinite(view.arc)) { arcSum += view.arc; arcCount++; }
+
             if (view.made === true) sessionMakes++;
+
           });
+
           const attempts = shotViews.length || Number(detail?.totals?.attempts || 0);
+
           const accuracy = attempts ? (sessionMakes / attempts) * 100 : NaN;
+
           totalPoints += sessionPoints;
+
           scoreSamples += sessionScoreSamples;
+
           totalShots += attempts;
+
           totalMakes += sessionMakes;
+
           if (entryCount) { sumEntry += entrySum; entrySamples += entryCount; }
+
           if (releaseCount) { sumRelease += releaseSum; releaseSamples += releaseCount; }
+
           if (arcCount) { sumArc += arcSum; arcSamples += arcCount; }
 
+
+
           return {
+
             sid: detail.id,
+
             startedAt: Number(detail.startedAt) || null,
+
             attempts,
+
             makes: sessionMakes,
+
             accuracy,
+
             score: sessionPoints,
+
             scoreSamples: sessionScoreSamples,
+
             shotViews,
+
           };
+
         });
+
+
 
         const sessionsThisWeek = sessionSummaries.filter(s => s.startedAt && s.startedAt >= weekAgo).length;
+
         const shotsThisWeek = sessionSummaries
+
           .filter(s => s.startedAt && s.startedAt >= weekAgo)
+
           .reduce((acc, s) => acc + (s.attempts || 0), 0);
+
         const trainingMinutes = totalShots * 0.75;
 
+
+
         const sortedByDate = sessionSummaries.slice().sort((a, b) => (b.startedAt || 0) - (a.startedAt || 0));
+
         const lastThreeAcc = sortedByDate.slice(0, 3).map(s => s.accuracy);
+
         const prevThreeAcc = sortedByDate.slice(3, 6).map(s => s.accuracy);
+
         const lastThreeScore = sortedByDate.slice(0, 3).map(s => s.scoreSamples ? s.score / s.scoreSamples : NaN);
+
         const prevThreeScore = sortedByDate.slice(3, 6).map(s => s.scoreSamples ? s.score / s.scoreSamples : NaN);
 
+
+
         const trend = {
+
           lastAcc: average(lastThreeAcc),
+
           prevAcc: average(prevThreeAcc),
+
           deltaAcc: (() => {
+
             const last = average(lastThreeAcc);
+
             const prev = average(prevThreeAcc);
+
             if (!Number.isFinite(last) || !Number.isFinite(prev)) return NaN;
+
             return last - prev;
+
           })(),
+
           deltaScore: (() => {
+
             const last = average(lastThreeScore);
+
             const prev = average(prevThreeScore);
+
             if (!Number.isFinite(last) || !Number.isFinite(prev)) return NaN;
+
             return last - prev;
+
           })(),
+
         };
+
+
 
         const arc = {
+
           entry: entrySamples ? sumEntry / entrySamples : NaN,
+
           release: releaseSamples ? sumRelease / releaseSamples : NaN,
+
           arc: arcSamples ? sumArc / arcSamples : NaN,
+
         };
+
+
 
         const totalSessions = details.length;
+
         const accuracy = totalShots ? (totalMakes / totalShots) * 100 : NaN;
+
         const avgScore = scoreSamples ? totalPoints / scoreSamples : NaN;
+
         const lastSession = sortedByDate[0] || null;
+
         const updatedAt = lastSession?.startedAt || null;
 
+
+
         const focusKey = (() => {
+
           if (!Number.isFinite(accuracy) || accuracy < 45) return 'consistency';
+
           if (Number.isFinite(arc.arc) && arc.arc < 65) return 'arc';
+
           if (Number.isFinite(arc.entry) && arc.entry < 43) return 'entry';
+
           if (Number.isFinite(arc.release) && arc.release < 48) return 'release';
+
           return 'momentum';
+
         })();
+
+
 
         return {
+
           totalPoints,
+
           totalShots,
+
           totalMakes,
+
           totalSessions,
+
           avgScore,
+
           accuracy,
+
           scoreSamples,
+
           sessionsThisWeek,
+
           shotsThisWeek,
+
           totalTrainingMinutes: trainingMinutes,
+
           sessionSummaries: sortedByDate,
+
           trend,
+
           arc,
+
           lastSession,
+
           focusKey,
+
           updatedAt,
+
         };
+
       }
+
+
 
       function updateGreeting(profileLike) {
+
         if (!DOM?.headerTitle) return;
+
         const el = DOM.headerTitle;
+
         const profile = profileLike || {};
+
         const pick = (...keys) => {
+
           for (const key of keys) {
+
             const val = profile?.[key];
+
             if (typeof val === 'string' && val.trim()) return val.trim();
+
           }
+
           return '';
+
         };
+
         let first = pick('first_name', 'firstName', 'given_name', 'givenName');
+
         let last = pick('last_name', 'lastName', 'family_name', 'familyName');
+
         let name = [first, last].filter(Boolean).join(' ').trim();
+
         if (!name) name = pick('displayName', 'fullName', 'name', 'username');
+
         if (!name && Array.isArray(__SESSIONS) && __SESSIONS.length) {
+
           const guess = __SESSIONS[0]?.athleteName || __SESSIONS[0]?.playerName || '';
+
           if (typeof guess === 'string' && guess.trim()) name = guess.trim();
+
         }
+
         el.textContent = name ? `Hi, ${name}!` : 'Hi, Hooper!';
+
       }
+
+
 
       function setDashboardLoading() {
+
         setText(DOM.scoreboardPoints, '-');
+
         setText(DOM.scoreboardTier, '--');
+
         if (DOM.scoreboardProgress) DOM.scoreboardProgress.style.width = '0%';
+
         setText(DOM.scoreboardToNext, 'Loading...');
+
         setText(DOM.scoreboardMessage, '');
+
         DOM.scoreboardMessage?.classList.remove('caution');
+
         DOM.scoreboardMessage?.classList.add('positive');
+
         DOM.scoreboardToNext?.classList.remove('caution');
+
         DOM.scoreboardToNext?.classList.add('hint');
+
         setText(DOM.playerSessions, '-');
+
         setText(DOM.playerShots, '-');
+
         setText(DOM.playerAccuracy, '-');
+
         setText(DOM.playerAvgScore, '-');
+
         setText(DOM.playerStatus, 'Status: -');
+
         setText(DOM.totalScoreMetric, '-');
+
         setText(DOM.ratingMetric, '-');
+
         setText(DOM.assessmentMetric, '-');
+
         setText(DOM.assessmentUpdated, '-');
+
         setText(DOM.quickSessions, '-');
+
         setText(DOM.quickMakes, '-');
+
         setText(DOM.quickTime, '-');
+
         setText(DOM.assessmentText, 'Record more shots to unlock your assessment.');
+
         setText(DOM.recommendationText, 'Your next drill recommendation will appear here.');
+
       }
+
+
 
       function applyDashboard(stats) {
+
         DASHBOARD_STATS = stats;
+
         updateScoreboard(stats);
+
         updatePlayerStats(stats);
+
         updateTraining(stats);
+
         updateMetrics(stats);
+
         updateQuickStats(stats);
+
         updateAssessment(stats);
+
         updateRecommendation(stats);
+
       }
+
       function updateScoreboard(stats) {
+
         setText(DOM.scoreboardPoints, fmtNumber(stats.totalPoints));
+
         const tier = SCORE_TIERS.reduce((acc, tier) => stats.totalPoints >= tier.min ? tier : acc, SCORE_TIERS[0]);
+
         const tierIndex = SCORE_TIERS.indexOf(tier);
+
         const nextTier = SCORE_TIERS[tierIndex + 1] || null;
+
         setText(DOM.scoreboardTier, `${tier.name} Tier`);
+
         if (DOM.scoreboardProgress) {
+
           let progress = 1;
+
           if (nextTier) {
+
             const span = nextTier.min - tier.min;
+
             progress = span > 0 ? Math.min(1, (stats.totalPoints - tier.min) / span) : 0;
+
           }
+
           const width = Math.max(0, Math.min(1, progress)) * 100;
+
           DOM.scoreboardProgress.style.width = `${width}%`;
+
         }
+
         DOM.scoreboardToNext?.classList.remove('caution');
+
         if (nextTier) {
+
           const pointsLeft = Math.max(0, nextTier.min - stats.totalPoints);
+
           setText(DOM.scoreboardToNext, `${fmtNumber(pointsLeft)} points to reach ${nextTier.name}`);
+
           DOM.scoreboardToNext?.classList.add('hint');
+
         } else {
+
           setText(DOM.scoreboardToNext, 'Top tier unlocked. Keep raising the bar.');
+
           DOM.scoreboardToNext?.classList.remove('hint');
+
           DOM.scoreboardToNext?.classList.add('caution');
+
         }
+
         let message = tier.motto;
+
         if (Number.isFinite(stats.trend.deltaAcc)) {
+
           const delta = fmtNumber(Math.abs(stats.trend.deltaAcc), 1);
+
           if (stats.trend.deltaAcc > 1.4) message = `🔥 Accuracy trending up (+${delta} pts). Keep pushing!`;
+
           else if (stats.trend.deltaAcc < -1.4) message = `⚠️ Accuracy dipped ${delta} pts. Reset your base and recover.`;
+
         }
+
         if (DOM.scoreboardMessage) {
+
           const lower = String(message).toLowerCase();
+
           const caution = lower.includes('dipped') || lower.includes('reset') || lower.includes('recover') || lower.includes('rebuild');
+
           DOM.scoreboardMessage.classList.remove('positive', 'caution');
+
           DOM.scoreboardMessage.classList.add(caution ? 'caution' : 'positive');
+
         }
+
         setText(DOM.scoreboardMessage, message);
+
       }
+
+
 
       function updatePlayerStats(stats) {
+
         setText(DOM.playerSessions, fmtNumber(stats.totalSessions));
+
         setText(DOM.playerShots, fmtNumber(stats.totalShots));
+
         setText(DOM.playerAccuracy, fmtPct(stats.accuracy));
+
         setText(DOM.playerAvgScore, Number.isFinite(stats.avgScore) ? fmtNumber(stats.avgScore,1) : '-');
+
         const status = (() => {
+
           if (!Number.isFinite(stats.accuracy)) return 'Getting Started';
+
           if (stats.accuracy >= 60) return 'Sharpshooter';
+
           if (stats.accuracy >= 48) return 'In Rhythm';
+
           return 'Building';
+
         })();
+
         setText(DOM.playerStatus, `Status: ${status}`);
+
       }
+
+
 
       function updateTraining(stats) {
+
         const preset = TRAINING_LIBRARY[stats.focusKey] || TRAINING_LIBRARY.consistency;
+
         setText(DOM.trainingSession, preset.session);
+
         setText(DOM.trainingDrill, preset.drill);
+
         setText(DOM.trainingStatus, preset.status);
+
         setText(DOM.trainingMessage, preset.message);
+
       }
+
+
 
       function updateMetrics(stats) {
+
         setText(DOM.totalScoreMetric, fmtNumber(stats.totalPoints));
+
         const ratingBase =
+
           (Number.isFinite(stats.avgScore) ? stats.avgScore * 8 : 0) +
+
           (Number.isFinite(stats.accuracy) ? stats.accuracy * 5 : 0) +
+
           stats.totalSessions * 12;
+
         const rating = Math.round(ratingBase);
+
         setText(DOM.ratingMetric, fmtNumber(rating));
+
         const ratingTone = Number.isFinite(stats.trend.deltaAcc)
+
           ? (stats.trend.deltaAcc > 0
+
             ? 'Trending up.'
+
             : stats.trend.deltaAcc < 0
+
               ? 'Stabilize your release tempo.'
+
               : 'Holding steady.')
+
           : 'Keep stacking reps.';
+
         setText(DOM.ratingSubtext, ratingTone);
+
         setText(DOM.assessmentMetric, fmtPct(stats.accuracy));
+
         setText(DOM.assessmentUpdated, stats.updatedAt ? fmtDate(stats.updatedAt) : '-');
+
       }
+
+
 
       function updateQuickStats(stats) {
+
         setText(DOM.quickSessions, fmtNumber(stats.sessionsThisWeek));
+
         setText(DOM.quickMakes, fmtNumber(stats.totalMakes));
+
         setText(DOM.quickTime, formatDuration(stats.totalTrainingMinutes));
+
       }
+
+
 
       function updateAssessment(stats) {
+
         if (!DOM.assessmentText) return;
+
         if (!stats.totalSessions) {
+
           DOM.assessmentText.textContent = 'Record a live session to unlock your personalized assessment.';
+
           return;
+
         }
+
         const lines = [];
+
         lines.push(`Across ${fmtNumber(stats.totalSessions)} sessions you attempted ${fmtNumber(stats.totalShots)} shots with ${fmtPct(stats.accuracy)} accuracy.`);
+
         if (Number.isFinite(stats.avgScore)) lines.push(`Average shot score sits at ${fmtNumber(stats.avgScore,1)} / 100.`);
+
         if (Number.isFinite(stats.trend.deltaAcc)) {
+
           if (stats.trend.deltaAcc > 1) lines.push(`Accuracy improved by ${fmtNumber(stats.trend.deltaAcc,1)} pts over your last block.`);
+
           else if (stats.trend.deltaAcc < -1) lines.push(`Accuracy slipped ${fmtNumber(Math.abs(stats.trend.deltaAcc),1)} pts recently. Reset your base and rebuild tempo.`);
+
         }
+
         const preset = TRAINING_LIBRARY[stats.focusKey] || TRAINING_LIBRARY.consistency;
+
         if (preset?.message) lines.push(`Focus: ${preset.message}`);
+
         DOM.assessmentText.textContent = lines.join('\n\n');
+
       }
+
+
 
       function updateRecommendation(stats) {
+
         const preset = TRAINING_LIBRARY[stats.focusKey] || TRAINING_LIBRARY.consistency;
+
         const message = stats.lastSession
+
           ? preset.recommendation
+
           : 'Complete a session to unlock tailored drills.';
+
         setText(DOM.recommendationText, message);
+
         if (DOM.recommendationAction) {
+
           DOM.recommendationAction.onclick = () => {
+
             alert('Training drills unlock soon. Stay tuned!');
+
           };
+
         }
+
       }
+
       function createEl(tag, props = {}, children = []) {
+
         const el = document.createElement(tag);
+
         Object.entries(props).forEach(([key, value]) => {
+
           if (value === undefined || value === null) return;
+
           if (key === 'class') el.className = value;
+
           else if (key === 'dataset' && typeof value === 'object') {
+
             Object.entries(value).forEach(([dk, dv]) => {
+
               if (dv !== undefined && dv !== null) el.dataset[dk] = dv;
+
             });
+
           } else if (key === 'text') el.textContent = value;
+
           else if (key === 'html') el.innerHTML = value;
+
           else if (key in el) el[key] = value;
+
           else el.setAttribute(key, value);
+
         });
+
         const nodes = Array.isArray(children) ? children : [children];
+
         nodes.forEach(child => {
+
           if (child === undefined || child === null) return;
+
           if (typeof child === 'string') el.appendChild(document.createTextNode(child));
+
           else el.appendChild(child);
+
         });
+
         return el;
+
       }
+
+
 
       function createActionButton(label, act, sid) {
+
         const btn = document.createElement('button');
+
         btn.className = 'btn btn-sm';
+
         btn.dataset.act = act;
+
         btn.dataset.id = sid;
+
         btn.textContent = label;
+
         return btn;
+
       }
+
+
 
       function buildMetric(label, value, suffix = '', decimals = 0) {
+
         const metric = document.createElement('div');
+
         metric.className = 'metric';
+
         const span = document.createElement('span');
+
         span.textContent = label;
+
         const strong = document.createElement('strong');
+
         strong.textContent = Number.isFinite(value) ? `${fmtNumber(value, decimals)}${suffix}` : '-';
+
         metric.appendChild(span);
+
         metric.appendChild(strong);
+
         return metric;
+
       }
+
+
 
       function createVideoPlaceholder(text = 'Clip not available yet.') {
+
         const div = document.createElement('div');
+
         div.className = 'video-placeholder';
+
         div.textContent = text;
+
         return div;
+
       }
+
+
 
       function buildActionButton(label, handler) {
+
         const btn = document.createElement('button');
+
         btn.className = 'btn';
+
         btn.textContent = label;
+
         btn.onclick = handler;
+
         return btn;
+
       }
+
+
 
       function computeSessionSummary(session, shotViews) {
+
         const attempts = shotViews.length || Number(session?.totals?.attempts || 0);
+
         const makes = shotViews.filter(s => s.made === true).length;
+
         const accuracy = attempts ? (makes / attempts) * 100 : NaN;
+
         const score = shotViews.reduce((sum, view) => sum + (Number.isFinite(view.score) ? view.score : 0), 0);
+
         return { attempts, makes, accuracy, score };
+
       }
+
+
 
       function buildSessionSummaryCard(session, shotViews, summary) {
+
         const card = document.createElement('div');
+
         card.className = 'card';
+
         const body = document.createElement('div');
+
         body.className = 'body';
+
         const info = document.createElement('div');
+
         info.className = 'muted';
+
         info.textContent = `Score ${fmtNumber(summary.score)} | Attempts ${fmtNumber(summary.attempts)} | Accuracy ${fmtPct(summary.accuracy)}`;
+
         body.appendChild(info);
+
         const grid = document.createElement('div');
+
         grid.className = 'summary-grid';
+
         const avgEntry = average(shotViews.map(s => s.entry));
+
         const avgRelease = average(shotViews.map(s => s.release));
+
         const avgArc = average(shotViews.map(s => s.arc));
+
         const metrics = [
+
           { label: 'Makes', value: fmtNumber(summary.makes) },
+
           { label: 'Avg Entry Angle', value: Number.isFinite(avgEntry) ? `${fmtNumber(avgEntry,1)}°` : '-' },
+
           { label: 'Avg Release Angle', value: Number.isFinite(avgRelease) ? `${fmtNumber(avgRelease,1)}°` : '-' },
+
           { label: 'Avg Arc Height', value: Number.isFinite(avgArc) ? fmtNumber(avgArc,1) : '-' },
+
         ];
+
         metrics.forEach(item => {
+
           const tile = document.createElement('div');
+
           tile.className = 'summary-card';
+
           const span = document.createElement('span');
+
           span.textContent = item.label;
+
           const strong = document.createElement('strong');
+
           strong.textContent = item.value;
+
           tile.appendChild(span);
+
           tile.appendChild(strong);
+
           grid.appendChild(tile);
+
         });
+
         body.appendChild(grid);
+
         card.appendChild(body);
+
         return card;
+
       }
+
       function buildShotGrid(session, shotViews) {
+
         const grid = document.createElement('div');
+
         grid.className = 'shot-grid';
+
         if (!shotViews.length) {
+
           const empty = document.createElement('div');
+
           empty.className = 'empty';
+
           empty.textContent = 'No shots recorded yet.';
+
           grid.appendChild(empty);
+
           return grid;
+
         }
+
         shotViews.forEach(view => {
+
           const card = document.createElement('div');
+
           card.className = 'card shot-card';
+
           const content = document.createElement('div');
+
           content.className = 'shot-content';
+
           const header = document.createElement('div');
+
           header.className = 'detail-header shot-head';
+
           const left = document.createElement('div');
+
           const title = document.createElement('div');
+
           title.className = 'shot-title';
+
           title.textContent = `Shot ${view.number}`;
+
           left.appendChild(title);
+
           if (view.timestamp) {
+
             const meta = document.createElement('div');
+
             meta.className = 'shot-meta';
+
             meta.textContent = view.timestamp;
+
             left.appendChild(meta);
+
           }
+
           header.appendChild(left);
+
           const status = document.createElement('span');
+
           status.className = `status ${view.statusClass}`;
+
           status.textContent = view.statusLabel;
+
           header.appendChild(status);
+
           content.appendChild(header);
 
+
+
           const metrics = document.createElement('div');
+
           metrics.className = 'shot-metrics';
+
           metrics.appendChild(buildMetric('Entry Angle', view.entry, '°', 1));
+
           metrics.appendChild(buildMetric('Release Angle', view.release, '°', 1));
+
           metrics.appendChild(buildMetric('Arc Height', view.arc, '', 1));
+
           metrics.appendChild(buildMetric('Shot Score', view.score, '', 0));
+
           content.appendChild(metrics);
 
+
+
           const noteText = view.coachNote || view.missReason;
+
           if (noteText) {
+
             const note = document.createElement('div');
+
             note.className = 'coach-note';
+
             const titleNote = document.createElement('strong');
+
             titleNote.textContent = view.coachNote ? 'Coach Notes' : 'Arc Insight';
+
             const bodyNote = document.createElement('p');
+
             bodyNote.textContent = noteText;
+
             note.appendChild(titleNote);
+
             note.appendChild(bodyNote);
+
             content.appendChild(note);
+
           }
+
+
 
           if (view.analysisMessage && view.analysisStatus && view.analysisStatus.toLowerCase() !== 'complete') {
+
             const statusNote = document.createElement('div');
+
             statusNote.className = 'analysis-status';
+
             statusNote.textContent = `Auto analysis: ${view.analysisMessage}`;
+
             content.appendChild(statusNote);
+
           }
+
+
 
           if (view.clipUrl) {
+
             const video = document.createElement('video');
+
             video.className = 'shot-video';
+
             video.controls = true;
+
             video.preload = 'metadata';
+
             video.src = view.clipUrl;
+
             video.onerror = () => {
+
               video.replaceWith(createVideoPlaceholder());
+
             };
+
             content.appendChild(video);
+
           } else {
+
             content.appendChild(createVideoPlaceholder());
+
           }
+
+
 
           card.appendChild(content);
+
           grid.appendChild(card);
+
         });
+
         return grid;
+
       }
+
+
 
       function markActiveRows() {
+
         document.querySelectorAll('#rows tr').forEach(row => {
+
           row.classList.toggle('row-active', row.dataset.sid === __CURRENT_SESSION_ID);
+
         });
+
       }
+
+
 
       async function showSession(sid) {
+
         if (!sid) return;
+
         __CURRENT_SESSION_ID = sid;
+
         markActiveRows();
+
         const box = document.getElementById('detail');
+
         if (!box) return;
+
         box.classList.add('loading');
+
         box.innerHTML = '<div class="empty">Loading session...</div>';
+
         try {
+
           const session = await fetchSessionDetail(sid);
+
           const shotViews = buildShotViews(session);
+
           const summary = computeSessionSummary(session, shotViews);
+
           const header = createEl('div', { class: 'card' }, [
+
             createEl('div', { class: 'detail-header' }, [
+
               createEl('div', {}, [
+
                 createEl('h3', { text: `Session ${sid}` }),
+
                 createEl('small', { text: `Started ${fmtDate(session.startedAt)} | Attempts ${fmtNumber(summary.attempts)} | Accuracy ${fmtPct(summary.accuracy)}` })
+
               ]),
+
               createEl('div', { class: 'actions' }, [
+
                 buildActionButton('Export CSV', () => exportSessionCSV(sid)),
+
                 buildActionButton('Copy Share Link', () => copyShare(sid)),
+
                 buildActionButton('Print', () => { showSession(sid).then(() => window.print()); })
+
               ])
+
             ])
+
           ]);
+
           const summaryCard = buildSessionSummaryCard(session, shotViews, summary);
+
           const shotGrid = buildShotGrid(session, shotViews);
+
           box.replaceChildren(header, summaryCard, shotGrid);
+
         } catch (err) {
+
           console.error('[my_sessions] failed to load session', err);
+
           box.replaceChildren(createEl('div', { class: 'empty', text: 'Unable to load session details.' }));
+
         } finally {
+
           box.classList.remove('loading');
+
           const panel = document.querySelector('.detail-panel .panel-body');
+
           if (panel) panel.scrollTop = 0;
+
         }
+
       }
+
       function renderTable() {
+
         const tbody = document.getElementById('rows');
+
         if (!tbody) return;
+
         tbody.innerHTML = '';
+
         const filter = (document.getElementById('filterTxt')?.value || '').toLowerCase();
+
         const data = sortList(__SESSIONS).filter(s => !filter || String(s.id || '').toLowerCase().includes(filter));
+
         if (!data.length) {
+
           const tr = document.createElement('tr');
+
           const td = document.createElement('td');
+
           td.colSpan = 8;
+
           td.className = 'empty';
+
           td.textContent = __SESSIONS.length ? 'No sessions match filter.' : 'No sessions found.';
+
           tr.appendChild(td);
+
           tbody.appendChild(tr);
+
           return;
+
         }
+
         data.forEach(meta => {
+
           const summary = SESSION_SUMMARY_CACHE.get(meta.id);
+
           const tr = document.createElement('tr');
+
           tr.dataset.sid = meta.id;
+
           if (meta.id === __CURRENT_SESSION_ID) tr.classList.add('row-active');
 
+
+
           const openCell = document.createElement('td');
+
           openCell.appendChild(createActionButton('Open', 'open', meta.id));
+
           tr.appendChild(openCell);
 
+
+
           const idCell = document.createElement('td');
+
           idCell.className = 'muted';
+
           idCell.textContent = meta.id;
+
           tr.appendChild(idCell);
 
+
+
           const startCell = document.createElement('td');
+
           startCell.textContent = fmtDate(meta.startedAt);
+
           tr.appendChild(startCell);
 
+
+
           const scoreCell = document.createElement('td');
+
           const score = summary?.score;
+
           scoreCell.textContent = Number.isFinite(score) ? fmtNumber(score) : '-';
+
           tr.appendChild(scoreCell);
 
+
+
           const attemptsCell = document.createElement('td');
+
           attemptsCell.textContent = fmtNumber(summary?.attempts ?? meta.totals?.attempts);
+
           tr.appendChild(attemptsCell);
 
+
+
           const madeCell = document.createElement('td');
+
           madeCell.textContent = fmtNumber(summary?.makes ?? meta.totals?.made);
+
           tr.appendChild(madeCell);
 
+
+
           const accCell = document.createElement('td');
+
           const accuracy = Number.isFinite(summary?.accuracy) ? summary.accuracy : Number(meta.totals?.accuracy);
+
           accCell.textContent = fmtPct(accuracy);
+
           tr.appendChild(accCell);
 
+
+
           const actionsCell = document.createElement('td');
+
           actionsCell.appendChild(createActionButton('CSV', 'csv', meta.id));
+
           actionsCell.appendChild(document.createTextNode(' '));
+
           actionsCell.appendChild(createActionButton('Share', 'share', meta.id));
+
           actionsCell.appendChild(document.createTextNode(' '));
+
           actionsCell.appendChild(createActionButton('Print', 'print', meta.id));
+
           tr.appendChild(actionsCell);
 
+
+
           tbody.appendChild(tr);
+
         });
+
       }
+
+
 
       function sanitizeForCSV(value) {
+
         return String(value ?? '').replace(/[\r\n]+/g, ' ').trim();
+
       }
+
+
 
       function downloadCSV(filename, rows) {
+
         const csv = rows.map(row => row.map(val => `"${sanitizeForCSV(val).replace(/"/g, '""')}"`).join(',')).join('\n');
+
         const blob = new Blob([csv], { type: 'text/csv' });
+
         const url = URL.createObjectURL(blob);
+
         const link = document.createElement('a');
+
         link.href = url;
+
         link.download = filename;
+
         document.body.appendChild(link);
+
         link.click();
+
         setTimeout(() => {
+
           document.body.removeChild(link);
+
           URL.revokeObjectURL(url);
+
         }, 0);
+
       }
+
+
 
       async function exportSessionCSV(sid) {
+
         try {
+
           const session = await fetchSessionDetail(sid);
+
           const shotViews = buildShotViews(session);
+
           const rows = [['#','score','made','entryAngle','releaseAngle','arcHeight','coachNotes','missReason']];
+
           shotViews.forEach(view => {
+
             rows.push([
+
               view.number,
+
               Number.isFinite(view.score) ? view.score : '',
+
               view.made === true ? 'made' : view.made === false ? 'miss' : 'pending',
+
               Number.isFinite(view.entry) ? fmtNumber(view.entry,1) : '',
+
               Number.isFinite(view.release) ? fmtNumber(view.release,1) : '',
+
               Number.isFinite(view.arc) ? fmtNumber(view.arc,1) : '',
+
               sanitizeForCSV(view.coachNote),
+
               sanitizeForCSV(view.missReason)
+
             ]);
+
           });
+
           downloadCSV(`session_${sid}.csv`, rows);
+
         } catch (err) {
+
           console.error('[my_sessions] export csv failed', err);
+
           alert('Unable to export CSV for this session.');
+
         }
+
       }
+
+
 
       function exportAllCSV() {
+
         if (!__SESSIONS.length) {
+
           alert('No sessions to export yet.');
+
           return;
+
         }
+
         const rows = [['sessionId','startedAt','score','attempts','made','accuracy%']];
+
         sortList(__SESSIONS).forEach(meta => {
+
           const summary = SESSION_SUMMARY_CACHE.get(meta.id);
+
           rows.push([
+
             meta.id,
+
             fmtDateISO(meta.startedAt),
+
             summary ? summary.score : '',
+
             summary ? summary.attempts : meta.totals?.attempts ?? '',
+
             summary ? summary.makes : meta.totals?.made ?? '',
+
             summary && Number.isFinite(summary.accuracy)
+
               ? Number(summary.accuracy).toFixed(1)
+
               : Number.isFinite(meta.totals?.accuracy) ? Number(meta.totals.accuracy).toFixed(1) : ''
+
           ]);
+
         });
+
         downloadCSV('doach_sessions.csv', rows);
+
       }
+
+
 
       async function copyShare(sid) {
+
         const url = `${location.origin}/static/my_sessions.html?sid=${encodeURIComponent(sid)}`;
+
         try {
+
           await navigator.clipboard.writeText(url);
+
           alert('Link copied to clipboard');
+
         } catch {
+
           prompt('Copy link:', url);
+
         }
+
       }
+
       async function updateDashboard() {
+
         if (!__SESSIONS.length) {
+
           SESSION_SUMMARY_CACHE = new Map();
+
           applyDashboard(summarizeSessions([]));
+
           renderTable();
+
           return;
+
         }
+
         const details = [];
+
         for (const meta of __SESSIONS) {
+
           try {
+
             const detail = await fetchSessionDetail(meta.id);
+
             details.push(detail);
+
           } catch (err) {
+
             console.warn('[my_sessions] failed to fetch session detail', meta.id, err);
+
           }
+
         }
+
         const stats = summarizeSessions(details);
+
         SESSION_SUMMARY_CACHE = new Map(stats.sessionSummaries.map(s => [s.sid, s]));
+
         applyDashboard(stats);
+
         renderTable();
+
       }
+
+
 
       async function loadSessions() {
+
         setDashboardLoading();
+
         try {
+
           const res = await fetch('/api/sessions');
+
           if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
           const json = await res.json();
+
           __SESSIONS = Array.isArray(json.sessions) ? json.sessions : [];
+
           updateGreeting(json.profile || json.user || null);
+
         } catch (err) {
+
           console.error('[my_sessions] failed to load sessions', err);
+
           __SESSIONS = [];
+
           updateGreeting(null);
+
         }
+
         renderTable();
+
         await updateDashboard();
+
         if (__INITIAL_SESSION && __SESSIONS.some(s => s.id === __INITIAL_SESSION)) {
+
           showSession(__INITIAL_SESSION);
+
           __INITIAL_SESSION = null;
+
         } else if (__CURRENT_SESSION_ID && __SESSIONS.some(s => s.id === __CURRENT_SESSION_ID)) {
+
           showSession(__CURRENT_SESSION_ID);
+
         } else if (__SESSIONS.length) {
+
           showSession(__SESSIONS[0].id);
+
         } else {
+
           const box = document.getElementById('detail');
+
           if (box) box.innerHTML = '<div class="empty">No sessions yet. Once you record, summaries will appear here.</div>';
+
         }
+
       }
 
+
+
       document.addEventListener('DOMContentLoaded', () => {
+
         DOM = {
+
           headerTitle: document.querySelector('header h1'),
+
           scoreboardPoints: document.getElementById('scoreboardPoints'),
+
           scoreboardTier: document.getElementById('scoreboardTier'),
+
           scoreboardProgress: document.getElementById('scoreboardProgress'),
+
           scoreboardToNext: document.getElementById('scoreboardToNext'),
+
           scoreboardMessage: document.getElementById('scoreboardMessage'),
+
           playerSessions: document.getElementById('playerSessions'),
+
           playerShots: document.getElementById('playerShots'),
+
           playerAccuracy: document.getElementById('playerAccuracy'),
+
           playerAvgScore: document.getElementById('playerAvgScore'),
+
           playerStatus: document.getElementById('playerStatus'),
+
           trainingSession: document.getElementById('trainingSession'),
+
           trainingDrill: document.getElementById('trainingDrill'),
+
           trainingStatus: document.getElementById('trainingStatus'),
+
           trainingMessage: document.getElementById('trainingMessage'),
+
           totalScoreMetric: document.getElementById('totalScoreMetric'),
+
           ratingMetric: document.getElementById('ratingMetric'),
+
           ratingSubtext: document.getElementById('ratingSubtext'),
+
           assessmentMetric: document.getElementById('assessmentMetric'),
+
           assessmentUpdated: document.getElementById('assessmentUpdated'),
+
           quickSessions: document.getElementById('quickSessions'),
+
           quickMakes: document.getElementById('quickMakes'),
+
           quickTime: document.getElementById('quickTime'),
+
           assessmentText: document.getElementById('assessmentText'),
+
           recommendationText: document.getElementById('recommendationText'),
+
           recommendationAction: document.getElementById('recommendationAction'),
+
         };
+
+
 
         document.getElementById('btnRefresh').onclick = () => {
+
           SESSION_DETAIL_CACHE.clear();
+
           SESSION_SUMMARY_CACHE = new Map();
+
           loadSessions();
+
         };
+
         document.getElementById('filterTxt').oninput = () => renderTable();
+
         document.getElementById('sortKey').onchange = (e) => { __SORT.key = e.target.value; renderTable(); };
+
         document.getElementById('sortDir').onchange = (e) => { __SORT.dir = e.target.value; renderTable(); };
+
         document.getElementById('exportAll').onclick = exportAllCSV;
+
         document.getElementById('rows').addEventListener('click', (e) => {
+
           const b = e.target.closest('button'); if (!b) return;
+
           const sid = b.dataset.id;
+
           const act = b.dataset.act;
+
           if (!sid) return;
+
           if (act === 'open') showSession(sid);
+
           else if (act === 'csv') exportSessionCSV(sid);
+
           else if (act === 'share') copyShare(sid);
+
           else if (act === 'print') { showSession(sid).then(() => window.print()); }
+
         });
 
+
+
         const scrollAssessmentBtn = document.getElementById('scrollAssessmentBtn');
+
         if (scrollAssessmentBtn) {
+
           scrollAssessmentBtn.onclick = () => {
+
             document.getElementById('assessmentSection')?.scrollIntoView({ behavior: 'smooth' });
+
           };
+
         }
-        const supportUrl = 'mailto:support@doach.ai?subject=Doach%20Support';
-        const supportBtn = document.getElementById('supportBtn');
-        if (supportBtn) supportBtn.onclick = () => { window.open(supportUrl, '_blank'); };
+
+        const openSupportWidget = () => {
+
+          if (window.__DOACH_SUPPORT_WIDGET_READY) {
+
+            window.openSupportPanel?.();
+
+            return;
+
+          }
+
+          if (typeof window.installFeedbackWidget === 'function') {
+
+            window.installFeedbackWidget();
+
+            setTimeout(() => window.openSupportPanel?.(), 150);
+
+          }
+
+        };
+
         const supportSecondaryBtn = document.getElementById('supportSecondaryBtn');
-        if (supportSecondaryBtn) supportSecondaryBtn.onclick = () => { window.open(supportUrl, '_blank'); };
+
+        if (supportSecondaryBtn) supportSecondaryBtn.onclick = openSupportWidget;
+
+
 
         loadSessions();
+
       });
+
     })();
+
   </script>
+
 </head>
+
 <body>
+
   <header>
+
     <div class="header-main">
+
       <h1>Hi, Hooper!</h1>
+
       <button class="btn btn-primary" onclick="window.open('/', '_self')">Start Session</button>
+
     </div>
+
     <div class="toolbar">
+
       <input id="filterTxt" type="text" placeholder="Filter by ID..."/>
+
       <select id="sortKey"><option value="startedAt">Sort: Date</option><option value="attempts">Sort: Attempts</option><option value="accuracy">Sort: Accuracy</option></select>
+
       <select id="sortDir"><option value="desc">Desc</option><option value="asc">Asc</option></select>
+
       <button class="btn btn-tonal" id="exportAll">Export All</button>
+
       <button class="btn btn-tonal" id="btnRefresh">Refresh</button>
+
     </div>
+
   </header>
+
   <main class="dashboard">
+
     <section class="overview-grid">
+
       <article class="card card--scoreboard">
+
         <h2 class="card-title">Scoreboard <span class="tag" id="scoreboardTier">--</span></h2>
+
         <div class="score-total" id="scoreboardPoints">-</div>
+
         <div class="score-sub">Total Points</div>
+
         <div class="progress-track"><div class="progress-bar" id="scoreboardProgress"></div></div>
+
         <div class="score-note hint" id="scoreboardToNext">Calculating...</div>
+
         <div class="score-note positive" id="scoreboardMessage">Build a streak to climb tiers.</div>
+
       </article>
+
       <article class="card tight">
+
         <h2 class="card-title">Player Stats</h2>
+
         <div class="stat-grid">
+
           <div class="stat-item"><span>Sessions</span><strong id="playerSessions">-</strong></div>
+
           <div class="stat-item"><span>Total Shots</span><strong id="playerShots">-</strong></div>
+
           <div class="stat-item"><span>Accuracy</span><strong id="playerAccuracy">-</strong></div>
+
           <div class="stat-item"><span>Avg Shot Score</span><strong id="playerAvgScore">-</strong></div>
+
         </div>
+
         <div class="player-status" id="playerStatus">Status: -</div>
+
       </article>
+
       <article class="card tight">
+
         <h2 class="card-title">My Training</h2>
+
         <div class="stat-grid">
+
           <div class="stat-item"><span>Focus</span><strong id="trainingSession">Coming Soon</strong></div>
+
           <div class="stat-item"><span>Drill</span><strong id="trainingDrill">Catch &amp; Shoot</strong></div>
+
           <div class="stat-item"><span>Status</span><strong id="trainingStatus">Prep</strong></div>
+
         </div>
+
         <div class="card-subtext" id="trainingMessage">Personalized drills unlock as you log more sessions.</div>
+
       </article>
+
     </section>
 
-    <section class="metrics-row">
+
+
+    <section class="metrics-row metrics-row--three">
+
       <div class="metric-card">
+
         <h3>Total Score</h3>
+
         <strong id="totalScoreMetric">-</strong>
+
         <span class="card-subtext">Lifetime shot score</span>
+
       </div>
+
       <div class="metric-card">
+
         <h3>Rating ˜...</h3>
+
         <strong id="ratingMetric">-</strong>
+
         <span class="card-subtext" id="ratingSubtext">Based on accuracy &amp; consistency</span>
+
       </div>
+
       <div class="metric-card" data-highlight="true">
+
         <h3>Doach Assessment</h3>
+
         <strong id="assessmentMetric">-</strong>
+
         <span class="card-subtext">Last updated <span id="assessmentUpdated">-</span></span>
+
         <button class="btn-inline btn" id="scrollAssessmentBtn">View</button>
+
       </div>
-      <div class="metric-card" data-highlight="true">
-        <h3>Support</h3>
-        <span class="card-subtext">Need help with your sessions?</span>
-        <button class="btn-inline btn" id="supportBtn">Open Support</button>
-      </div>
+
     </section>
 
     <section class="quick-stats">
+
       <div class="quick-card">
+
         <div class="quick-icon">&#127936;</div>
+
         <strong id="quickSessions">-</strong>
+
         <span>Sessions this week</span>
+
       </div>
+
       <div class="quick-card">
+
         <div class="quick-icon">&#127919;</div>
+
         <strong id="quickMakes">-</strong>
+
         <span>Shots made</span>
+
       </div>
+
       <div class="quick-card">
+
         <div class="quick-icon">&#9201;</div>
+
         <strong id="quickTime">-</strong>
+
         <span>Total training time</span>
+
       </div>
+
     </section>
+
+
 
     <section class="assessment-row" id="assessmentSection">
+
       <article class="card assessment-card">
+
         <h2 class="card-title">Doach Assessment</h2>
+
         <p id="assessmentText">Record more shots to unlock your assessment.</p>
+
       </article>
+
       <article class="card support-card">
+
         <h2 class="card-title">Open Support</h2>
+
         <p class="card-subtext">Reach out to Doach support for coaching tips or troubleshooting.</p>
+
         <button class="btn" id="supportSecondaryBtn">Contact Support</button>
+
       </article>
+
     </section>
+
+
 
     <section class="recommendation-section">
+
       <article class="recommend-card">
+
         <strong>DOACH Recommends</strong>
+
         <p class="card-subtext" id="recommendationText">Your next drill recommendation will appear here.</p>
+
         <button class="btn" id="recommendationAction">Start Drill</button>
+
       </article>
+
     </section>
 
+
+
     <section class="recent-section">
+
       <div class="recent-header">Recent Sessions</div>
+
       <div class="recent-layout">
+
         <section class="panel sessions-panel">
+
           <h2>Sessions</h2>
+
           <div class="panel-body">
+
             <table>
+
               <thead>
+
                 <tr><th></th><th>ID</th><th>Started</th><th>Score</th><th>Attempts</th><th>Made</th><th>Accuracy</th><th>Actions</th></tr>
+
               </thead>
+
               <tbody id="rows"></tbody>
+
             </table>
+
           </div>
+
         </section>
+
         <section class="panel detail-panel">
+
           <h2>Details</h2>
+
           <div class="panel-body">
+
             <div id="detail" class="detail-body">
+
               <div class="empty">Select a session to view shots.</div>
+
             </div>
+
           </div>
+
         </section>
+
       </div>
+
     </section>
+
   </main>
+
 </body>
+
 </html>
+

@@ -69,6 +69,7 @@ import threading
 from queue import Queue
 from PIL import Image
 from arcmm_api import arcmm_api
+from support.engine import detect_intent, run_intent_handler
 
 
 # SQLAlchemy models are defined later inside _try_init_db()
@@ -1256,6 +1257,96 @@ def _try_init_db():
             age_group = Column(String(16), nullable=False)  # mirror from registration
             updated_at = Column(DateTime, default=datetime.utcnow)
 
+        class SupportTicket(Base):
+            __tablename__ = "support_tickets"
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            user_id = Column(
+                Integer, ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+            )
+            created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+            status = Column(String(24), nullable=False, default="open")
+            priority = Column(String(16), nullable=False, default="normal")
+            category = Column(String(32), nullable=False, default="technical")
+            title = Column(String(255), nullable=False)
+            description = Column(Text, nullable=False)
+            last_update_at = Column(
+                DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow
+            )
+            assignee = Column(String(64))
+            session_id = Column(
+                String(64), ForeignKey("sessions.sid", ondelete="SET NULL"), nullable=True
+            )
+            meta = Column(MyJSON)
+
+            interactions = relationship(
+                "SupportInteraction",
+                back_populates="ticket",
+                passive_deletes=True,
+            )
+
+            def to_dict(self):
+                return {
+                    "id": self.id,
+                    "user_id": self.user_id,
+                    "status": self.status,
+                    "priority": self.priority,
+                    "category": self.category,
+                    "title": self.title,
+                    "description": self.description,
+                    "assignee": self.assignee,
+                    "session_id": self.session_id,
+                    "meta": self.meta,
+                    "created_at": self.created_at.isoformat()
+                    if getattr(self, "created_at", None)
+                    else None,
+                    "last_update_at": self.last_update_at.isoformat()
+                    if getattr(self, "last_update_at", None)
+                    else None,
+                }
+
+        class SupportInteraction(Base):
+            __tablename__ = "support_interactions"
+            id = Column(Integer, primary_key=True, autoincrement=True)
+            user_id = Column(
+                Integer, ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+            )
+            session_id = Column(
+                String(64), ForeignKey("sessions.sid", ondelete="SET NULL"), nullable=True
+            )
+            shot_id = Column(String(64))
+            created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+            role = Column(String(16), nullable=False)
+            message = Column(Text, nullable=False)
+            intent = Column(String(64))
+            action_taken = Column(MyJSON)
+            result_status = Column(String(32), nullable=False, default="pending_user")
+            related_ticket_id = Column(
+                Integer,
+                ForeignKey("support_tickets.id", ondelete="SET NULL"),
+                nullable=True,
+            )
+            meta = Column(MyJSON)
+
+            ticket = relationship("SupportTicket", back_populates="interactions")
+
+            def to_dict(self):
+                return {
+                    "id": self.id,
+                    "user_id": self.user_id,
+                    "session_id": self.session_id,
+                    "shot_id": self.shot_id,
+                    "role": self.role,
+                    "message": self.message,
+                    "intent": self.intent,
+                    "action_taken": self.action_taken,
+                    "result_status": self.result_status,
+                    "related_ticket_id": self.related_ticket_id,
+                    "meta": self.meta,
+                    "created_at": self.created_at.isoformat()
+                    if getattr(self, "created_at", None)
+                    else None,
+                }
+
         Base.metadata.create_all(engine)
         DBSessionLocal = sessionmaker(bind=engine, expire_on_commit=False, future=True)
 
@@ -1273,6 +1364,8 @@ def _try_init_db():
             "EventRegistration": EventRegistration,
             "EventSession": EventSession,
             "EventUserStats": EventUserStats,
+            "SupportTicket": SupportTicket,
+            "SupportInteraction": SupportInteraction,
         }
         print("✅ SQLAlchemy connected")
         return app.db
@@ -5755,6 +5848,370 @@ def api_event_my_rank_route(slug):
     res = _db_lb_my_rank(slug, category, user_id)
     status = 200 if res.get("ok") else 400
     return jsonify(res), status
+
+
+# ----------------------------------------------------------
+#  Support API (skeleton for in-app help interactions)
+# ----------------------------------------------------------
+
+SUPPORT_ALLOWED_ROLES = {"user", "doach", "admin"}
+SUPPORT_RESULT_STATUSES = {
+    "pending_user",
+    "resolved",
+    "needs_ticket",
+    "failed",
+    "in_progress",
+}
+SUPPORT_TICKET_STATUSES = {"open", "in_progress", "waiting_user", "resolved", "closed"}
+SUPPORT_TICKET_PRIORITIES = {"low", "normal", "high", "urgent"}
+SUPPORT_TICKET_CATEGORIES = {
+    "technical",
+    "billing",
+    "account",
+    "challenge",
+    "coaching",
+    "other",
+}
+
+
+def _coerce_json_field(value):
+    if value is None:
+        return None
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return {"value": value}
+    return value
+
+
+def _ensure_db_or_503():
+    db = getattr(app, "db", None)
+    if db:
+        return db
+    db = _try_init_db()
+    if not db:
+        raise RuntimeError("db unavailable")
+    return db
+
+
+@app.post("/api/support/ingest")
+def api_support_ingest():
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+
+    payload = request.get_json(silent=True) or {}
+    message = (payload.get("message") or "").strip()
+    if not message:
+        return jsonify({"ok": False, "err": "message required"}), 400
+
+    role = (payload.get("role") or "user").strip().lower()
+    if role not in SUPPORT_ALLOWED_ROLES:
+        return jsonify({"ok": False, "err": "invalid role"}), 400
+
+    result_status = (payload.get("result_status") or "pending_user").strip()
+    if result_status and result_status not in SUPPORT_RESULT_STATUSES:
+        return jsonify({"ok": False, "err": "invalid result_status"}), 400
+
+    user_id = payload.get("user_id")
+    if user_id is None:
+        user_id = session.get("user_id")
+        if user_id is None and not ALLOW_STUB_AUTH:
+            return jsonify({"ok": False, "err": "auth"}), 401
+
+    related_ticket_id = payload.get("related_ticket_id")
+    if related_ticket_id is not None:
+        try:
+            related_ticket_id = int(related_ticket_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "err": "invalid related_ticket_id"}), 400
+
+    base_intent = (payload.get("intent") or "").strip() or None
+    action_taken = _coerce_json_field(payload.get("action_taken"))
+    meta = _coerce_json_field(payload.get("meta"))
+
+    SupportInteraction = db["SupportInteraction"]
+    new_row_id = None
+    with db["Session"]() as s:
+        row = SupportInteraction(
+            user_id=user_id,
+            session_id=payload.get("session_id"),
+            shot_id=payload.get("shot_id"),
+            role=role,
+            message=message,
+            intent=base_intent,
+            action_taken=action_taken,
+            result_status=result_status or "pending_user",
+            related_ticket_id=related_ticket_id,
+            meta=meta,
+        )
+        s.add(row)
+        s.commit()
+        s.refresh(row)
+        new_row_id = row.id
+        primary_payload = row.to_dict()
+
+    detected_intent = base_intent or "general"
+    handler_result = None
+    doach_reply_dict = None
+
+    if role == "user":
+        if not base_intent:
+            detected_intent = detect_intent(message)
+        context = {
+            "message": message,
+            "session_id": payload.get("session_id"),
+            "shot_id": payload.get("shot_id"),
+            "user_id": user_id,
+            "role": role,
+            "request_payload": payload,
+            "last_release": app.config.get("LAST_RELEASE"),
+            "app_config_last_release": app.config.get("LAST_RELEASE"),
+            "torch_available": TORCH_AVAILABLE,
+            "active_sessions": list(app.active_users.values()),
+        }
+        handler_result = run_intent_handler(db, detected_intent, context)
+
+    if handler_result:
+        with db["Session"]() as s:
+            row = s.query(SupportInteraction).filter_by(id=new_row_id).first()
+            if row:
+                row.intent = detected_intent
+                if handler_result.action_taken:
+                    row.action_taken = handler_result.action_taken
+                if handler_result.result_status:
+                    row.result_status = handler_result.result_status
+                if handler_result.related_ticket_id:
+                    row.related_ticket_id = handler_result.related_ticket_id
+                if handler_result.meta:
+                    row.meta = handler_result.meta
+                s.add(row)
+                s.commit()
+                s.refresh(row)
+                primary_payload = row.to_dict()
+
+        if handler_result.reply:
+            with db["Session"]() as s:
+                reply_row = SupportInteraction(
+                    user_id=user_id,
+                    session_id=payload.get("session_id"),
+                    shot_id=payload.get("shot_id"),
+                    role="doach",
+                    message=handler_result.reply,
+                    intent=detected_intent,
+                    action_taken=handler_result.action_taken,
+                    result_status=handler_result.result_status or "resolved",
+                    related_ticket_id=handler_result.related_ticket_id,
+                    meta=handler_result.meta,
+                )
+                s.add(reply_row)
+                s.commit()
+                s.refresh(reply_row)
+                doach_reply_dict = reply_row.to_dict()
+
+    response_body = {
+        "ok": True,
+        "interaction": primary_payload,
+        "intent": detected_intent,
+    }
+    if handler_result:
+        response_body["handler"] = handler_result.to_dict()
+    if doach_reply_dict:
+        response_body["response"] = doach_reply_dict
+    return jsonify(response_body), 201
+
+
+@app.get("/api/support/history")
+def api_support_history():
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        if not ALLOW_STUB_AUTH:
+            return jsonify({"ok": False, "err": "db unavailable"}), 503
+        return jsonify({"ok": True, "interactions": []})
+
+    scope_all = request.args.get("scope") == "all"
+    if scope_all and not ALLOW_STUB_AUTH:
+        scope_all = False
+
+    SupportInteraction = db["SupportInteraction"]
+    with db["Session"]() as s:
+        query = s.query(SupportInteraction).order_by(
+            SupportInteraction.created_at.asc()
+        )
+
+        session_id = request.args.get("session_id")
+        if session_id:
+            query = query.filter(SupportInteraction.session_id == session_id)
+
+        user_id_param = request.args.get("user_id")
+        if user_id_param:
+            try:
+                user_id_int = int(user_id_param)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "err": "invalid user_id"}), 400
+            query = query.filter(SupportInteraction.user_id == user_id_int)
+        elif not scope_all:
+            current_uid = session.get("user_id")
+            if current_uid is None and not ALLOW_STUB_AUTH:
+                return jsonify({"ok": False, "err": "auth"}), 401
+            if current_uid is not None:
+                query = query.filter(SupportInteraction.user_id == current_uid)
+
+        limit = request.args.get("limit")
+        if limit:
+            try:
+                limit_int = max(1, min(int(limit), 200))
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "err": "invalid limit"}), 400
+            query = query.limit(limit_int)
+
+        rows = [row.to_dict() for row in query.all()]
+        return jsonify({"ok": True, "interactions": rows})
+
+
+@app.get("/api/support/tickets")
+def api_support_ticket_list():
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        if not ALLOW_STUB_AUTH:
+            return jsonify({"ok": False, "err": "db unavailable"}), 503
+        return jsonify({"ok": True, "tickets": []})
+
+    scope_all = request.args.get("scope") == "all"
+    if scope_all and not ALLOW_STUB_AUTH:
+        scope_all = False
+
+    SupportTicket = db["SupportTicket"]
+    with db["Session"]() as s:
+        query = s.query(SupportTicket).order_by(SupportTicket.created_at.desc())
+
+        user_id_param = request.args.get("user_id")
+        if user_id_param:
+            try:
+                user_id_int = int(user_id_param)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "err": "invalid user_id"}), 400
+            query = query.filter(SupportTicket.user_id == user_id_int)
+        elif not scope_all:
+            current_uid = session.get("user_id")
+            if current_uid is None and not ALLOW_STUB_AUTH:
+                return jsonify({"ok": False, "err": "auth"}), 401
+            if current_uid is not None:
+                query = query.filter(SupportTicket.user_id == current_uid)
+
+        status = request.args.get("status")
+        if status:
+            query = query.filter(SupportTicket.status == status)
+
+        rows = [row.to_dict() for row in query.all()]
+        return jsonify({"ok": True, "tickets": rows})
+
+
+@app.post("/api/support/tickets")
+def api_support_ticket_create():
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+
+    payload = request.get_json(silent=True) or {}
+    title = (payload.get("title") or "").strip()
+    description = (payload.get("description") or "").strip()
+    if not title or not description:
+        return jsonify({"ok": False, "err": "title and description required"}), 400
+
+    user_id = payload.get("user_id")
+    if user_id is None:
+        user_id = session.get("user_id")
+        if user_id is None and not ALLOW_STUB_AUTH:
+            return jsonify({"ok": False, "err": "auth"}), 401
+
+    status = (payload.get("status") or "open").strip()
+    if status not in SUPPORT_TICKET_STATUSES:
+        return jsonify({"ok": False, "err": "invalid status"}), 400
+
+    priority = (payload.get("priority") or "normal").strip()
+    if priority not in SUPPORT_TICKET_PRIORITIES:
+        return jsonify({"ok": False, "err": "invalid priority"}), 400
+
+    category = (payload.get("category") or "technical").strip()
+    if category not in SUPPORT_TICKET_CATEGORIES:
+        return jsonify({"ok": False, "err": "invalid category"}), 400
+
+    meta = _coerce_json_field(payload.get("meta"))
+
+    SupportTicket = db["SupportTicket"]
+    with db["Session"]() as s:
+        ticket = SupportTicket(
+            user_id=user_id,
+            title=title,
+            description=description,
+            status=status,
+            priority=priority,
+            category=category,
+            assignee=(payload.get("assignee") or "").strip() or None,
+            session_id=payload.get("session_id"),
+            meta=meta,
+        )
+        s.add(ticket)
+        s.commit()
+        s.refresh(ticket)
+        return jsonify({"ok": True, "ticket": ticket.to_dict()}), 201
+
+
+@app.patch("/api/support/tickets/<int:ticket_id>")
+def api_support_ticket_update(ticket_id):
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+
+    payload = request.get_json(silent=True) or {}
+    SupportTicket = db["SupportTicket"]
+    with db["Session"]() as s:
+        ticket = s.query(SupportTicket).filter_by(id=ticket_id).first()
+        if not ticket:
+            return jsonify({"ok": False, "err": "not found"}), 404
+
+        if "status" in payload:
+            status = (payload.get("status") or "").strip()
+            if status and status in SUPPORT_TICKET_STATUSES:
+                ticket.status = status
+        if "priority" in payload:
+            priority = (payload.get("priority") or "").strip()
+            if priority and priority in SUPPORT_TICKET_PRIORITIES:
+                ticket.priority = priority
+        if "category" in payload:
+            category = (payload.get("category") or "").strip()
+            if category and category in SUPPORT_TICKET_CATEGORIES:
+                ticket.category = category
+        if "title" in payload:
+            title = (payload.get("title") or "").strip()
+            if title:
+                ticket.title = title
+        if "description" in payload:
+            description = (payload.get("description") or "").strip()
+            if description:
+                ticket.description = description
+        if "assignee" in payload:
+            assignee = (payload.get("assignee") or "").strip()
+            ticket.assignee = assignee or None
+        if "session_id" in payload:
+            ticket.session_id = payload.get("session_id")
+        if "meta" in payload:
+            ticket.meta = _coerce_json_field(payload.get("meta"))
+
+        ticket.last_update_at = datetime.utcnow()
+        s.add(ticket)
+        s.commit()
+        s.refresh(ticket)
+        return jsonify({"ok": True, "ticket": ticket.to_dict()})
 
 
 try:

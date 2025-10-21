@@ -81,11 +81,15 @@ async function main() {
     return [key, rest.join('=') || 'true'];
   }));
 
+  const defaultPort = process.env.PORT || '5000';
   const rawEnvBase =
     opts['base-url'] ||
     process.env.ARCMM_BASE_URL ||
     process.env.ARCMM_SERVER_URL ||
-    'http://127.0.0.1:${PORT}';
+    process.env.RENDER_EXTERNAL_URL ||
+    process.env.PUBLIC_BASE_URL ||
+    process.env.PUBLIC_URL ||
+    `http://127.0.0.1:${defaultPort}`;
 
   const expandedEnvBase = rawEnvBase
     .replace(/\$\{PORT\}/g, process.env.PORT || '5000')
