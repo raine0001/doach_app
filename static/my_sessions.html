@@ -1555,7 +1555,10 @@
 </head>
 <body>
   <header>
-    <h1>Hi, Hooper!</h1>
+    <div class="header-main">
+      <h1>Hi, Hooper!</h1>
+      <button class="btn btn-primary" onclick="window.open('/', '_self')">Start Session</button>
+    </div>
     <div class="toolbar">
       <input id="filterTxt" type="text" placeholder="Filter by ID..."/>
       <select id="sortKey"><option value="startedAt">Sort: Date</option><option value="attempts">Sort: Attempts</option><option value="accuracy">Sort: Accuracy</option></select>

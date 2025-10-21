@@ -1286,12 +1286,31 @@ async function speakNewSessionInvite(line) {
 
 function requestNewSessionPrompt(options = {}) {
     if (__newSessionPromptTimer || __newSessionQuestionAsked) return;
-    const delayMs = Math.max(0, Number(options.delayMs ?? window.NEW_SESSION_PROMPT_DELAY_MS ?? NEW_SESSION_PROMPT_DELAY_MS) || 0);
+    const baseDelay = Number(options.delayMs ?? window.NEW_SESSION_PROMPT_DELAY_MS ?? NEW_SESSION_PROMPT_DELAY_MS) || 0;
+    const minDelay = Number(window.NEW_SESSION_PROMPT_MIN_MS ?? 6000);
+    const delayMs = Math.max(minDelay, baseDelay);
     __newSessionFinalized = false;
     __newSessionQuestionAsked = false;
 
     __newSessionPromptTimer = setTimeout(async () => {
         __newSessionPromptTimer = null;
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, Math.max(0, ms || 0)));
+        try {
+            if (typeof window.waitForCoachSpeech === 'function') {
+                await window.waitForCoachSpeech();
+            }
+        } catch { }
+        try {
+            const lastEnded = Number(window.__COACH_LAST_SPEECH_ENDED_AT || 0);
+            const minGap = Number(window.NEW_SESSION_PROMPT_MIN_MS ?? 6000);
+            if (minGap > 0 && lastEnded > 0) {
+                const remaining = minGap - (Date.now() - lastEnded);
+                if (remaining > 0) await sleep(remaining);
+            }
+        } catch { }
+        if (__newSessionFinalized || __newSessionQuestionAsked) return;
+        try { window.__NEW_SESSION_PROMPTED = true; } catch { }
+
         let modal = null;
         try {
             modal = renderFullShotTable?.();
@@ -1334,6 +1353,11 @@ function handleHudStartSession(event) {
     try { window.__NEW_SESSION_PROMPTED = false; } catch { }
     try { window.__SESSION_REVIEW_SPOKEN = false; } catch { }
     try { window.__SESSION_REVIEW_LAST = null; } catch { }
+    try { window.__SESSION_REVIEW_DONE = false; } catch { }
+    try { window.__SESSION_REVIEW_PROMISE = null; } catch { }
+    try { window.__releaseEvaluating = false; } catch { }
+    try { window.__releaseReject = null; } catch { }
+    try { window.__releaseEventSent = false; } catch { }
 
     hideStartSessionOverlay();
     try {
@@ -1372,6 +1396,7 @@ function handleHudStartSession(event) {
 
     try { setSessionStatus?.('SESSION IN PROGRESS…'); } catch { }
     try { hidePromptMessage(); } catch { }
+    try { window.doachVoice?.on?.(); } catch { }
 
     const hoopBox = (() => {
         try { return getLockedHoopBox?.(); } catch { return null; }
@@ -1501,7 +1526,8 @@ async function autoEndSessionAndSummarize() {
     setTimeout(() => {
         try {
             if (!window.__NEW_SESSION_PROMPTED) {
-                requestNewSessionPrompt?.({ delayMs: 0 });
+                const postSummaryDelay = Number(window.NEW_SESSION_PROMPT_POST_SUMMARY_MS ?? 8000);
+                requestNewSessionPrompt?.({ delayMs: postSummaryDelay });
             }
         } catch { }
     }, Math.max(0, Number(window.NEW_SESSION_PROMPT_FALLBACK_MS || 26000)));

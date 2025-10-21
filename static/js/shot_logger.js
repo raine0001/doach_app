@@ -76,6 +76,32 @@ try { window.updateBottomStats?.(); } catch {}
   }
 })();
 
+function resetShotRuntimeState() {
+  __shotInProgress = false;
+  __awaitingReset = false;
+  __lingerActive = false;
+  __lingerStartFrame = -1;
+  lastShotFrameId = -1;
+  __lastScoredCount = 0;
+  __releaseEventSent = false;
+  window.__shotFinalizeLock = false;
+  const s = ensureBallLatches();
+  s._lastInProx = false;
+  s._lastY = 0;
+  s.releaseSignaled = false;
+  s.summarySignaled = false;
+  s._postExitFrames = 0;
+}
+
+window.addEventListener('hud:start-session', resetShotRuntimeState);
+window.addEventListener('session:reset', resetShotRuntimeState);
+
+window.addEventListener('hud:end-session', () => {
+  __shotInProgress = false;
+  __awaitingReset = false;
+  __lingerActive = false;
+});
+
 // Let app.js handle when to re-arm release guards; avoid double resets here
 
 

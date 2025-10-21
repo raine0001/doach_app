@@ -2,6 +2,49 @@
 
 let __preferredWebVoice = null;
 
+let __coachSpeechTail = Promise.resolve(false);
+let __coachSpeechActive = false;
+
+function setCoachSpeechActive(active) {
+    if (__coachSpeechActive === active) return;
+    __coachSpeechActive = active;
+    try { window.__COACH_SPEAKING = active; } catch { }
+    try {
+        if (active) window.__COACH_LAST_SPEECH_STARTED_AT = Date.now();
+        else window.__COACH_LAST_SPEECH_ENDED_AT = Date.now();
+    } catch { }
+    try {
+        window.dispatchEvent(new CustomEvent(active ? 'coach:speech-start' : 'coach:speech-end'));
+    } catch { }
+}
+
+function queueCoachSpeech(task) {
+    const run = async () => {
+        setCoachSpeechActive(true);
+        try {
+            return await task();
+        } catch (err) {
+            try { console.warn('[coach] speech task failed', err); } catch { }
+            return false;
+        } finally {
+            setCoachSpeechActive(false);
+        }
+    };
+    __coachSpeechTail = __coachSpeechTail.then(run, run);
+    return __coachSpeechTail;
+}
+
+export function waitForCoachSpeech() {
+    return __coachSpeechTail.then(() => undefined);
+}
+
+export function isCoachSpeaking() {
+    return __coachSpeechActive;
+}
+
+try { window.waitForCoachSpeech = waitForCoachSpeech; } catch { }
+try { window.isCoachSpeaking = isCoachSpeaking; } catch { }
+
 // Who owns the intro line? 'session_manager' (default) or 'coach_voice'
 try { if (typeof window.PREF_GREETER_SOURCE === 'undefined') window.PREF_GREETER_SOURCE = 'session_manager'; } catch {}
 
@@ -425,7 +468,14 @@ async function speakViaOpenAI(text, opts = {}) {
     } catch { }
 
     const voice = opts.voice || getPreferredVoice();
-    const timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : SERVER_TTS_TIMEOUT_MS;
+    let timeoutMs = Number.isFinite(opts.timeoutMs) ? opts.timeoutMs : NaN;
+    if (!Number.isFinite(timeoutMs)) {
+        try {
+            const userTimeout = Number(window.COACH_TTS_TIMEOUT_MS);
+            if (Number.isFinite(userTimeout)) timeoutMs = userTimeout;
+        } catch { timeoutMs = NaN; }
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) timeoutMs = SERVER_TTS_TIMEOUT_MS;
 
     let controller = null;
     let timer = null;
@@ -480,12 +530,11 @@ async function speakViaWebSpeech(text) {
     }
 }
 
-export async function doachSpeak(text, opts = {}) {
-    if (!text) return false;
-    try { if (window.__coachMuted) return false; } catch { }
-
+async function doachSpeakOnce(text, opts = {}) {
     // 1) iOS demands the ritual. Do this before choosing engines.
     try { await window.CoachAudio?.unlock(); } catch { }
+
+    const spoken = String(text);
 
     // 2) Decide engine (force OpenAI on iOS if someone saved nonsense)
     let engine = (opts.engine || getTtsEngine() || '').toLowerCase();
@@ -493,26 +542,56 @@ export async function doachSpeak(text, opts = {}) {
     if (engine === 'web') engine = 'webspeech';
     if (IS_IOS && engine !== 'openai') engine = 'openai';
 
-    // 3) Try the chosen path
+    const tryOpenAI = async () => {
+        try {
+            try { window.speechSynthesis?.cancel?.(); } catch { }
+            const ok = await speakViaOpenAI(spoken, opts);
+            if (ok) return true;
+        } catch (err) {
+            try { console.warn('[coach] doachSpeak openai failed', err); } catch { }
+        }
+        return false;
+    };
+
+    const tryWebSpeech = async () => {
+        try {
+            const ok = await speakViaWebSpeech(spoken);
+            if (ok) return true;
+        } catch (err) {
+            try { console.warn('[coach] doachSpeak webspeech failed', err); } catch { }
+        }
+        return false;
+    };
+
+    // 3) Try the chosen path with graceful fallback
     try {
         if (engine === 'openai') {
-            const ok = await speakViaOpenAI(text, opts);
-            if (ok) return true;
+            if (await tryOpenAI()) return true;
+            if (await tryWebSpeech()) return true;
         } else if (engine === 'webspeech') {
             // Web Speech is pointless on iOS; route through server there
             if (!IS_IOS) {
-                const ok = await speakViaWebSpeech(text);
-                if (ok) return true;
+                if (await tryWebSpeech()) return true;
+                if (await tryOpenAI()) return true;
             } else {
-                const ok = await speakViaOpenAI(text, opts);
-                if (ok) return true;
+                if (await tryOpenAI()) return true;
             }
         }
     } catch (err) {
         try { console.warn('[coach] doachSpeak engine error', err); } catch { }
     }
 
+    // Final cross-check: if preferred engine failed, attempt the other one once.
+    if (engine !== 'openai' && await tryOpenAI()) return true;
+    if (engine !== 'webspeech' && await tryWebSpeech()) return true;
+
     return false;
+}
+
+export function doachSpeak(text, opts = {}) {
+    if (!text) return Promise.resolve(false);
+    try { if (window.__coachMuted) return Promise.resolve(false); } catch { }
+    return queueCoachSpeech(() => doachSpeakOnce(text, opts));
 }
 
 let __coachAudioPrimed = false;

@@ -1881,12 +1881,11 @@ function applyPrefs(p) {
   // demo toggles -> hard globals
   window.SHOW_POSE_LINES   = !!p.show.poseLines;
   window.SHOW_RELEASE_GATE = !!p.show.releaseGate;
-
-  // audio / mic / camera
   window.PREF_AUDIO_ENABLED = !!p.audioOn;
-  window.PREF_ALLOW_MIC     = !!p.allowMic;
+  window.PREF_ALLOW_MIC     = (p.allowMic !== false);
   window.PREF_ALLOW_CAMERA  = !!p.allowCamera;
   window.PREF_FACE_LOCK     = p.faceLock !== false;
+  p.allowMic = !!window.PREF_ALLOW_MIC;
 
   saveDoachPrefs(p);
 

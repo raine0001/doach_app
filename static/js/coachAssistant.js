@@ -2282,7 +2282,7 @@ window.addEventListener('shot:feedback:request', (e) => {
             const lines = [];
             if (trends.length) lines.push('Improvements: ' + trends.slice(0, 3).join(' '));
             if (lim.length) lines.push('Focus next: ' + lim.slice(0, 3).join(' '));
-            if (!lines.length) lines.push(`${name} 'your form is consistent - keep the rhythm and balance.'`);
+            if (!lines.length) lines.push(`${name}, your form is consistent - keep the rhythm and balance.`);
 
             // Shot-specific groups (enumerate where key cues were off)
             try {
@@ -2291,7 +2291,6 @@ window.addEventListener('shot:feedback:request', (e) => {
                 if (shots.length) {
                     const g = (window.DOACH_MEM?.get?.()?.golden) || { stanceWidthFeet: 120, kneeFlex: 28, toeToHoopDeg: 18, feetAngleDiff: 8, feetStagger: 6, shoulderToWristAngle: 55, releaseAboveShoulder: true };
                     const pickIdx = (pred) => shots.filter(({ p }) => pred(p)).map(({ idx }) => idx);
-                    const fmt = (arr) => arr.slice(0, 6).join(', ');
                     const followShort = pickIdx(p => Number.isFinite(p.followThroughHoldFrames) && p.followThroughHoldFrames < 2);
                     const feetNarrow = pickIdx(p => Number.isFinite(p.stanceWidthFeet) && g.stanceWidthFeet && (p.stanceWidthFeet < g.stanceWidthFeet - 20));
                     const feetWide = pickIdx(p => Number.isFinite(p.stanceWidthFeet) && g.stanceWidthFeet && (p.stanceWidthFeet > g.stanceWidthFeet + 20));
@@ -2304,16 +2303,16 @@ window.addEventListener('shot:feedback:request', (e) => {
                     const gazeOff = pickIdx(p => Number.isFinite(p.headToHoopDeg) && p.headToHoopDeg > 25);
 
                     const bullets = [];
-                    if (followShort.length) bullets.push(`Follow‑through short on shots ${fmt(followShort)} - hold 1-2 beats longer.`);
-                    if (feetNarrow.length) bullets.push(`Base narrow on shots ${fmt(feetNarrow)} - widen a touch.`);
-                    if (feetWide.length) bullets.push(`Base wide on shots ${fmt(feetWide)} - narrow slightly.`);
-                    if (toesOff.length) bullets.push(`Toes off-square on shots ${fmt(toesOff)} - align feet to rim.`);
-                    if (staggerHi.length) bullets.push(`Feet staggered on shots ${fmt(staggerHi)} - level your base.`);
-                    if (armLow.length) bullets.push(`Arm line low on shots ${fmt(armLow)} - finish taller.`);
-                    if (elbowLow.length) bullets.push(`Elbow not fully extended on shots ${fmt(elbowLow)} - lock out at finish.`);
-                    if (belowSh.length) bullets.push(`Release below shoulder on shots ${fmt(belowSh)} - finish above shoulder.`);
-                    if (kneeLow.length) bullets.push(`Limited knee bend on shots ${fmt(kneeLow)} - add a bit more power.`);
-                    if (gazeOff.length) bullets.push(`Gaze off rim on shots ${fmt(gazeOff)} - keep eyes on rim through release.`);
+                    if (followShort.length) bullets.push('Follow-through was short on several shots; hold for 1-2 beats longer.');
+                    if (feetNarrow.length) bullets.push('Base was narrow on several shots; widen slightly.');
+                    if (feetWide.length) bullets.push('Base was wide on several shots; narrow slightly.');
+                    if (toesOff.length) bullets.push('Toes were off-square on several shots; align your feet to the rim.');
+                    if (staggerHi.length) bullets.push('Foot stagger showed up; level your base before you lift.');
+                    if (armLow.length) bullets.push('Finish taller with the forearm to stay on line.');
+                    if (elbowLow.length) bullets.push('Drive the elbow through and lock out at the top.');
+                    if (belowSh.length) bullets.push('Raise the release above the shoulder to get the ball up.');
+                    if (kneeLow.length) bullets.push('Add a little more knee bend to load power.');
+                    if (gazeOff.length) bullets.push('Keep your eyes glued to the rim through release.');
 
                     if (bullets.length) {
                         lines.push('Notable patterns: ' + bullets.slice(0, 3).join(' '));
@@ -2321,6 +2320,15 @@ window.addEventListener('shot:feedback:request', (e) => {
                 }
             } catch { }
 
+            try {
+                const list = Array.isArray(window.__shotList) ? window.__shotList : [];
+                const scores = list.map(s => Number(s?.weightedScore)).filter(Number.isFinite);
+                if (scores.length) {
+                    const avg = scores.reduce((a, b) => a + b, 0) / scores.length;
+                    const sessionScore = Math.round(avg * 100);
+                    lines.push(`Your total score this session was ${sessionScore}.`);
+                }
+            } catch { }
             // Always deliver the session review regardless of DOACH_ONLY_REALTIME.
             const out = `Session review. ${lines.join(' ')}`;
             try { window.__lastCoachText = out; } catch { }
@@ -2331,9 +2339,20 @@ window.addEventListener('shot:feedback:request', (e) => {
                 }));
             } catch { }
             try {
-                (window.doachSpeak || window.coachSpeak)?.(out);
-                window.__SESSION_REVIEW_SPOKEN = true;
-            } catch { }
+                const speakJob = (window.doachSpeak || window.coachSpeak)?.(out);
+                try { window.__SESSION_REVIEW_PROMISE = speakJob || null; } catch { }
+                try { window.__SESSION_REVIEW_SPOKEN = true; } catch { }
+                if (speakJob && typeof speakJob.then === 'function') {
+                    speakJob.finally(() => {
+                        try { window.__SESSION_REVIEW_DONE = true; } catch { }
+                    }).catch(() => { });
+                } else {
+                    try { window.__SESSION_REVIEW_DONE = true; } catch { }
+                }
+            } catch {
+                try { window.__SESSION_REVIEW_SPOKEN = true; } catch { }
+                try { window.__SESSION_REVIEW_DONE = true; } catch { }
+            }
             try {
                 if (!window.__NEW_SESSION_PROMPTED) {
                     window.__NEW_SESSION_PROMPTED = true;
@@ -2346,10 +2365,12 @@ window.addEventListener('shot:feedback:request', (e) => {
     // Auto speak summary when HUD ends a session
     try {
         window.addEventListener('hud:end-session', () => {
-            // Allow a moment so the last summary + snapshots settle and audio finish
-            setTimeout(() => { try { summarizeSessionPose(); } catch { } }, 1200);
-            // Failsafe: if nothing spoke yet, try again a bit later
-            setTimeout(() => { try { if (!window.__SESSION_REVIEW_SPOKEN) summarizeSessionPose(); } catch { } }, 2500);
+            const speakDelay = Number(window.SESSION_SUMMARY_TTS_DELAY_MS ?? 3600);
+            const retryDelay = Number(window.SESSION_SUMMARY_TTS_RETRY_MS ?? (speakDelay + 2800));
+            // Allow a moment so the last shot feedback plays before the session wrap-up.
+            setTimeout(() => { try { summarizeSessionPose(); } catch { } }, speakDelay);
+            // Failsafe: if nothing spoke yet, try again a bit later.
+            setTimeout(() => { try { if (!window.__SESSION_REVIEW_SPOKEN) summarizeSessionPose(); } catch { } }, retryDelay);
         });
         // Enable live tips when armed (force on, every shot)
         window.addEventListener('hud:armed', () => {
