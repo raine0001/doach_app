@@ -427,13 +427,22 @@ def _handle_false_shot(ctx: Dict[str, Any]) -> HandlerResult:
                     s.add(last_shot)
                     s.commit()
 
-    reply = (
-        "Sorry about that miscount. I'll flag that shot as a false trigger — take another attempt when you're ready."
-    )
+    if shot_idx is None:
+        return HandlerResult(
+            reply="Which shot should I fix? Tell me \"mark shot 3 false\" or similar.",
+            result_status="pending_user",
+            action_taken={
+                "autofix": "flag_false_shot_pending",
+                "session_id": session_id,
+            },
+            intent="false_shot",
+        )
+
+    reply = f"I've marked shot {shot_idx} as a false trigger. Take another attempt when you're ready."
 
     return HandlerResult(
         reply=reply,
-        result_status="in_progress",
+        result_status="resolved",
         action_taken={
             "autofix": "flag_false_shot",
             "session_id": session_id,
