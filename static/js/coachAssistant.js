@@ -3198,12 +3198,18 @@ Draft to refine (optional): '${draftLine}'` : ''}
         if (window.__doachHFInit) return;          // prevent duplicate init
         window.__doachHFInit = true;
 
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SR) {
-            console.warn('[Doach HF] Web Speech API not available');
-            window.doachHandsFree = { start() { }, stop() { }, toggle() { }, isActive: () => false };
-            return;
-        }
+const ua = (navigator.userAgent || '').toLowerCase();
+if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+    console.warn('[Doach HF] SpeechRecognition disabled on Android; set DOACH_ENABLE_ANDROID_SR=true to override');
+    window.doachHandsFree = { start() { }, stop() { }, toggle() { }, isActive: () => false };
+    return;
+}
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) {
+    console.warn('[Doach HF] Web Speech API not available');
+    window.doachHandsFree = { start() { }, stop() { }, toggle() { }, isActive: () => false };
+    return;
+}
 
         // --- light metrics -> answer helper (kept local to avoid globals)
         function answerFromMetrics(q, last, golden) {
@@ -3442,8 +3448,13 @@ Draft to refine (optional): '${draftLine}'` : ''}
     // DOACH Voice Q&A (single, hardened instance)
     // ───────────────────────────────────────────────
     (function () {
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return; }
+const ua = (navigator.userAgent || '').toLowerCase();
+if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+    console.warn('[Doach Voice] SpeechRecognition disabled on Android; set DOACH_ENABLE_ANDROID_SR=true to override');
+    return;
+}
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return; }
 
         // Wake words (loose match)
         const DOACH = (window.DOACH ||= {});
