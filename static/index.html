@@ -558,7 +558,9 @@
                         try { console.warn('[media] initial access failed', err); } catch { }
                     }
                     if (wantMic) {
-                        try { await window.ensureMicPrimed?.({ audio: true }); } catch { }
+            if (!/android/i.test(navigator.userAgent || '') || window.DOACH_ENABLE_ANDROID_SR === true) {
+              try { await window.ensureMicPrimed?.({ audio: true }); } catch { }
+            }
                         try { window.__startCoachVoiceRecognition?.(); } catch { }
                         try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail })); } catch { }
                         try { window.doachVoice?.on?.(); } catch { }
