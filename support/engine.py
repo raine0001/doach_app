@@ -69,6 +69,10 @@ _INTENT_REGEXES = {
         r"false trigger",
         r"shot logged but i didn't",
         r"logged a shot i didn't take",
+        r"shot\s*\d+\s+(?:wasn'?t|was not)\s+(?:a\s+)?shot",
+        r"shot\s*\d+\s+(?:wasn'?t|was not)\s+(?:a\s+)?(?:good|valid)",
+        r"shot\s*\d+\s+(?:was|is)\s+(?:invalid|false|bad)",
+        r"i did(?:n'?t| not) shoot shot\s*\d+",
     ],
 }
 
@@ -399,16 +403,25 @@ def _handle_false_shot(ctx: Dict[str, Any]) -> HandlerResult:
     details: Dict[str, Any] = {}
     shot_idx = None
 
+    message_text = str(ctx.get("message") or "")
+    manual_idx = None
+    match = re.search(r"shot\s*(\d+)", message_text.lower())
+    if match:
+        try:
+            manual_idx = int(match.group(1))
+            details["requested_shot"] = manual_idx
+        except Exception:
+            manual_idx = None
+
     if session_id:
         ShotRow = db.get("ShotRow")
         if ShotRow is not None:
             with db["Session"]() as s:
-                last_shot = (
-                    s.query(ShotRow)
-                    .filter(ShotRow.sid == session_id)
-                    .order_by(ShotRow.idx.desc())
-                    .first()
-                )
+                query = s.query(ShotRow).filter(ShotRow.sid == session_id)
+                if manual_idx is not None:
+                    last_shot = query.filter(ShotRow.idx == manual_idx).first()
+                else:
+                    last_shot = query.order_by(ShotRow.idx.desc()).first()
                 if last_shot:
                     shot_idx = last_shot.idx
                     details["shot_idx"] = shot_idx
@@ -434,6 +447,7 @@ def _handle_false_shot(ctx: Dict[str, Any]) -> HandlerResult:
             action_taken={
                 "autofix": "flag_false_shot_pending",
                 "session_id": session_id,
+                **details,
             },
             intent="false_shot",
         )

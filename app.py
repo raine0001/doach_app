@@ -5850,6 +5850,145 @@ def api_event_my_rank_route(slug):
     return jsonify(res), status
 
 
+def _event_to_dict(ev):
+    return {
+        "id": ev.id,
+        "slug": ev.slug,
+        "name": ev.name,
+        "start_date": ev.start_date.isoformat() if getattr(ev, "start_date", None) else None,
+        "end_date": ev.end_date.isoformat() if getattr(ev, "end_date", None) else None,
+        "daily_limit": ev.daily_limit,
+        "min_shots": ev.min_shots,
+        "tz": ev.tz,
+        "created_at": ev.created_at.isoformat() if getattr(ev, "created_at", None) else None,
+    }
+
+
+def _parse_date_field(value):
+    if value in (None, "", "null"):
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except Exception:
+        return None
+
+
+@app.get("/admin/events")
+def admin_list_events():
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+    Event = db["Event"]
+    with db["Session"]() as s:
+        events = s.query(Event).order_by(Event.start_date.asc()).all()
+        return jsonify({"ok": True, "events": [_event_to_dict(ev) for ev in events]})
+
+
+@app.post("/admin/events")
+def admin_create_event():
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+    payload = request.get_json(silent=True) or {}
+    slug = (payload.get("slug") or "").strip()
+    name = (payload.get("name") or "").strip()
+    if not slug or not name:
+        return jsonify({"ok": False, "err": "slug and name required"}), 400
+    start_date = _parse_date_field(payload.get("start_date"))
+    end_date = _parse_date_field(payload.get("end_date"))
+    daily_limit = payload.get("daily_limit")
+    min_shots = payload.get("min_shots")
+    tz = (payload.get("tz") or "").strip() or None
+    Event = db["Event"]
+    with db["Session"]() as s:
+        existing = s.query(Event).filter_by(slug=slug).first()
+        if existing:
+            return jsonify({"ok": False, "err": "slug already exists"}), 400
+        ev = Event(
+            slug=slug,
+            name=name,
+            start_date=start_date or date.today(),
+            end_date=end_date or date.today(),
+            daily_limit=int(daily_limit or 1),
+            min_shots=int(min_shots or 10),
+            tz=tz,
+        )
+        s.add(ev)
+        s.commit()
+        s.refresh(ev)
+        return jsonify({"ok": True, "event": _event_to_dict(ev)}), 201
+
+
+@app.patch("/admin/events/<int:event_id>")
+def admin_update_event(event_id):
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+    payload = request.get_json(silent=True) or {}
+    Event = db["Event"]
+    with db["Session"]() as s:
+        ev = s.query(Event).filter_by(id=event_id).first()
+        if not ev:
+            return jsonify({"ok": False, "err": "not found"}), 404
+        slug = payload.get("slug")
+        name = payload.get("name")
+        if slug:
+            slug = slug.strip()
+            if slug and slug != ev.slug:
+                exists = s.query(Event).filter(Event.slug == slug, Event.id != ev.id).first()
+                if exists:
+                    return jsonify({"ok": False, "err": "slug already exists"}), 400
+                ev.slug = slug
+        if name:
+            ev.name = name.strip()
+        if "start_date" in payload:
+            parsed = _parse_date_field(payload.get("start_date"))
+            if parsed:
+                ev.start_date = parsed
+        if "end_date" in payload:
+            parsed = _parse_date_field(payload.get("end_date"))
+            if parsed:
+                ev.end_date = parsed
+        if "daily_limit" in payload and payload.get("daily_limit") is not None:
+            try:
+                ev.daily_limit = int(payload.get("daily_limit"))
+            except Exception:
+                pass
+        if "min_shots" in payload and payload.get("min_shots") is not None:
+            try:
+                ev.min_shots = int(payload.get("min_shots"))
+            except Exception:
+                pass
+        if "tz" in payload:
+            tz = (payload.get("tz") or "").strip() or None
+            ev.tz = tz
+        s.add(ev)
+        s.commit()
+        s.refresh(ev)
+        return jsonify({"ok": True, "event": _event_to_dict(ev)})
+
+
+@app.delete("/admin/events/<int:event_id>")
+def admin_delete_event(event_id):
+    try:
+        db = _ensure_db_or_503()
+    except RuntimeError:
+        return jsonify({"ok": False, "err": "db unavailable"}), 503
+    Event = db["Event"]
+    with db["Session"]() as s:
+        ev = s.query(Event).filter_by(id=event_id).first()
+        if not ev:
+            return jsonify({"ok": False, "err": "not found"}), 404
+        s.delete(ev)
+        s.commit()
+        return jsonify({"ok": True})
+
+
 # ----------------------------------------------------------
 #  Support API (skeleton for in-app help interactions)
 # ----------------------------------------------------------

@@ -76,13 +76,42 @@
 
   const supportReplySend = document.getElementById('supportReplySend');
 
-
-
   const supportResolveBtn = document.getElementById('supportResolveBtn');
 
-
-
   const supportRefreshBtn = document.getElementById('supportRefreshBtn');
+
+  const challengeListEl = document.getElementById('challengeList');
+
+  const challengeForm = document.getElementById('challengeForm');
+
+  const challengeStatusEl = document.getElementById('challengeStatus');
+
+  const challengeSaveBtn = document.getElementById('challengeSaveBtn');
+
+  const challengeDeleteBtn = document.getElementById('challengeDeleteBtn');
+
+  const challengeNewBtn = document.getElementById('challengeNewBtn');
+
+  const challengeInputs = challengeForm ? {
+
+    slug: document.getElementById('challengeSlug'),
+
+    name: document.getElementById('challengeName'),
+
+    start: document.getElementById('challengeStart'),
+
+    end: document.getElementById('challengeEnd'),
+
+    daily: document.getElementById('challengeDailyLimit'),
+
+    minimum: document.getElementById('challengeMinShots'),
+
+    tz: document.getElementById('challengeTz'),
+
+  } : null;
+
+
+
 
 
 
@@ -127,6 +156,14 @@
 
 
   let supportLoading = false;
+  let challenges = [];
+
+
+
+  let activeChallengeId = null;
+
+
+
 
 
 
@@ -4002,6 +4039,502 @@
 
 
 
+  const setChallengeStatus = (msg = '', isError = false) => {
+
+
+
+    if (!challengeStatusEl) return;
+
+
+
+    challengeStatusEl.textContent = msg || '';
+
+
+
+    challengeStatusEl.style.color = isError ? '#f87171' : '#94a3b8';
+
+
+
+  };
+
+
+
+  const updateChallengeButtons = () => {
+
+
+
+    if (!challengeSaveBtn) return;
+
+
+
+    const slugVal = challengeInputs?.slug?.value?.trim() || '';
+
+
+
+    const nameVal = challengeInputs?.name?.value?.trim() || '';
+
+
+
+    challengeSaveBtn.disabled = !(slugVal && nameVal);
+
+
+
+    if (challengeDeleteBtn) challengeDeleteBtn.disabled = !activeChallengeId;
+
+
+
+  };
+
+
+
+  const renderChallenges = () => {
+
+
+
+    if (!challengeListEl) return;
+
+
+
+    challengeListEl.innerHTML = '';
+
+
+
+    if (!challenges.length) {
+
+
+
+      challengeListEl.innerHTML = '<div class="muted" style="padding:8px;">No challenges defined.</div>';
+
+
+
+      return;
+
+
+
+    }
+
+
+
+    const frag = document.createDocumentFragment();
+
+
+
+    challenges.forEach((item) => {
+
+
+
+      const row = document.createElement('div');
+
+
+
+      row.className = 'challenge-row' + (item.id === activeChallengeId ? ' active' : '');
+
+
+
+      const name = document.createElement('div');
+
+
+
+      name.className = 'challenge-name';
+
+
+
+      name.textContent = item.name || item.slug;
+
+
+
+      const dates = document.createElement('div');
+
+
+
+      dates.className = 'challenge-dates';
+
+
+
+      const start = item.start_date || '';
+
+
+
+      const end = item.end_date || '';
+
+
+
+      if (start && end) dates.textContent = start + ' to ' + end;
+
+
+
+      else dates.textContent = start || end || 'No dates';
+
+
+
+      row.appendChild(name);
+
+
+
+      row.appendChild(dates);
+
+
+
+      row.addEventListener('click', () => setActiveChallenge(item.id));
+
+
+
+      frag.appendChild(row);
+
+
+
+    });
+
+
+
+    challengeListEl.appendChild(frag);
+
+
+
+  };
+
+
+
+  const clearChallengeForm = () => {
+
+
+
+    if (!challengeInputs) return;
+
+
+
+    challengeInputs.slug.value = '';
+
+
+
+    challengeInputs.name.value = '';
+
+
+
+    challengeInputs.start.value = '';
+
+
+
+    challengeInputs.end.value = '';
+
+
+
+    challengeInputs.daily.value = '';
+
+
+
+    challengeInputs.minimum.value = '';
+
+
+
+    challengeInputs.tz.value = '';
+
+
+
+    activeChallengeId = null;
+
+
+
+    updateChallengeButtons();
+
+
+
+    setChallengeStatus('');
+
+
+
+    renderChallenges();
+
+
+
+  };
+
+
+
+  const setActiveChallenge = (id) => {
+
+
+
+    if (!challengeInputs) return;
+
+
+
+    const found = challenges.find((c) => c.id === id);
+
+
+
+    if (!found) {
+
+
+
+      clearChallengeForm();
+
+
+
+      return;
+
+
+
+    }
+
+
+
+    activeChallengeId = found.id;
+
+
+
+    challengeInputs.slug.value = found.slug || '';
+
+
+
+    challengeInputs.name.value = found.name || '';
+
+
+
+    challengeInputs.start.value = (found.start_date || '').slice(0, 10);
+
+
+
+    challengeInputs.end.value = (found.end_date || '').slice(0, 10);
+
+
+
+    challengeInputs.daily.value = found.daily_limit != null ? found.daily_limit : '';
+
+
+
+    challengeInputs.minimum.value = found.min_shots != null ? found.min_shots : '';
+
+
+
+    challengeInputs.tz.value = found.tz || '';
+
+
+
+    updateChallengeButtons();
+
+
+
+    setChallengeStatus('');
+
+
+
+    renderChallenges();
+
+
+
+  };
+
+
+
+  const gatherChallengePayload = () => {
+
+
+
+    if (!challengeInputs) return null;
+
+
+
+    return {
+
+
+
+      slug: (challengeInputs.slug.value || '').trim(),
+
+
+
+      name: (challengeInputs.name.value || '').trim(),
+
+
+
+      start_date: challengeInputs.start.value || null,
+
+
+
+      end_date: challengeInputs.end.value || null,
+
+
+
+      daily_limit: challengeInputs.daily.value !== '' ? Number(challengeInputs.daily.value) : null,
+
+
+
+      min_shots: challengeInputs.minimum.value !== '' ? Number(challengeInputs.minimum.value) : null,
+
+
+
+      tz: (challengeInputs.tz.value || '').trim(),
+
+
+
+    };
+
+
+
+  };
+
+
+
+  const loadChallenges = async (force = false) => {
+
+    if (!challengeListEl) return;
+
+    if (!force && challenges.length) {
+
+      renderChallenges();
+
+      updateChallengeButtons();
+
+      return;
+
+    }
+
+    challengeListEl.innerHTML = '<div class="muted" style="padding:8px;">Loading...</div>';
+
+    try {
+
+      const res = await fetch('/admin/events', { credentials: 'include' });
+
+      if (!res.ok) throw new Error('http ' + res.status);
+
+      const data = await res.json();
+
+      challenges = Array.isArray(data?.events) ? data.events : [];
+
+      if (activeChallengeId && !challenges.find((c) => c.id === activeChallengeId)) {
+
+        activeChallengeId = null;
+
+      }
+
+      renderChallenges();
+
+      if (activeChallengeId) setActiveChallenge(activeChallengeId);
+
+      updateChallengeButtons();
+
+      setChallengeStatus('');
+
+    } catch (err) {
+
+      setChallengeStatus('Failed to load challenges: ' + (err.message || err), true);
+
+      challenges = [];
+
+      renderChallenges();
+
+    }
+
+  };
+
+  const saveChallenge = async () => {
+
+    const payload = gatherChallengePayload();
+
+    if (!payload) return;
+
+    if (!payload.slug || !payload.name) {
+
+      setChallengeStatus('Slug and name are required.', true);
+
+      return;
+
+    }
+
+    const method = activeChallengeId ? 'PATCH' : 'POST';
+
+    const url = activeChallengeId ? (`/admin/events/${activeChallengeId}`) : '/admin/events';
+
+    try {
+
+      const res = await fetch(url, {
+
+        method,
+
+        headers: { 'Content-Type': 'application/json' },
+
+        credentials: 'include',
+
+        body: JSON.stringify(payload),
+
+      });
+
+      if (!res.ok) {
+
+        const msg = await res.text();
+
+        throw new Error(msg || res.statusText);
+
+      }
+
+      const data = await res.json();
+
+      if (data?.event?.id) activeChallengeId = data.event.id;
+
+      setChallengeStatus('Challenge saved.');
+
+      await loadChallenges(true);
+
+      if (activeChallengeId) setActiveChallenge(activeChallengeId);
+
+    } catch (err) {
+
+      setChallengeStatus('Save failed: ' + (err.message || err), true);
+
+    }
+
+  };
+
+  const deleteChallenge = async () => {
+
+    if (!activeChallengeId) return;
+
+    if (!confirm('Delete this challenge?')) return;
+
+    try {
+
+      const res = await fetch(`/admin/events/${activeChallengeId}`, {
+
+        method: 'DELETE',
+
+        credentials: 'include',
+
+      });
+
+      if (!res.ok) throw new Error('http ' + res.status);
+
+      setChallengeStatus('Challenge deleted.');
+
+      activeChallengeId = null;
+
+      clearChallengeForm();
+
+      await loadChallenges(true);
+
+    } catch (err) {
+
+      setChallengeStatus('Delete failed: ' + (err.message || err), true);
+
+    }
+
+  };
+
+  if (challengeNewBtn) challengeNewBtn.addEventListener('click', () => {
+
+    clearChallengeForm();
+
+  });
+
+  if (challengeSaveBtn) challengeSaveBtn.addEventListener('click', saveChallenge);
+
+  if (challengeDeleteBtn) challengeDeleteBtn.addEventListener('click', deleteChallenge);
+
+  if (challengeForm) challengeForm.addEventListener('input', updateChallengeButtons);
+
+  updateChallengeButtons();
+
+  if (challengeListEl) loadChallenges();
+
   if (supportReplyInput) supportReplyInput.addEventListener('input', () => updateSupportControls(getSupportEntry(activeSid)));
 
 
@@ -4114,7 +4647,7 @@
 
 
 
-  if (btnRefresh) btnRefresh.addEventListener('click', () => { loadSessions(true); loadSupportMetadata(true); });
+  if (btnRefresh) btnRefresh.addEventListener('click', () => { loadSessions(true); loadSupportMetadata(true); loadChallenges(true); });
 
 
 
@@ -4131,6 +4664,10 @@
 
 
   loadSupportMetadata();
+
+
+
+  loadChallenges();
 
 
 
