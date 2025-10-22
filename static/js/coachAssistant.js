@@ -3800,8 +3800,21 @@ if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return
                 pendingIOSWake = false;
                 start(true);
             };
-            window.addEventListener('coach:voice-rec-start', enableFromGesture);
-            try { window.__enableCoachVoiceWake = enableFromGesture; } catch { }
+            window.addEventListener('coach:voice-rec-start', (event) => {
+                const ua = (navigator.userAgent || '').toLowerCase();
+                if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+                    console.warn('[Doach Voice] Android voice wake suppressed');
+                    return;
+                }
+                enableFromGesture(event);
+            });
+            try { window.__enableCoachVoiceWake = (event) => {
+                const ua = (navigator.userAgent || '').toLowerCase();
+                if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+                    return;
+                }
+                enableFromGesture(event);
+            }; } catch { }
         }
     })();
 
