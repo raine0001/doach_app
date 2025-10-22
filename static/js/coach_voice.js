@@ -691,6 +691,11 @@ export async function ensureMicPrimed(constraints = { audio: true }) {
     if (__micPrimed) return true;
     if (__micPriming) return __micPriming;
 
+    const ua = (navigator.userAgent || '').toLowerCase();
+    if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+        return false;
+    }
+
     __micPriming = (async () => {
         if (!navigator.mediaDevices?.getUserMedia) return false;
         try {
