@@ -720,6 +720,10 @@ try { window.ensureMicPrimed = ensureMicPrimed; } catch { }
 
 export function listenForEndSession(wakePhrase = 'hey doach, end the session', onEnd) {
     try {
+        const ua = (navigator.userAgent || '').toLowerCase();
+        if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+            return () => { };
+        }
         const SR = (window.SpeechRecognition || window.webkitSpeechRecognition);
         if (!SR) return () => { };
 
