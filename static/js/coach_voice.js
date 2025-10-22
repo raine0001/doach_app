@@ -727,6 +727,7 @@ export function listenForEndSession(wakePhrase = 'hey doach, end the session', o
     try {
         const ua = (navigator.userAgent || '').toLowerCase();
         if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+            try { window.__startCoachVoiceRecognition = () => false; } catch { }
             return () => { };
         }
         const SR = (window.SpeechRecognition || window.webkitSpeechRecognition);

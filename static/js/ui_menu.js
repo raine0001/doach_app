@@ -1319,9 +1319,14 @@ async function openMyDoachPanel(){
         localStorage.setItem('doach_voice', prefs.voice);
       } catch {}
       if (window.PREF_ALLOW_MIC === true) {
-        try { await window.ensureMicPrimed?.(); } catch {}
-        try { window.__startCoachVoiceRecognition?.(); } catch {}
-        try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'prefs-apply' } })); } catch {}
+        const ua = (navigator.userAgent || '').toLowerCase();
+        if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+          console.warn('[Doach Voice] Voice enable skipped on Android');
+        } else {
+          try { await window.ensureMicPrimed?.(); } catch {}
+          try { window.__startCoachVoiceRecognition?.(); } catch {}
+          try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'prefs-apply' } })); } catch {}
+        }
       }
       await speakWithUnlock("Voice settings applied.");
     }
@@ -1351,9 +1356,14 @@ async function openMyDoachPanel(){
         localStorage.setItem('doach_voice', prefs.voice);
       } catch {}
       if (window.PREF_ALLOW_MIC === true) {
-        try { await window.ensureMicPrimed?.(); } catch {}
-        try { window.__startCoachVoiceRecognition?.(); } catch {}
-        try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'prefs-test' } })); } catch {}
+        const ua = (navigator.userAgent || '').toLowerCase();
+        if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+          console.warn('[Doach Voice] Voice test skipped on Android');
+        } else {
+          try { await window.ensureMicPrimed?.(); } catch {}
+          try { window.__startCoachVoiceRecognition?.(); } catch {}
+          try { window.dispatchEvent(new CustomEvent('coach:voice-rec-start', { detail: { via: 'prefs-test' } })); } catch {}
+        }
       }
       await speakWithUnlock("This is your Doach voice.");
     }

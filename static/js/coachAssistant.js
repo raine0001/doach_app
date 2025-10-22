@@ -3198,7 +3198,13 @@ Draft to refine (optional): '${draftLine}'` : ''}
         if (window.__doachHFInit) return;          // prevent duplicate init
         window.__doachHFInit = true;
 
-const ua = (navigator.userAgent || '').toLowerCase();
+        const ua = (navigator.userAgent || '').toLowerCase();
+        if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
+            console.warn('[Doach HF] SpeechRecognition disabled on Android; set DOACH_ENABLE_ANDROID_SR=true to override');
+            window.doachHandsFree = { start() { }, stop() { }, toggle() { }, isActive: () => false };
+            return;
+        }
+
 if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
     console.warn('[Doach HF] SpeechRecognition disabled on Android; set DOACH_ENABLE_ANDROID_SR=true to override');
     window.doachHandsFree = { start() { }, stop() { }, toggle() { }, isActive: () => false };
@@ -3453,6 +3459,7 @@ if (!SR) {
 const ua = (navigator.userAgent || '').toLowerCase();
 if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) {
     console.warn('[Doach Voice] SpeechRecognition disabled on Android; set DOACH_ENABLE_ANDROID_SR=true to override');
+    try { window.__startCoachVoiceRecognition = () => false; } catch { }
     return;
 }
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
