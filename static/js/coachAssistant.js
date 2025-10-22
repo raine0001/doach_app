@@ -3263,6 +3263,8 @@ if (!SR) {
 
         async function start() {
             if (hfActive || hfStarting) return;
+            const ua = (navigator.userAgent || '').toLowerCase();
+            if (/android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true) return;
             // permission prime (helps UX)
             if (!window.__doachMicPrimed) {
                 try {
@@ -3612,17 +3614,21 @@ if (!SR) { console.warn('[Doach Voice] SpeechRecognition not supported'); return
             if (listening || starting) return;
             // mic prime improves UX/permissions
             if ((!window.__doachMicPrimed) && navigator.mediaDevices?.getUserMedia) {
-                try {
-                    await navigator.mediaDevices.getUserMedia({ audio: true });
-                    window.__doachMicPrimed = true;
-                    try { doachSetPrefs({ ...doachGetPrefs(), allowMic: true }); } catch { }
-                } catch (err) {
-                    try { console.warn('[Doach Voice] mic prime rejected', err); } catch { }
-                    if (IS_IOS && !force) {
-                        allowIOSWake = false;
-                        pendingIOSWake = true;
+                const ua = (navigator.userAgent || '').toLowerCase();
+                const androidBlocked = /android/.test(ua) && window.DOACH_ENABLE_ANDROID_SR !== true;
+                if (!androidBlocked) {
+                    try {
+                        await navigator.mediaDevices.getUserMedia({ audio: true });
+                        window.__doachMicPrimed = true;
+                        try { doachSetPrefs({ ...doachGetPrefs(), allowMic: true }); } catch { }
+                    } catch (err) {
+                        try { console.warn('[Doach Voice] mic prime rejected', err); } catch { }
+                        if (IS_IOS && !force) {
+                            allowIOSWake = false;
+                            pendingIOSWake = true;
+                        }
+                        return;
                     }
-                    return;
                 }
             }
             armed = true;
