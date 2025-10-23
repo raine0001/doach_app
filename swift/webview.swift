@@ -34,7 +34,11 @@ struct WebAppView: UIViewRepresentable {
         }
         context.coordinator.speech = speech
 
-        AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+        if #available(iOS 17, *) {
+            try? AVAudioApplication.shared().requestRecordPermission()
+        } else {
+            AVAudioSession.sharedInstance().requestRecordPermission { _ in }
+        }
         SFSpeechRecognizer.requestAuthorization { _ in }
 
         context.coordinator.load(url: url, session: session, into: webView)
