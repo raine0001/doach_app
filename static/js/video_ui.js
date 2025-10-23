@@ -45,6 +45,15 @@ window.addEventListener('beforeunload', () => {
       .session-container, #videoPlayer { width:100%; height:100svh; object-fit:cover; }
       #hudRoot { inset: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
       .hud-card, .hud-pill { -webkit-tap-highlight-color: transparent; }
+      .hud-controls { display:flex; gap:12px; align-items:center; }
+      .hud-icon-btn { width:48px; height:48px; border-radius:14px; border:1px solid rgba(255,255,255,0.12); background:rgba(0,0,0,0.55); color:#fff; display:flex; align-items:center; justify-content:center; font-size:22px; line-height:1; padding:0; transition:background .2s, color .2s, box-shadow .2s, border-color .2s; }
+      .hud-icon-btn .icon { display:flex; }
+      .hud-icon-btn.rotate-hint .icon { transform:rotate(90deg); }
+      .hud-icon-btn.is-alert { background:rgba(255,170,0,0.18); border-color:rgba(255,170,0,0.6); color:#ffd89d; box-shadow:0 0 18px rgba(255,170,0,0.5); }
+      #orientationHintBanner { position:absolute; bottom:calc(env(safe-area-inset-bottom,0) + 100px); left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.82); color:#fff; padding:14px 18px; border-radius:16px; font:600 16px/1.35 system-ui,-apple-system,sans-serif; box-shadow:0 18px 40px rgba(0,0,0,0.45); max-width:min(480px,80vw); text-align:center; display:none; pointer-events:none; z-index:10002; }
+      #orientationHintBanner .line-secondary { font-size:13px; opacity:0.8; margin-top:4px; font-weight:500; }
+      #orientationHintBanner.is-visible { display:block; }
+      #videoPlayer.is-letterbox { object-fit:contain !important; background:#000; transition:object-fit .25s ease; }
       button.vc-btn { font: 600 12px system-ui; border-radius: 10px; padding: 6px 10px; }
     `;
         document.head.appendChild(css);
@@ -121,6 +130,7 @@ const ICON_AUDIO_OFF = '\u{1F507}';
 const ICON_CAMERA_FRONT = '\u{1F4F8}';
 const ICON_CAMERA_BACK = '\u{1F4F7}';
 const ICON_CAMERA_SWITCH = '\u{1F503}';
+const ICON_ROTATE_DEVICE = '\u{1F4F1}';
 const SYMBOL_INFINITY = '\u{221E}';
 
 function formatCapDisplay(cap) {
@@ -137,6 +147,144 @@ function currentFacingLabel() {
 }
 function formatHudCameraIcon(lab) {
     return (lab === 'Back') ? ICON_CAMERA_BACK : ICON_CAMERA_FRONT;
+}
+
+function isPortraitOrientation() {
+    try {
+        if (window.matchMedia?.('(orientation: portrait)')?.matches) return true;
+        if (window.matchMedia?.('(orientation: landscape)')?.matches) return false;
+    } catch { }
+    try {
+        if (typeof screen?.orientation?.type === 'string') {
+            return screen.orientation.type.startsWith('portrait');
+        }
+    } catch { }
+    const angle = (typeof screen?.orientation?.angle === 'number')
+        ? screen.orientation.angle
+        : (typeof window.orientation === 'number' ? window.orientation : null);
+    if (typeof angle === 'number') {
+        const normalized = ((angle % 360) + 360) % 360;
+        return normalized === 0 || normalized === 180;
+    }
+    return window.innerHeight >= window.innerWidth;
+}
+
+const orientationHintState = {
+    button: null,
+    tipEl: null,
+    autoShown: false,
+    listenersInstalled: false,
+    resizeTimer: null
+};
+
+function ensureOrientationTipEl() {
+    const root = ensureHudRoot();
+    let el = document.getElementById('orientationHintBanner');
+    if (!el) {
+        el = document.createElement('div');
+        el.id = 'orientationHintBanner';
+        el.setAttribute('role', 'status');
+        el.setAttribute('aria-live', 'polite');
+        el.innerHTML = `
+      <div class="line-primary">Rotate your phone</div>
+      <div class="line-secondary">Landscape tracking works best.</div>
+    `;
+        root.appendChild(el);
+    } else if (!root.contains(el)) {
+        root.appendChild(el);
+    }
+    return el;
+}
+
+function setOrientationTipText(el, heading, detail) {
+    if (!el) return;
+    const head = el.querySelector('.line-primary');
+    const sub = el.querySelector('.line-secondary');
+    if (head && typeof heading === 'string') head.textContent = heading;
+    if (sub && typeof detail === 'string') sub.textContent = detail;
+}
+
+function showOrientationTip({ heading, detail, autoHideMs = 4000 } = {}) {
+    const el = orientationHintState.tipEl || ensureOrientationTipEl();
+    orientationHintState.tipEl = el;
+    const h = heading ?? 'Rotate your phone';
+    const d = detail ?? 'Landscape tracking works best.';
+    setOrientationTipText(el, h, d);
+    el.classList.add('is-visible');
+    if (autoHideMs > 0) {
+        clearTimeout(el.__hideTimer);
+        el.__hideTimer = setTimeout(() => {
+            el.classList.remove('is-visible');
+        }, autoHideMs);
+    }
+}
+
+function hideOrientationTip() {
+    const el = orientationHintState.tipEl;
+    if (!el) return;
+    el.classList.remove('is-visible');
+    if (el.__hideTimer) {
+        clearTimeout(el.__hideTimer);
+        el.__hideTimer = null;
+    }
+}
+
+function updateOrientationHint(opts = {}) {
+    const btn = orientationHintState.button;
+    if (!btn) return;
+    orientationHintState.tipEl ||= ensureOrientationTipEl();
+
+    const portrait = isPortraitOrientation();
+    btn.classList.toggle('is-alert', portrait);
+    btn.setAttribute('aria-pressed', portrait ? 'true' : 'false');
+    btn.setAttribute('aria-label', portrait ? 'Rotate your phone for landscape tracking' : 'Device is in landscape');
+    btn.title = portrait ? 'Rotate your phone for landscape tracking' : 'Landscape ready';
+
+    const video = document.getElementById('videoPlayer');
+    if (video) video.classList.toggle('is-letterbox', portrait);
+
+    if (portrait) {
+        if (opts.forcePrompt || !orientationHintState.autoShown) {
+            showOrientationTip({});
+            orientationHintState.autoShown = true;
+        }
+    } else {
+        orientationHintState.autoShown = false;
+        hideOrientationTip();
+    }
+}
+
+function installOrientationHint(button) {
+    if (!button) return;
+    orientationHintState.button = button;
+    orientationHintState.tipEl = ensureOrientationTipEl();
+
+    if (!button.__orientationClickHandler) {
+        button.__orientationClickHandler = () => {
+            const portrait = isPortraitOrientation();
+            showOrientationTip({
+                heading: portrait ? 'Rotate your phone' : 'Landscape mode ready',
+                detail: portrait ? 'Landscape tracking works best.' : 'You are already set for landscape tracking.',
+                autoHideMs: 3200
+            });
+            if (portrait) orientationHintState.autoShown = true;
+        };
+        button.addEventListener('click', button.__orientationClickHandler);
+    }
+
+    if (!orientationHintState.listenersInstalled) {
+        window.addEventListener('orientationchange', () => {
+            orientationHintState.autoShown = false;
+            updateOrientationHint({ forcePrompt: true });
+        }, { passive: true });
+        window.addEventListener('resize', () => {
+            clearTimeout(orientationHintState.resizeTimer);
+            orientationHintState.resizeTimer = setTimeout(() => updateOrientationHint({}), 120);
+        });
+        orientationHintState.listenersInstalled = true;
+    }
+
+    updateOrientationHint({ forcePrompt: true });
 }
 
 export function mountSessionHUD() {
@@ -159,6 +307,9 @@ export function mountSessionHUD() {
         </button>
         <button id="hudCamFlip" class="hud-icon-btn" aria-label="Switch camera" title="Switch camera">
           <span class="icon" aria-hidden="true">${formatHudCameraIcon(currentFacingLabel())}</span>
+        </button>
+        <button id="hudRotateHint" class="hud-icon-btn rotate-hint" aria-pressed="false" aria-label="Landscape tips" title="Landscape tips">
+          <span class="icon" aria-hidden="true">${ICON_ROTATE_DEVICE}</span>
         </button>
       </div>
       <div class="hud-metric" id="mShots"><div class="num">0/${formatCapDisplay(window.SESSION_SIZE)}</div><div class="label">Shots Taken</div></div>
@@ -370,6 +521,7 @@ export function mountSessionHUD() {
             }
         });
     }
+    installOrientationHint(bar.querySelector('#hudRotateHint'));
     return bar;
 }
 window.mountSessionHUD = mountSessionHUD;
