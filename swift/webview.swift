@@ -4,7 +4,8 @@ import AVFoundation
 import Speech
 
 struct WebAppView: UIViewRepresentable {
-    let urlString: String
+    let url: URL
+    var session: AuthSession?
     private let speech = SpeechBridge()
 
     func makeUIView(context: Context) -> WKWebView {
@@ -15,16 +16,14 @@ struct WebAppView: UIViewRepresentable {
         }
         config.mediaTypesRequiringUserActionForPlayback = []
 
-        // JS -> native messages
-        let ucc = WKUserContentController()
-        ucc.add(context.coordinator, name: "doach") // {action:'startVoice'|'stopVoice'}
-        config.userContentController = ucc
+        let controller = WKUserContentController()
+        controller.add(context.coordinator, name: "doach")
+        config.userContentController = controller
 
         let webView = WKWebView(frame: .zero, configuration: config)
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
 
-        // Native -> JS transcript callback shim
         context.coordinator.onTranscript = { text in
             let escaped = text
                 .replacingOccurrences(of: "\\", with: "\\\\")
@@ -35,23 +34,25 @@ struct WebAppView: UIViewRepresentable {
         }
         context.coordinator.speech = speech
 
-        // Ask mic early (improves UX)
         AVAudioSession.sharedInstance().requestRecordPermission { _ in }
         SFSpeechRecognizer.requestAuthorization { _ in }
 
-        if let url = URL(string: urlString) {
-            webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData))
-        }
+        context.coordinator.load(url: url, session: session, into: webView)
+
         return webView
     }
 
-    func updateUIView(_ uiView: WKWebView, context: Context) {}
+    func updateUIView(_ uiView: WKWebView, context: Context) {
+        context.coordinator.load(url: url, session: session, into: uiView)
+    }
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         var speech: SpeechBridge?
         var onTranscript: ((String) -> Void)?
+        private var lastURL: URL?
+        private var lastSessionSignature: String?
 
         func userContentController(_ userContentController: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
@@ -63,8 +64,44 @@ struct WebAppView: UIViewRepresentable {
                 speech?.start { [weak self] text in self?.onTranscript?(text) }
             case "stopVoice":
                 speech?.stop()
-            default: break
+            default:
+                break
             }
+        }
+
+        func load(url: URL, session: AuthSession?, into webView: WKWebView) {
+            let sessionSignature = session?.signature
+            let needsReload = lastURL != url || lastSessionSignature != sessionSignature
+            guard needsReload else { return }
+
+            lastURL = url
+            lastSessionSignature = sessionSignature
+
+            let applyRequest = {
+                var request = URLRequest(url: url, cachePolicy: .reloadIgnoringLocalCacheData)
+                if let token = session?.accessToken {
+                    request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+                }
+                if let csrf = session?.headerValue(forCaseInsensitiveKey: "X-CSRF-Token") {
+                    request.setValue(csrf, forHTTPHeaderField: "X-CSRF-Token")
+                }
+                webView.load(request)
+            }
+
+            guard let session else {
+                applyRequest()
+                return
+            }
+
+            let store = webView.configuration.websiteDataStore.httpCookieStore
+            let group = DispatchGroup()
+            for cookie in session.cookies {
+                group.enter()
+                store.setCookie(cookie) {
+                    group.leave()
+                }
+            }
+            group.notify(queue: .main, execute: applyRequest)
         }
     }
 }
