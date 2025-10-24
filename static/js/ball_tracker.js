@@ -157,54 +157,120 @@ export function updateBall(arg1, arg2, arg3) {
     try { bs.trail = state.trail; } catch {}
   }
 
-  // Init KF if needed
-  if (!state.kf) {
-    state.kf = new Kalman2D(1, OPT.KF_PROCESS_NOISE, OPT.KF_MEASURE_NOISE);
-    state.kf.initFrom(point.x, point.y);
-  }
-
+  const rawOnly = window.BALL_TRAIL_RAW_ONLY === true;
   const last = state.trail.at?.(-1) || null;
-  const gap = (last && Number.isFinite(last.frame)) ? (frameIndex - last.frame) : 0;
-  if (last && gap > 1) {
-    const fillN = Math.min(gap - 1, OPT.GAP_FILL_MAX);
-    for (let i = 1; i <= fillN; i++) {
-      state.kf.predict(1);
-      const px = state.kf.x[0];
-      const py = state.kf.x[1];
-      state.trail.push({ x: px, y: py, frame: last.frame + i, tMs: last.tMs ?? sampleMs });
-    }
-  }
 
-  const steps = (last && Number.isFinite(last.frame)) ? Math.max(0, frameIndex - (last.frame || frameIndex)) : 1;
-  for (let i = 0; i < steps; i++) state.kf.predict(1);
-  state.kf.update(point.x, point.y);
-
-  let sx = state.kf.x[0], sy = state.kf.x[1];
-  if (last) {
-    const dx = sx - last.x;
-    const dy = sy - last.y;
-    const d = Math.hypot(dx, dy);
-    if (d > OPT.MAX_STEP) {
-      const r = OPT.MAX_STEP / d;
-      sx = last.x + dx * r;
-      sy = last.y + dy * r;
+  const pickDims = (...sources) => {
+    for (const src of sources) {
+      if (!src || typeof src !== 'object') continue;
+      let w = Number(src.w), h = Number(src.h);
+      const roi = src.roi;
+      if (!Number.isFinite(w) && roi) w = Number(roi.w);
+      if (!Number.isFinite(h) && roi) h = Number(roi.h);
+      if (Number.isFinite(w) && Number.isFinite(h)) {
+        const outW = Math.max(1, Math.abs(w));
+        const outH = Math.max(1, Math.abs(h));
+        let roiCopy = null;
+        if (roi && typeof roi === 'object') {
+          const rx = Number(roi.x);
+          const ry = Number(roi.y);
+          const rw = Number(roi.w);
+          const rh = Number(roi.h);
+          if (Number.isFinite(rw) && Number.isFinite(rh)) {
+            roiCopy = {
+              x: Number.isFinite(rx) ? rx : null,
+              y: Number.isFinite(ry) ? ry : null,
+              w: Math.max(1, Math.abs(rw)),
+              h: Math.max(1, Math.abs(rh))
+            };
+          }
+        }
+        return { w: outW, h: outH, roi: roiCopy };
+      }
     }
-  }
+    return null;
+  };
+
+  const dims = pickDims(point, meta);
 
   const conf = Number.isFinite(meta?.conf)
     ? Number(meta.conf)
     : Number.isFinite(point?.score) ? Number(point.score) : 0;
   const via = meta?.via ?? point?.via ?? 'unknown';
-  const sample = {
-    x: sx,
-    y: sy,
-    frame: frameIndex,
-    tMs: sampleMs,
-    conf,
-    via
-  };
+  let sample = null;
 
-  state.trail.push(sample);
+  if (rawOnly) {
+    sample = {
+      x: point.x,
+      y: point.y,
+      frame: frameIndex,
+      tMs: sampleMs,
+      conf,
+      via
+    };
+    if (dims) {
+      sample.w = dims.w;
+      sample.h = dims.h;
+      if (dims.roi) sample.roi = dims.roi;
+    }
+    state.kf = null; // drop any existing smoother when in raw mode
+  } else {
+    // Init KF if needed
+    if (!state.kf) {
+      state.kf = new Kalman2D(1, OPT.KF_PROCESS_NOISE, OPT.KF_MEASURE_NOISE);
+      state.kf.initFrom(point.x, point.y);
+    }
+
+    const gap = (last && Number.isFinite(last.frame)) ? (frameIndex - last.frame) : 0;
+    if (last && gap > 1) {
+      const fillN = Math.min(gap - 1, OPT.GAP_FILL_MAX);
+      for (let i = 1; i <= fillN; i++) {
+        state.kf.predict(1);
+        const px = state.kf.x[0];
+        const py = state.kf.x[1];
+        state.trail.push({ x: px, y: py, frame: last.frame + i, tMs: last.tMs ?? sampleMs });
+      }
+    }
+
+    const steps = (last && Number.isFinite(last.frame)) ? Math.max(0, frameIndex - (last.frame || frameIndex)) : 1;
+    for (let i = 0; i < steps; i++) state.kf.predict(1);
+    state.kf.update(point.x, point.y);
+
+    let sx = state.kf.x[0], sy = state.kf.x[1];
+    if (last) {
+      const dx = sx - last.x;
+      const dy = sy - last.y;
+      const d = Math.hypot(dx, dy);
+      if (d > OPT.MAX_STEP) {
+        const r = OPT.MAX_STEP / d;
+        sx = last.x + dx * r;
+        sy = last.y + dy * r;
+      }
+    }
+
+    sample = {
+      x: sx,
+      y: sy,
+      frame: frameIndex,
+      tMs: sampleMs,
+      conf,
+      via
+    };
+    if (dims) {
+      sample.w = dims.w;
+      sample.h = dims.h;
+      if (dims.roi) sample.roi = dims.roi;
+    }
+  }
+
+  if (!sample) return false;
+
+  const prevSample = state.trail.at?.(-1) || null;
+  if (prevSample && prevSample.frame === sample.frame) {
+    state.trail[state.trail.length - 1] = sample;
+  } else {
+    state.trail.push(sample);
+  }
   try { bs.state = 'TRACKING'; } catch {}
 
   try {

@@ -21,9 +21,19 @@ const CFG = {
 
 // --- Post-release filters ---
 const POST = {
-  MAX_DEV_PX:     () => Number(window.BALL_MAX_DEV_PX ?? 70),   // max distance from predicted
-  MAX_TURN_DEG:   () => Number(window.BALL_MAX_TURN_DEG ?? 60), // max heading change
+  MAX_DEV_PX:        () => Number(window.BALL_MAX_DEV_PX ?? 48),       // max distance from predicted path
+  MAX_TURN_DEG:      () => Number(window.BALL_MAX_TURN_DEG ?? 50),     // heading change ceiling
+  MIN_CONF:          () => Number(window.BALL_MIN_CONF_POST ?? window.BALL_MIN_CONF ?? 0.55),
+  MAX_BACKTRACK:     () => Number(window.BALL_MAX_BACKTRACK ?? 4),     // px the ball can jump upward
+  MIN_ROI_EDGE:      () => Number(window.BALL_MIN_ROI_EDGE ?? 7),
+  MAX_ROI_EDGE:      () => Number(window.BALL_MAX_ROI_EDGE ?? 110),
+  MAX_ROI_ASPECT:    () => Number(window.BALL_MAX_ROI_ASPECT ?? 1.85),
+  MIN_ROI_ASPECT:    () => Number(window.BALL_MIN_ROI_ASPECT ?? 0.55),
+  MAX_ROI_EDGE_RATIO:() => Number(window.BALL_MAX_ROI_EDGE_RATIO ?? 1.8)
 };
+
+const RAW_ONLY = () => window.BALL_TRAIL_RAW_ONLY === true;
+const RAW_MAX_POINTS = () => Number(window.BALL_MAX_POINTS || 360);
 
 const _flt = { last2: [] }; // keep last two accepted post-release points
 
@@ -41,28 +51,92 @@ function predictNext(p1, p2){
   if (!p1 || !p2) return null;
   return { x: p2.x + (p2.x - p1.x), y: p2.y + (p2.y - p1.y) };
 }
+function roiDims(pt){
+  const source = pt?.roi || pt?.box || pt?.bbox || pt?.rect || null;
+  if (!source) return null;
+  let x1, y1, x2, y2;
+  if (Array.isArray(source) && source.length >= 4) {
+    const [a,b,c,d] = source;
+    x1 = Number(a); y1 = Number(b); x2 = Number(c); y2 = Number(d);
+    if ([x1,y1,x2,y2].every(Number.isFinite)) {
+      return { w: Math.abs(x2 - x1), h: Math.abs(y2 - y1) };
+    }
+  }
+  const w = Number(source.w ?? source.width ?? ((source.x2 ?? source.right ?? NaN) - (source.x ?? source.left ?? 0)));
+  const h = Number(source.h ?? source.height ?? ((source.y2 ?? source.bottom ?? NaN) - (source.y ?? source.top ?? 0)));
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return null;
+  return { w: Math.abs(w), h: Math.abs(h) };
+}
+
+function makeFltSample(pt, dims, conf){
+  return {
+    x: pt?.x ?? null,
+    y: pt?.y ?? null,
+    frame: Number.isFinite(pt?.frame) ? Number(pt.frame) : null,
+    w: dims?.w ?? null,
+    h: dims?.h ?? null,
+    conf: Number.isFinite(conf) ? Number(conf) : null
+  };
+}
+
 function filterPostReleaseBall(pt){
-  if (window.isBallExcluded && window.isBallExcluded(ballPt.x, ballPt.y)) return false;
+  if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return null;
 
   try {
-    const last = _flt.last2.at(-1);
-    const prev = _flt.last2.at(-2);
-    if (!last || !prev) { _flt.last2.push(pt); return pt; }
+    if (window.isBallExcluded && window.isBallExcluded(pt.x, pt.y)) return null;
+  } catch {}
 
-    // heading gate
+  try {
+    if (window.isOrangeish && !window.isOrangeish(pt.x, pt.y)) return null;
+  } catch {}
+
+  const conf = Number(pt.conf ?? pt.confidence ?? pt.score ?? pt.prob ?? pt.confidenceScore ?? NaN);
+  if (Number.isFinite(conf) && conf < POST.MIN_CONF()) return null;
+
+  const last = _flt.last2.at?.(-1) || null;
+  const prev = _flt.last2.at?.(-2) || null;
+
+  if (last && Number.isFinite(last.y) && pt.y < last.y - POST.MAX_BACKTRACK()) return null;
+
+  const dims = roiDims(pt);
+  if (dims) {
+    const edge = Math.max(dims.w, dims.h);
+    if (edge < POST.MIN_ROI_EDGE() || edge > POST.MAX_ROI_EDGE()) return null;
+    const aspect = dims.h > 0 ? dims.w / dims.h : 1;
+    if (aspect < POST.MIN_ROI_ASPECT() || aspect > POST.MAX_ROI_ASPECT()) return null;
+    if (last && Number.isFinite(last.w) && Number.isFinite(last.h)) {
+      const lastEdge = Math.max(last.w, last.h);
+      if (Number.isFinite(lastEdge) && lastEdge > 0) {
+        const ratio = edge / lastEdge;
+        const ceiling = POST.MAX_ROI_EDGE_RATIO();
+        if (ratio > ceiling || ratio < (1 / Math.max(ceiling, 1.0001))) return null;
+      }
+    }
+  }
+
+  if (!last || !prev) {
+    _flt.last2.push(makeFltSample(pt, dims, conf));
+    if (_flt.last2.length > 2) _flt.last2.shift();
+    return pt;
+  }
+
+  try {
     const hPrev = headingDeg(prev, last);
     const hNew  = headingDeg(last, pt);
     if (angleDiffDeg(hPrev, hNew) > POST.MAX_TURN_DEG()) return null;
 
-    // distance-from-prediction gate
     const pred = predictNext(prev, last);
-    const dev = Math.hypot(pt.x - pred.x, pt.y - pred.y);
-    if (dev > POST.MAX_DEV_PX()) return null;
+    if (pred) {
+      const dev = Math.hypot(pt.x - pred.x, pt.y - pred.y);
+      if (dev > POST.MAX_DEV_PX()) return null;
+    }
+  } catch {
+    // if math fails, fall back to accepting the point but keep the guard buffer updated
+  }
 
-    _flt.last2.push(pt);
-    if (_flt.last2.length > 2) _flt.last2.shift();
-    return pt;
-  } catch { return pt; }
+  _flt.last2.push(makeFltSample(pt, dims, conf));
+  if (_flt.last2.length > 2) _flt.last2.shift();
+  return pt;
 }
 
 // --- Pre-release filters ---
@@ -139,20 +213,28 @@ function resetShotFSM() {
    return true;
  }
 
- function collectPreArc(frame, ballPt, hoopBox){
-   const H = normHoop(hoopBox);
-   if (!acceptPreBall(ballPt, H)) return;
-   _state.preArc.push({ x: ballPt.x, y: ballPt.y, frame });
-   _state.preArcLast = { x: ballPt.x, y: ballPt.y };
-   if (_state.preArc.length > 30) _state.preArc.splice(0, _state.preArc.length - 30);
- }
+function collectPreArc(frame, ballPt, hoopBox){
+  if (RAW_ONLY()) return;
+  const H = normHoop(hoopBox);
+  if (!acceptPreBall(ballPt, H)) return;
+  _state.preArc.push({ x: ballPt.x, y: ballPt.y, frame });
+  _state.preArcLast = { x: ballPt.x, y: ballPt.y };
+  if (_state.preArc.length > 30) _state.preArc.splice(0, _state.preArc.length - 30);
+}
 
- function flushPreArc(hoopBox){
-   if (_state.preFlushed || !_state.preArc.length) return;
-   const H = normHoop(hoopBox), prox = proxFromHoop(H);
-   for (const p of _state.preArc) { try { stepFBFArc?.(p, prox, p.frame); } catch {} }
-   _state.preFlushed = true;
- }
+function flushPreArc(hoopBox){
+  if (RAW_ONLY()) {
+    if (!_state.preFlushed) {
+      _state.preFlushed = true;
+      _state.preArc.length = 0;
+    }
+    return;
+  }
+  if (_state.preFlushed || !_state.preArc.length) return;
+  const H = normHoop(hoopBox), prox = proxFromHoop(H);
+  for (const p of _state.preArc) { try { stepFBFArc?.(p, prox, p.frame); } catch {} }
+  _state.preFlushed = true;
+}
 
 // quick HSV-ish gate: keep orange-ish blobs
 window.isOrangeish = (x,y)=> {
@@ -381,6 +463,9 @@ function updateArc(frame, ballPt, hoopBox) {
   const prox = proxFromHoop(H);
   if (!ballPt || !prox) return false;
 
+  const arc = (window.ballArc ||= { trail: [], prox: null });
+  if (prox) arc.prox = prox;
+
   // After latch, also ensure buffered trail is merged
   try {
     const bs = (window.ballState ||= {});
@@ -392,8 +477,21 @@ function updateArc(frame, ballPt, hoopBox) {
   const clean = filterPostReleaseBall(ballPt);
   if (!clean) return false;
 
-  
-  const lastArc = window.ballArc?.trail?.at?.(-1) || null;
+  if (RAW_ONLY()) {
+    const frameNum = Number(frame);
+    const frameVal = Number.isFinite(frameNum) ? frameNum : (arc.trail.at?.(-1)?.frame ?? 0);
+    const last = arc.trail.at?.(-1);
+    if (!last || last.frame !== frameVal || last.x !== clean.x || last.y !== clean.y) {
+      arc.trail.push({ x: clean.x, y: clean.y, frame: frameVal });
+      const cap = RAW_MAX_POINTS();
+      if (Number.isFinite(cap) && cap > 0 && arc.trail.length > cap) {
+        arc.trail.splice(0, arc.trail.length - cap);
+      }
+    }
+    return true;
+  }
+
+  const lastArc = arc.trail?.at?.(-1) || null;
   if (!lastArc || lastArc.frame !== frame) {
     try { stepFBFArc?.(clean, prox, frame); } catch {}
   }

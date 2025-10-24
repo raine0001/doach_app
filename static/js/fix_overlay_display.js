@@ -614,7 +614,7 @@ if (typeof window.__LOCAL_DETECTOR   === 'undefined') window.__LOCAL_DETECTOR   
       const scoreOf = (d) => Number(d?.score ?? d?.confidence ?? 0);
       const labelOf = (d) => d?.label ?? d?.class ?? d?.type ?? null;
       const isBall  = (lab) => /\b(ball|basketball|sports_ball)\b/i.test(String(lab||''));
-      let chosen = null, roi=null;
+      let chosen = null, roi = null;
       for (const d of items) {
         const lab = labelOf(d);
         if (!isBall(lab)) continue;
@@ -629,10 +629,23 @@ if (typeof window.__LOCAL_DETECTOR   === 'undefined') window.__LOCAL_DETECTOR   
           const bh=Number(box.h ?? box.height?? ((box.bottom?? NaN)-(box.y ?? box.top  ?? 0)));
           if ([bx,by,bw,bh].every(Number.isFinite)) { cx=bx+bw/2; cy=by+bh/2; roi={x:bx,y:by,w:bw,h:bh}; }
         }
-        if (Number.isFinite(cx) && Number.isFinite(cy)) { chosen = { x:cx, y:cy, conf:sc }; break; }
+        if (Number.isFinite(cx) && Number.isFinite(cy)) { chosen = { x: cx, y: cy, conf: sc }; break; }
       }
       if (chosen) {
-        window.dispatchEvent(new CustomEvent('ball:point', { detail: { ...chosen, frame: frameIndex, tMs, via, roi } }));
+        if (roi) {
+          chosen.roi = { x: roi.x, y: roi.y, w: roi.w, h: roi.h };
+          if (Number.isFinite(roi.w)) chosen.w = roi.w;
+          if (Number.isFinite(roi.h)) chosen.h = roi.h;
+        }
+        window.dispatchEvent(new CustomEvent('ball:point', {
+          detail: {
+            ...chosen,
+            frame: frameIndex,
+            tMs,
+            via,
+            roi: roi || null
+          }
+        }));
       }
     } catch {}
   };

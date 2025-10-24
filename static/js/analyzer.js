@@ -501,6 +501,33 @@ function pickBallCenter(objects, player, hoopLocked) {
       .sort((a,b)=> (b.w*b.h) - (a.w*a.h));
     if (!balls.length) return null;
 
+    const formatBall = (entry) => {
+      if (!entry) return null;
+      const x = Math.round(entry.cx);
+      const y = Math.round(entry.cy);
+      const rawW = Number.isFinite(entry.w) ? Math.abs(entry.w) : null;
+      const rawH = Number.isFinite(entry.h) ? Math.abs(entry.h) : null;
+      let roi = null;
+      if (entry.o && Array.isArray(entry.o.box) && entry.o.box.length === 4) {
+        const [x1, y1, x2, y2] = entry.o.box;
+        if ([x1,y1,x2,y2].every(Number.isFinite)) {
+          roi = {
+            x: Math.min(x1, x2),
+            y: Math.min(y1, y2),
+            w: Math.abs(x2 - x1),
+            h: Math.abs(y2 - y1)
+          };
+        }
+      }
+      const out = { x, y };
+      const finalW = Number.isFinite(rawW) ? rawW : (roi ? roi.w : null);
+      const finalH = Number.isFinite(rawH) ? rawH : (roi ? roi.h : null);
+      if (Number.isFinite(finalW)) out.w = Math.max(1, Math.round(finalW));
+      if (Number.isFinite(finalH)) out.h = Math.max(1, Math.round(finalH));
+      if (roi) out.roi = roi;
+      return out;
+    };
+
     // Player reject zone
     const pb = (player && Array.isArray(player.box) && player.box.length===4) ? player.box : null;
     const Hc = hoopLocked ? canonHoop(hoopLocked) : null;
@@ -538,21 +565,21 @@ function pickBallCenter(objects, player, hoopLocked) {
         .sort((a,b)=> (a.lat === b.lat ? a.d - b.d : a.lat - b.lat));
       const best = candidates[0] || null;
       if (best && (best.d <= maxStep || insideProx(best.c) || nearHoopY(best.c)))
-        return { x: Math.round(best.c.cx), y: Math.round(best.c.cy) };
+        return formatBall(best.c);
       // No acceptable candidate near last: if we are inside prox, allow the nearest inside-prox one
       const proxCand = balls.find(c => aspectOK(c) && insideProx(c));
-      if (proxCand) return { x: Math.round(proxCand.cx), y: Math.round(proxCand.cy) };
+      if (proxCand) return formatBall(proxCand);
       return null;
     }
 
     // Prefer candidates not inside the player box unless they are near hoop/prox (tolerate legitimate near-rim contact)
     for (const c of balls) {
       if (!aspectOK(c)) continue;
-      if (!insidePlayer(c) || insideProx(c) || nearHoopY(c)) return { x: Math.round(c.cx), y: Math.round(c.cy) };
+      if (!insidePlayer(c) || insideProx(c) || nearHoopY(c)) return formatBall(c);
     }
     // Fallback to the largest if all are inside player (rare)
     const top = balls[0];
-    return { x: Math.round(top.cx), y: Math.round(top.cy) };
+    return formatBall(top);
   } catch { return null; }
 }
 
@@ -827,7 +854,8 @@ async function stepOnce(videoEl, canvasEl, frameIdx, buf, bctx) {
         const bs = (window.ballState ||= {});
         const arc = (window.ballArc && Array.isArray(window.ballArc.trail)) ? window.ballArc.trail : [];
         const sinceRel = (bs.releaseFrame != null) ? (frameIdx - bs.releaseFrame) : Infinity;
-        const wantSynth = (sinceRel >= 1 && sinceRel <= 24 && (arc.length || 0) < 4 && (window.__E2E_ARC_SYNTH !== false));
+        const rawOnlyMode = window.BALL_TRAIL_RAW_ONLY === true;
+        const wantSynth = (!rawOnlyMode && sinceRel >= 1 && sinceRel <= 24 && (arc.length || 0) < 4 && (window.__E2E_ARC_SYNTH !== false));
         if (wantSynth) {
           const Hc = canonHoop(hoopLocked);
           const start = bs.releasePos || ballCenter || { x: Hc.cx - (Hc.w||60)*3, y: Hc.rimTop + (Hc.h||60)*1.8 };

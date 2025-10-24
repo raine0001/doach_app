@@ -322,6 +322,8 @@
 
         window.DOACH_SFX_ENABLED = !/android/i.test(navigator.userAgent || '');
 
+        window.BALL_TRAIL_RAW_ONLY = true;
+
         
 
 
@@ -994,30 +996,55 @@
 
         function drawArcOverlay(ctx) {
 
-            const arc = window.ballArc || {};
+            const rawOnly = window.BALL_TRAIL_RAW_ONLY === true;
 
-            const frozen = arc.refinedTrailFrozen;
+            const pullArcTrail = () => {
+                const arc = window.ballArc || {};
+                const frozen = arc.refinedTrailFrozen;
+                const current = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+                return (frozen && frozen.length) ? frozen : current;
+            };
 
-            const current = (arc.refinedTrail && arc.refinedTrail.length) ? arc.refinedTrail : (arc.trail || []);
+            let trail = null;
 
-            const trail = (frozen && frozen.length) ? frozen : current;
+            if (rawOnly) {
+                const fromArc = pullArcTrail();
+                const persistent = Array.isArray(window.__ballTrailPersistent) && window.__ballTrailPersistent.length
+                    ? window.__ballTrailPersistent
+                    : null;
+                const live = Array.isArray(fromArc) && fromArc.length ? fromArc : null;
+                const fallback = Array.isArray(window.__ballTrail) && window.__ballTrail.length
+                    ? window.__ballTrail
+                    : null;
+                trail = persistent || live || fallback;
+            } else {
+                trail = pullArcTrail();
+            }
 
-            if (!trail || !trail.length) return;
+            if (!Array.isArray(trail) || !trail.length) return;
 
-
+            if (rawOnly) {
+                ctx.save();
+                const radius = 7;
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = 'rgba(255,165,0,0.95)';
+                for (const pt of trail) {
+                    const x = Number(pt?.x), y = Number(pt?.y);
+                    if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+                    ctx.beginPath();
+                    ctx.arc(x, y, radius, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+                ctx.restore();
+                return;
+            }
 
             ctx.save();
-
             ctx.lineWidth = 4;
-
             ctx.strokeStyle = 'rgba(255,165,0,0.95)';
-
             ctx.beginPath(); ctx.moveTo(trail[0].x, trail[0].y);
-
             for (let i = 1; i < trail.length; i++) ctx.lineTo(trail[i].x, trail[i].y);
-
             ctx.stroke();
-
             ctx.restore();
 
         }
@@ -1170,17 +1197,21 @@
 
 
 
-                // optional: trim any points that appear *below* rim center by more than one hoop height
+                if (window.BALL_TRAIL_RAW_ONLY !== true) {
 
-                const hoop = window.getLockedHoopBox?.();
+                    // optional: trim any points that appear *below* rim center by more than one hoop height
 
-                if (hoop) {
+                    const hoop = window.getLockedHoopBox?.();
 
-                    const rimY = hoop.rimY ?? hoop.y ?? hoop.cy;
+                    if (hoop) {
 
-                    const cutoff = rimY + (hoop.h || 40) * 1.2;
+                        const rimY = hoop.rimY ?? hoop.y ?? hoop.cy;
 
-                    while (clean.length && clean[clean.length - 1].y > cutoff) clean.pop();
+                        const cutoff = rimY + (hoop.h || 40) * 1.2;
+
+                        while (clean.length && clean[clean.length - 1].y > cutoff) clean.pop();
+
+                    }
 
                 }
 
@@ -2446,6 +2477,15 @@
 
                 })();
 
+                try {
+                    const fpsHint = Number(v?.dataset?.fps);
+                    const fps = Number.isFinite(fpsHint) && fpsHint > 0 ? fpsHint : FBF_ANALYSIS_FPS;
+                    if (Number.isFinite(lastTrailFrame) && fps > 0) {
+                        const targetTime = lastTrailFrame / fps;
+                        await seekVideoTime(v, targetTime);
+                    }
+                } catch { }
+
                 const frameIndexForSummary = Math.max(lastTrailFrame || 0, FBF_KNOWN_TOTAL_FRAMES);
 
 
@@ -2475,6 +2515,12 @@
                     }
 
                 } catch { }
+
+                if (window.BALL_TRAIL_RAW_ONLY === true && Array.isArray(shotTrail) && shotTrail.length) {
+
+                    try { window.__ballTrailPersistent = shotTrail.map(p => ({ x: p.x, y: p.y, frame: p.frame })); } catch { }
+
+                }
 
 
 

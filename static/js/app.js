@@ -5,7 +5,7 @@
 // Leaves: session start/end, cap, persistence, table rendering to other modules.
 
 try { window.__appJsLoaded = true; } catch { }
-try { window.DEFER_FE_SUMMARY = false; } catch {}
+try { window.DEFER_FE_SUMMARY = false; } catch { }
 
 function computePoseScoreFallback(snapshot, baseWeighted = null, debugTag = null, opts = {}) {
     if (!snapshot || typeof snapshot !== 'object') return null;
@@ -463,7 +463,7 @@ function computePoseScoreFallback(snapshot, baseWeighted = null, debugTag = null
             })));
             console.groupEnd();
         }
-    } catch {}
+    } catch { }
 
     try {
         const store = (window.__POSE_SCORE_DEBUG ||= new Map());
@@ -476,11 +476,11 @@ function computePoseScoreFallback(snapshot, baseWeighted = null, debugTag = null
             if (firstKey === undefined) break;
             store.delete(firstKey);
         }
-    } catch {}
+    } catch { }
 
     return poseScore;
 }
-try { window.computePoseScoreFallback = computePoseScoreFallback; } catch {}
+try { window.computePoseScoreFallback = computePoseScoreFallback; } catch { }
 // ---------- Imports (only what this file actually uses) ----------
 import {
     ensureOverlayCss,
@@ -885,7 +885,7 @@ window.poseDetectSerial = poseDetectSerial;
                 sum.poseScore = Math.round(sum.weightedScore * 100);
             }
 
-console.log('[score:microclip:final]', {
+            console.log('[score:microclip:final]', {
                 shotId,
                 poseScore: sum.poseScore ?? null,
                 weightedScore: sum.weightedScore ?? null
@@ -898,30 +898,30 @@ console.log('[score:microclip:final]', {
     }
     window.emitMicroclipSummary = emitMicroclipSummary; // keep fallback callable
 
-        async function startMicroClip(shotId, releaseFrame = null) {
-            if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) {
-                window.updateShot?.(shotId, { clip: { status: 'disabled' } });
-                emitMicroclipSummary(shotId);
-                return;
-            }
+    async function startMicroClip(shotId, releaseFrame = null) {
+        if (!window.USE_MICROCLIP || !window.__CLIPS_AVAILABLE) {
+            window.updateShot?.(shotId, { clip: { status: 'disabled' } });
+            emitMicroclipSummary(shotId);
+            return;
+        }
 
-            const v = document.getElementById('videoPlayer');
+        const v = document.getElementById('videoPlayer');
 
-            // Prefer the landscape canvas compositor
-            let comp = window.__landscapeRecController;
-            if (!comp && typeof window.startLandscapeRecorder === 'function') {
+        // Prefer the landscape canvas compositor
+        let comp = window.__landscapeRecController;
+        if (!comp && typeof window.startLandscapeRecorder === 'function') {
             try {
-            comp = await window.startLandscapeRecorder(v, { width: 1280, height: 720, fps: 30 });
-            window.__landscapeRecController = comp;
-        } catch {}
+                comp = await window.startLandscapeRecorder(v, { width: 1280, height: 720, fps: 30 });
+                window.__landscapeRecController = comp;
+            } catch { }
         }
 
         // Fall back if compositor isn?t available
         const stream = comp?.stream || v?.captureStream?.() || v?.srcObject;
         if (!stream || !stream.getVideoTracks?.().length) {
-        window.updateShot?.(shotId, { clip: { status: stream ? 'no-video-track' : 'no-stream' } });
-        emitMicroclipSummary(shotId);
-        return;
+            window.updateShot?.(shotId, { clip: { status: stream ? 'no-video-track' : 'no-stream' } });
+            emitMicroclipSummary(shotId);
+            return;
         }
 
         if (!stream || !stream.getVideoTracks?.().length) {
@@ -1109,7 +1109,7 @@ function clonePoseSnapshotLocal(snap) {
             return !!(inf && Number.isFinite(inf.capturedAt) && (Date.now() - inf.capturedAt) <= maxAgeMs);
         } catch { return false; }
     }
-    try { window.__poseIsFreshFor = poseSnapshotIsFresh; } catch {}
+    try { window.__poseIsFreshFor = poseSnapshotIsFresh; } catch { }
 
     const reset = () => { try { api.clear(); } catch { }; };
     window.addEventListener('hud:start-session', reset, { passive: true });
@@ -1150,13 +1150,13 @@ function setPoseIfMissing(shotId, snap) {
             if (video && video.videoWidth && video.videoHeight) {
                 return { width: video.videoWidth, height: video.videoHeight };
             }
-        } catch {}
+        } catch { }
         try {
             const dims = window.__videoDims || window.__lastVideoDims;
             if (dims && Number.isFinite(dims.width) && Number.isFinite(dims.height)) {
                 return { width: dims.width, height: dims.height };
             }
-        } catch {}
+        } catch { }
         return { width: 1280, height: 720 };
     }
 
@@ -1471,7 +1471,7 @@ function setPoseIfMissing(shotId, snap) {
         state.lastPoseTs = 0;
         state.lastFrame = null;
         state.lastReset = { ts: Date.now(), reason };
-        try { window.__lastBoundPoseBox = null; } catch {}
+        try { window.__lastBoundPoseBox = null; } catch { }
     }
 
     function bindingSupportActive(opts = {}) {
@@ -1490,7 +1490,7 @@ function setPoseIfMissing(shotId, snap) {
         const boxCopy = poseRect
             ? { x: poseRect.x, y: poseRect.y, w: poseRect.w, h: poseRect.h }
             : null;
-        try { window.__lastBoundPoseBox = { box: boxCopy, ts: now }; } catch {}
+        try { window.__lastBoundPoseBox = { box: boxCopy, ts: now }; } catch { }
 
         const state = ensureBindingState();
         if (boxCopy) {
@@ -2192,7 +2192,7 @@ function setPoseIfMissing(shotId, snap) {
                 usedBallFallback,
                 confirm: { net_flow: null, sparse_ball_bridge: null },
             };
-            try { window.__lastReleaseMetrics = releaseMetrics; } catch {}
+            try { window.__lastReleaseMetrics = releaseMetrics; } catch { }
 
             const gatePayload = {
                 score: gateResult.score ?? null,
@@ -2323,107 +2323,107 @@ function setPoseIfMissing(shotId, snap) {
             const lockTrackId = faceMgr?.lock?.trackId ?? window.__playerLock?.trackId ?? null;
             window.dispatchEvent(new CustomEvent('shot:release', { detail: { shotId, frame: fnum, via, prox, poseApproved: !!opts.poseApproved, trackId: lockTrackId } }));
 
-        // Microclip or summary fallback
-        if (window.USE_MICROCLIP && window.__CLIPS_AVAILABLE) {
-            window.__startMicroClip?.(shotId, fnum);
-        } else {
-            try { window.emitMicroclipSummary?.(shotId); } catch { }
-        }
-
-        // ===== BRUTAL MODE: guarantee usable pose + a summary even if clip stalls =====
-        let snapNowStatus = 'not-run';
-        let snapNowSummary = null;
-        try {
-            const snapNow = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
-            if (snapNow) {
-                const storedSnap = setPoseIfMissing(shotId, snapNow) || snapNow;
-                if (!canonicalSnapshot && storedSnap) {
-                    canonicalSnapshot = storedSnap;
-                    try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release-immediate', overwrite: true }); } catch { }
-                    persistReleaseMark(canonicalSnapshot, 'release-immediate').catch(() => { });
-                } else {
-                    try { window.poseStore?.set(shotId, storedSnap, { source: 'release-immediate', overwrite: false }); } catch { }
-                }
-                snapNowStatus = 'captured';
-                snapNowSummary = summarizePose(storedSnap);
+            // Microclip or summary fallback
+            if (window.USE_MICROCLIP && window.__CLIPS_AVAILABLE) {
+                window.__startMicroClip?.(shotId, fnum);
             } else {
-                snapNowStatus = 'empty';
+                try { window.emitMicroclipSummary?.(shotId); } catch { }
             }
-        } catch (err) {
-            snapNowStatus = 'error';
-            console.warn('[pose:brutal] immediate capture error', { shotId, frame: fnum, error: String(err) });
-        }
-        if (window.DOACH_RELEASE_TRACE === true || snapNowStatus !== 'captured') {
-            const payload = { shotId, frame: fnum, snapNowStatus, snapshot: snapNowSummary || null };
-            if (!payload.snapshot) delete payload.snapshot;
-            console.log('[pose:brutal] immediate capture status', payload)
-        }
 
-        setTimeout(() => {
-            let snapLaterStatus = 'not-run';
-            let snapLaterSummary = null;
+            // ===== BRUTAL MODE: guarantee usable pose + a summary even if clip stalls =====
+            let snapNowStatus = 'not-run';
+            let snapNowSummary = null;
             try {
-                const snapLater = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
-                if (snapLater) {
-                    const storedSnap = setPoseIfMissing(shotId, snapLater) || snapLater;
+                const snapNow = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
+                if (snapNow) {
+                    const storedSnap = setPoseIfMissing(shotId, snapNow) || snapNow;
                     if (!canonicalSnapshot && storedSnap) {
                         canonicalSnapshot = storedSnap;
-                        try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release-delayed', overwrite: true }); } catch { }
-                        persistReleaseMark(canonicalSnapshot, 'release-delayed').catch(() => { });
+                        try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release-immediate', overwrite: true }); } catch { }
+                        persistReleaseMark(canonicalSnapshot, 'release-immediate').catch(() => { });
                     } else {
-                        try { window.poseStore?.set(shotId, storedSnap, { source: 'release-delayed', overwrite: false }); } catch { }
+                        try { window.poseStore?.set(shotId, storedSnap, { source: 'release-immediate', overwrite: false }); } catch { }
                     }
-                    snapLaterStatus = 'captured';
-                    snapLaterSummary = summarizePose(storedSnap);
+                    snapNowStatus = 'captured';
+                    snapNowSummary = summarizePose(storedSnap);
                 } else {
-                    snapLaterStatus = 'empty';
+                    snapNowStatus = 'empty';
                 }
-                window.emitMicroclipSummary?.(shotId);
             } catch (err) {
-                snapLaterStatus = 'error';
-                console.warn('[pose:brutal] delayed capture error', { shotId, frame: fnum, error: String(err) });
-            } finally {
-                if (window.DOACH_RELEASE_TRACE === true || snapLaterStatus !== 'captured') {
-                    const payload = { shotId, frame: fnum, snapLaterStatus, snapshot: snapLaterSummary || null };
-                    if (!payload.snapshot) delete payload.snapshot;
-                    console.log('[pose:brutal] delayed capture status', payload)
-                }
+                snapNowStatus = 'error';
+                console.warn('[pose:brutal] immediate capture error', { shotId, frame: fnum, error: String(err) });
             }
-        }, 650);
+            if (window.DOACH_RELEASE_TRACE === true || snapNowStatus !== 'captured') {
+                const payload = { shotId, frame: fnum, snapNowStatus, snapshot: snapNowSummary || null };
+                if (!payload.snapshot) delete payload.snapshot;
+                console.log('[pose:brutal] immediate capture status', payload)
+            }
+
+            setTimeout(() => {
+                let snapLaterStatus = 'not-run';
+                let snapLaterSummary = null;
+                try {
+                    const snapLater = window.capturePoseSnapshot?.(window.playerState, window.getLockedHoopBox?.());
+                    if (snapLater) {
+                        const storedSnap = setPoseIfMissing(shotId, snapLater) || snapLater;
+                        if (!canonicalSnapshot && storedSnap) {
+                            canonicalSnapshot = storedSnap;
+                            try { window.poseStore?.set(shotId, canonicalSnapshot, { source: 'release-delayed', overwrite: true }); } catch { }
+                            persistReleaseMark(canonicalSnapshot, 'release-delayed').catch(() => { });
+                        } else {
+                            try { window.poseStore?.set(shotId, storedSnap, { source: 'release-delayed', overwrite: false }); } catch { }
+                        }
+                        snapLaterStatus = 'captured';
+                        snapLaterSummary = summarizePose(storedSnap);
+                    } else {
+                        snapLaterStatus = 'empty';
+                    }
+                    window.emitMicroclipSummary?.(shotId);
+                } catch (err) {
+                    snapLaterStatus = 'error';
+                    console.warn('[pose:brutal] delayed capture error', { shotId, frame: fnum, error: String(err) });
+                } finally {
+                    if (window.DOACH_RELEASE_TRACE === true || snapLaterStatus !== 'captured') {
+                        const payload = { shotId, frame: fnum, snapLaterStatus, snapshot: snapLaterSummary || null };
+                        if (!payload.snapshot) delete payload.snapshot;
+                        console.log('[pose:brutal] delayed capture status', payload)
+                    }
+                }
+            }, 650);
 
 
 
 
 
-        // Ask coach (UI can overlay tips, voice happens on summary)
-        window.dispatchEvent(new CustomEvent('shot:feedback:request', { detail: { shotId, via } }));
+            // Ask coach (UI can overlay tips, voice happens on summary)
+            window.dispatchEvent(new CustomEvent('shot:feedback:request', { detail: { shotId, via } }));
 
-        // Disarm immediately; re-arm after a short settle
-        try { window.__shotTrackingArmed = false; } catch { }
-        try { window.armAfterArmDown?.({ sampleMs: 90, minDownFrames: 8 }); } catch { }
+            // Disarm immediately; re-arm after a short settle
+            try { window.__shotTrackingArmed = false; } catch { }
+            try { window.armAfterArmDown?.({ sampleMs: 90, minDownFrames: 8 }); } catch { }
 
-        if (attemptEntry) {
-            attemptEntry.release = {
+            if (attemptEntry) {
+                attemptEntry.release = {
+                    shotId,
+                    usedBallFallback,
+                    binding: poseBinding.mode || null,
+                    gateScore: gateResult.score ?? null,
+                    poseCaptureOk,
+                    poseCaptureSource,
+                    poseHistoryFrames: poseHistoryFrames,
+                    ballOk: !!(ballCheck?.ok || fallbackPoseOnly),
+                };
+            }
+            return pushAttempt(true, {
                 shotId,
-                usedBallFallback,
-                binding: poseBinding.mode || null,
-                gateScore: gateResult.score ?? null,
                 poseCaptureOk,
                 poseCaptureSource,
-                poseHistoryFrames: poseHistoryFrames,
-                ballOk: !!(ballCheck?.ok || fallbackPoseOnly),
-            };
+                poseHistoryFrameCount: poseHistoryFrames.length,
+                usedBallFallback,
+            });
+        } finally {
+            window.__releaseEvaluating = false;
         }
-        return pushAttempt(true, {
-            shotId,
-            poseCaptureOk,
-            poseCaptureSource,
-            poseHistoryFrameCount: poseHistoryFrames.length,
-            usedBallFallback,
-        });
-    } finally {
-        window.__releaseEvaluating = false;
-    }
     };
 })();
 
